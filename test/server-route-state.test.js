@@ -217,6 +217,168 @@ describe("server-route-state POST", () => {
     assert.deepStrictEqual(late.calls.updateSession, []);
   });
 
+  it("accepts DSH projection metadata without consuming a lifecycle event sequence", async () => {
+    const fence = createDshStateSequenceFence();
+    const metadataCalls = [];
+    const common = {
+      agent_id: "deepseek-harness",
+      hook_source: "dsh-plugin",
+      session_id: "deepseek-harness:projected",
+    };
+    const post = (body) => callStatePost(JSON.stringify({ ...common, ...body }), {
+      ctx: { updateSessionMetadata: acceptedMetadataSpy(metadataCalls) },
+      options: { dshStateSequenceFence: fence },
+    });
+    const started = await post({ event: "SessionStart", state: "idle", session_seq: 0 });
+    const metadata = await post({
+      metadata_only: true,
+      session_title: "Fix DSH integration",
+      context_usage: { used: 78, limit: 100, percent: 78 },
+    });
+    const event = await post({ event: "UserPromptSubmit", state: "thinking", event_seq: 0 });
+    assert.strictEqual(started.statusCode, 200);
+    assert.strictEqual(metadata.statusCode, 204);
+    assert.strictEqual(metadata.headers[CLAWD_METADATA_ACCEPTED_HEADER], "1");
+    assert.strictEqual(metadata.calls.updateSession.length, 0);
+    assert.deepStrictEqual(metadataCalls[0][1], {
+      sessionTitle: "Fix DSH integration",
+      contextUsage: { used: 78, limit: 100, percent: 78 },
+      contextUsageOrigin: null,
+      expectedAgentId: "deepseek-harness",
+    });
+    assert.strictEqual(event.statusCode, 200);
+    assert.strictEqual(fence.snapshot(common.session_id).lastEventSeq, 0);
+  });
+
+  it("rejects DSH projection metadata outside the plugin's canonical session namespace", async () => {
+    const metadataCalls = [];
+    const post = (body) => callStatePost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      metadata_only: true,
+      session_title: "Invalid",
+      ...body,
+    }), {
+      ctx: { updateSessionMetadata: acceptedMetadataSpy(metadataCalls) },
+      options: { dshStateSequenceFence: createDshStateSequenceFence() },
+    });
+    const foreignSource = await post({ hook_source: "external", session_id: "deepseek-harness:s1" });
+    const wrongNamespace = await post({ hook_source: "dsh-plugin", session_id: "codex:s1" });
+    assert.strictEqual(foreignSource.statusCode, 204);
+    assert.strictEqual(wrongNamespace.statusCode, 204);
+    assert.deepStrictEqual(metadataCalls, []);
+  });
+
+  it("DSH projection metadata annotates an existing session without creating a ghost or extending activity", async () => {
+    const api = makeMetadataStateRuntime();
+    const rawId = "deepseek-harness:observed";
+    const sessionId = localSessionKey(rawId);
+    const post = (fields = {}) => callStatePost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      hook_source: "dsh-plugin",
+      session_id: rawId,
+      metadata_only: true,
+      session_title: "DSH task",
+      context_usage: { used: 78, limit: 100, percent: 78 },
+      ...fields,
+    }), {
+      ctx: { updateSessionMetadata: api.updateSessionMetadata },
+      options: { dshStateSequenceFence: createDshStateSequenceFence() },
+    });
+    try {
+      const unknown = await post();
+      assert.strictEqual(unknown.headers[CLAWD_METADATA_ACCEPTED_HEADER], undefined);
+      assert.strictEqual(api.sessions.size, 0);
+
+      api.updateSession(sessionId, "idle", "SessionStart", {
+        agentId: "deepseek-harness", profileId: "local", rawSessionId: rawId,
+      });
+      const before = api.sessions.get(sessionId).updatedAt;
+      const accepted = await post();
+      const session = api.sessions.get(sessionId);
+      assert.strictEqual(accepted.headers[CLAWD_METADATA_ACCEPTED_HEADER], "1");
+      assert.strictEqual(session.sessionTitle, "DSH task");
+      assert.deepStrictEqual(session.contextUsage, { used: 78, limit: 100, percent: 78 });
+      assert.strictEqual(session.updatedAt, before);
+      assert.strictEqual(session.state, "idle");
+
+      const unavailable = await post({ session_title: undefined, context_usage: null });
+      assert.strictEqual(unavailable.headers[CLAWD_METADATA_ACCEPTED_HEADER], "1");
+      assert.strictEqual(session.contextUsage, null);
+      assert.strictEqual(session.updatedAt, before);
+    } finally {
+      api.cleanup();
+    }
+  });
+
+  it("drops DSH projection metadata when the raw id belongs to another agent's session", async () => {
+    const api = makeMetadataStateRuntime();
+    const rawId = "deepseek-harness:collision";
+    const sessionId = localSessionKey(rawId);
+    const post = (body, ctx = { updateSessionMetadata: api.updateSessionMetadata }) => callStatePost(
+      JSON.stringify({
+        agent_id: "deepseek-harness",
+        hook_source: "dsh-plugin",
+        session_id: rawId,
+        metadata_only: true,
+        ...body,
+      }),
+      {
+        ctx,
+        options: { dshStateSequenceFence: createDshStateSequenceFence() },
+      },
+    );
+    try {
+      // A different agent owns a session whose raw id happens to start with
+      // DSH's namespace. DSH metadata must not be able to annotate it.
+      api.updateSession(sessionId, "working", "PreToolUse", {
+        agentId: "codex",
+        profileId: "local",
+        rawSessionId: rawId,
+      });
+      api.updateSessionMetadata(sessionId, {
+        sessionTitle: "codex owns this",
+        contextUsage: { used: 1, limit: 10, percent: 10 },
+      });
+      const collision = api.sessions.get(sessionId);
+      const beforeTitle = collision.sessionTitle;
+      const beforeUsage = collision.contextUsage;
+      const rejected = await post({
+        session_title: "DSH takeover",
+        context_usage: { used: 78, limit: 100, percent: 78 },
+      });
+      assert.strictEqual(rejected.statusCode, 204);
+      assert.strictEqual(rejected.headers[CLAWD_METADATA_ACCEPTED_HEADER], undefined);
+      assert.strictEqual(collision.sessionTitle, beforeTitle);
+      assert.deepStrictEqual(collision.contextUsage, beforeUsage);
+
+      // DSH's own session on the same namespace is still annotated.
+      const dshRaw = "deepseek-harness:own";
+      const dshKey = localSessionKey(dshRaw);
+      api.updateSession(dshKey, "idle", "SessionStart", {
+        agentId: "deepseek-harness",
+        profileId: "local",
+        rawSessionId: dshRaw,
+      });
+      const accepted = await callStatePost(JSON.stringify({
+        agent_id: "deepseek-harness",
+        hook_source: "dsh-plugin",
+        session_id: dshRaw,
+        metadata_only: true,
+        session_title: "DSH own",
+        context_usage: { used: 78, limit: 100, percent: 78 },
+      }), {
+        ctx: { updateSessionMetadata: api.updateSessionMetadata },
+        options: { dshStateSequenceFence: createDshStateSequenceFence() },
+      });
+      assert.strictEqual(accepted.headers[CLAWD_METADATA_ACCEPTED_HEADER], "1");
+      const dshSession = api.sessions.get(dshKey);
+      assert.strictEqual(dshSession.sessionTitle, "DSH own");
+      assert.deepStrictEqual(dshSession.contextUsage, { used: 78, limit: 100, percent: 78 });
+    } finally {
+      api.cleanup();
+    }
+  });
+
   it("fails DSH state closed when its sequence fence or required watermark is unavailable", async () => {
     const body = {
       agent_id: "deepseek-harness",

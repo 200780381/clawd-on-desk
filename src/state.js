@@ -1545,14 +1545,32 @@ function updateSessionMetadata(sessionId, opts = {}) {
     debugSession(`metadata-only drop sid=${id} reason=no-session`);
     return false;
   }
+  // Some metadata channels bypass the lifecycle sequence fence, so they must
+  // prove they only annotate their own agent's session. Without this, a
+  // metadata-only POST could rewrite the title/usage of a session that another
+  // agent happened to create with a colliding raw id. Absent means the legacy
+  // "annotate whatever exists" behavior (opencode-family, statusline, ...).
+  const expectedAgentId = typeof opts.expectedAgentId === "string" ? opts.expectedAgentId : null;
+  if (expectedAgentId && session.agentId !== expectedAgentId) {
+    debugSession(`metadata-only drop sid=${id} reason=agent-mismatch expected=${expectedAgentId} actual=${session.agentId}`);
+    return false;
+  }
   const incomingContextUsage = normalizeContextUsage(opts.contextUsage);
   const incomingTitle = typeof opts.sessionTitle === "string"
     ? normalizeTitle(opts.sessionTitle)
     : null;
   const incomingModel = typeof opts.model === "string" ? opts.model.trim() : "";
-  if (!incomingContextUsage && !incomingTitle && !incomingModel) return false;
+  const clearContextUsage = opts.clearContextUsage === true;
+  if (!incomingContextUsage && !clearContextUsage && !incomingTitle && !incomingModel) return false;
   let applied = false;
-  if (incomingContextUsage) {
+  if (clearContextUsage) {
+    if (session.contextUsage || session.contextUsageOrigin) {
+      session.contextUsage = null;
+      session.contextUsageOrigin = null;
+      session.metadataUpdatedAt = Date.now();
+      applied = true;
+    }
+  } else if (incomingContextUsage) {
     const resolved = resolveContextUsageUpdate(
       session,
       incomingContextUsage,
