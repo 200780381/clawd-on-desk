@@ -2,11 +2,23 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
 
 const {
   classifyClaudeHookHealthStatus,
   CLAUDE_HOOK_BADGE_SIGNATURES,
 } = require("../src/claude-hook-health-badge");
+const { SUPPORTED_LANGS } = require("../src/i18n");
+
+function loadSettingsI18nStrings() {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "settings-i18n.js"), "utf8");
+  const context = {};
+  context.globalThis = context;
+  vm.runInNewContext(source, context);
+  return context.ClawdSettingsI18n.STRINGS;
+}
 
 describe("classifyClaudeHookHealthStatus", () => {
   it("warns on manual-fix-required with the manual-fix reason key", () => {
@@ -70,5 +82,17 @@ describe("classifyClaudeHookHealthStatus", () => {
   it("exposes the warning signatures table for the two direct-mapped states", () => {
     assert.strictEqual(CLAUDE_HOOK_BADGE_SIGNATURES["manual-fix-required"].signature, "manual-fix-required");
     assert.strictEqual(CLAUDE_HOOK_BADGE_SIGNATURES.guarded.reasonKey, "claudeHookHealthReasonGuarded");
+  });
+});
+
+describe("claudeHookHealthReasonSourceMissing hint", () => {
+  it("exists for every locale and never points at Doctor repair", () => {
+    const strings = loadSettingsI18nStrings();
+    for (const lang of SUPPORTED_LANGS) {
+      const hint = strings[lang].claudeHookHealthReasonSourceMissing;
+      assert.strictEqual(typeof hint, "string", `${lang}: missing hint`);
+      assert.ok(hint.length > 0, `${lang}: empty hint`);
+      assert.ok(!hint.includes("Doctor"), `${lang}: hint must not direct users to Doctor: ${hint}`);
+    }
   });
 });
