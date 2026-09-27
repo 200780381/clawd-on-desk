@@ -2711,6 +2711,11 @@ const V2_PERMISSION_BLOCKING_TIMEOUT_MS = 590 * 1000;
 const V2_PERMISSION_MAX_BODY_BYTES = 512 * 1024;
 const V2_STATE_POST_MAX_PENDING = 32;
 const V2_ALWAYS_ALLOW_MAX_ENTRIES = 128;
+// Upper bound on awaiting a host hook registration's dispose(). Upstream
+// opencode v2.0.15 register/dispose are Effect.runPromise calls expected to
+// settle immediately; 2s is generous for a slow service while still bounding
+// plugin unload. A timeout only logs — the local teardown already happened.
+const V2_REGISTRATION_DISPOSE_TIMEOUT_MS = 2000;
 
 /**
  * Create the opencode v2 plugin definition for a specific agent.
@@ -3471,22 +3476,28 @@ export function createOpencodeFamilyPluginV2(config) {
     }
   }
 
+  // Forward every resource verbatim (objects as JSON strings). The whole-body
+  // byte budget checked by the caller is the ONLY truncation boundary: an
+  // "allow" decides the whole ask, so a silently dropped or clipped resource
+  // would approve something the user never saw.
+  function normalizeV2Resources(value) {
+    const resources = Array.isArray(value) ? value : [];
+    return resources.map((item) => (typeof item === "string" ? item
+      : (item && typeof item === "object" ? JSON.stringify(item) : String(item))));
+  }
+
   function buildV2PermissionBody(event, requestId) {
     const sessionId = normalizeSessionId(typeof event.sessionID === "string" ? event.sessionID : "")
       || DEFAULT_SESSION_ID;
     const action = typeof event.action === "string" && event.action ? event.action : "unknown";
-    const resources = Array.isArray(event.resources) ? event.resources : [];
-    const boundedResources = resources
-      .map((value) => (typeof value === "string" ? value
-        : (value && typeof value === "object" ? JSON.stringify(value).slice(0, 4096) : String(value))))
-      .slice(0, 16);
+    const forwardedResources = normalizeV2Resources(event.resources);
     const body = {
       agent_id: AGENT_ID,
       hook_source: HOOK_SOURCE,
       tool_name: action,
-      tool_input: boundedResources.length === 1
-        ? { resource: boundedResources[0] }
-        : { resources: boundedResources },
+      tool_input: forwardedResources.length === 1
+        ? { resource: forwardedResources[0] }
+        : { resources: forwardedResources },
       // v2 has no host-side pattern persistence; the single always-candidate is
       // the action itself and resolves to a session-scoped in-plugin rule.
       patterns: [],
@@ -3507,8 +3518,9 @@ export function createOpencodeFamilyPluginV2(config) {
 
   // Decision contract with Clawd's v2 blocking adapter (server-route-permission
   // opencode-v2 branch): 200 + identity header + JSON { decision, message? }
-  // resolves the await; 204 / identity mismatch / unparseable body / timeout /
-  // transport error all mean "no decision" and leave the effect untouched.
+  // resolves the await; every other status (including 204), identity mismatch,
+  // unparseable body, timeout and transport error all mean "no decision" and
+  // leave the effect untouched.
   async function deliverV2BlockingPermission(snapshot) {
     const candidates = getPermissionPortCandidates();
     for (const port of candidates) {
@@ -3531,6 +3543,13 @@ export function createOpencodeFamilyPluginV2(config) {
           return { decision: null };
         }
         const text = await res.text();
+        // Only a 200 carries Clawd's decision. A 403/500 body that happens to
+        // contain a valid JSON decision must never be honoured — drain it and
+        // treat it as no-decision so the native prompt takes over.
+        if (res.status !== 200) {
+          debugLog(`PERM[${snapshot.reqId}] port=${port} status=${res.status} no-decision`);
+          return { decision: null };
+        }
         let parsed = null;
         try { parsed = JSON.parse(text); } catch {}
         const decision = parsed && typeof parsed.decision === "string" ? parsed.decision : null;
@@ -3571,6 +3590,11 @@ export function createOpencodeFamilyPluginV2(config) {
     const toolCallId = event.source && typeof event.source.id === "string" && event.source.id
       ? event.source.id
       : `req${++_permissionReqCounter}`;
+    // `request_id` stays tool-call-scoped: E1/E2 evidence shows one tool call
+    // can raise SEVERAL distinct asks (external_directory + edit) that all share
+    // source.id and this request_id, so it is NOT an ask identity. Every ask is
+    // forwarded independently — residual hooks are removed by disposing their
+    // registration (see setup), never by collapsing content here.
     const requestId = `v2:${toolCallId}`;
     const body = buildV2PermissionBody(event, requestId);
     const payload = JSON.stringify(body);
@@ -3621,32 +3645,84 @@ export function createOpencodeFamilyPluginV2(config) {
       const app = ctx && ctx.app && typeof ctx.app === "object" ? ctx.app : {};
       debugLog(`INIT v2 pid=${process.pid} app=${app.name || "?"}@${app.version || "?"} gate=${managedGate.mode}`);
 
-      // Reload idempotency: a host reload() re-runs setup. Abort the previous
-      // subscription so exactly one event loop and one evaluate hook stay live.
-      if (definition._dispose) {
-        try { definition._dispose(); } catch {}
-        definition._dispose = null;
-      }
-
+      // Reload idempotency: a host reload() re-runs setup. Tear down the
+      // previous generation so exactly one event loop and one evaluate hook stay
+      // live. The teardown is captured locally (not read off the shared field at
+      // call time) so a later, superseded cleanup cannot touch this generation.
       const controller = new AbortController();
-
-      if (ctx && ctx.permission && typeof ctx.permission.hook === "function") {
+      const instance = { disposed: false, registration: null };
+      const disposeRegistration = (registration) => {
+        if (!registration) return undefined;
+        if (typeof registration === "function") return registration();
+        if (typeof registration.dispose === "function") return registration.dispose();
+        return undefined;
+      };
+      // Bounded wrapper: a host whose registration.dispose() hangs must not
+      // wedge reload or plugin unload. The bound only logs; local teardown has
+      // already run by the time this is called.
+      const disposeRegistrationBounded = (registration) => {
+        let pending;
         try {
-          ctx.permission.hook("evaluate", (event) => {
-            // Never throw into the host: a rejected evaluate callback must not
-            // wedge the permission pipeline.
-            return handleV2PermissionEvaluate(event).catch((err) => {
-              debugLog(`PERM hook error: ${err && err.message}`);
-            });
-          });
-          debugLog("EVALUATE hook registered");
+          pending = disposeRegistration(registration);
         } catch (err) {
-          debugLog(`EVALUATE register-failed: ${err && err.message}`);
+          debugLog(`EVALUATE dispose-failed: ${err && err.message}`);
+          return Promise.resolve();
         }
-      } else {
-        debugLog("EVALUATE unavailable: no ctx.permission.hook");
+        if (!pending || typeof pending.then !== "function") return Promise.resolve(pending);
+        return new Promise((resolve) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            debugLog(`EVALUATE dispose-timeout ms=${V2_REGISTRATION_DISPOSE_TIMEOUT_MS}`);
+            resolve();
+          }, V2_REGISTRATION_DISPOSE_TIMEOUT_MS);
+          if (timer && typeof timer.unref === "function") timer.unref();
+          pending.then(
+            () => { if (settled) return; settled = true; clearTimeout(timer); resolve(); },
+            (err) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              debugLog(`EVALUATE dispose-failed: ${err && err.message}`);
+              resolve();
+            },
+          );
+        });
+      };
+      // Local teardown is SYNCHRONOUS and runs BEFORE the (possibly slow)
+      // registration dispose: a superseded generation must not clear the next
+      // instance's identity-recovery state when its dispose finally resolves.
+      const disposeThisInstance = () => {
+        instance.disposed = true;
+        controller.abort();
+        dropV2IdentityRecovery();
+        const registration = instance.registration;
+        instance.registration = null;
+        return disposeRegistrationBounded(registration);
+      };
+
+      // Publish THIS instance's dispose BEFORE any await. A reload that starts
+      // while we are still setting up can then retire us, and the registration
+      // is disposed the moment it resolves instead of leaving a live hook.
+      const previousDispose = definition._dispose;
+      definition._dispose = disposeThisInstance;
+      if (previousDispose) {
+        try {
+          const pending = previousDispose();
+          // NEVER await the previous generation's registration dispose: a slow
+          // or hung host dispose must not delay this generation's subscription.
+          // Its own promise is already bounded and never rejects.
+          if (pending && typeof pending.catch === "function") pending.catch(() => {});
+        } catch {}
+      }
+      if (instance.disposed) {
+        return async () => {};
       }
 
+      // Event subscription FIRST — state reporting must never wait on the
+      // permission-hook registration (a host that never resolves hook() would
+      // otherwise leave Clawd blind to all v2 events).
       if (ctx && ctx.event && typeof ctx.event.subscribe === "function") {
         void (async () => {
           for await (const envelope of ctx.event.subscribe({ signal: controller.signal })) {
@@ -3673,15 +3749,57 @@ export function createOpencodeFamilyPluginV2(config) {
         debugLog("EVENT subscribe unavailable");
       }
 
-      definition._dispose = () => {
-        controller.abort();
-        dropV2IdentityRecovery();
-      };
-      return () => {
-        if (definition._dispose) {
-          try { definition._dispose(); } catch {}
-          definition._dispose = null;
+      // Hook registration is DETACHED: setup never blocks on it. opencode
+      // upstream v2.0.15 (packages/plugin/src/promise/registration.ts) returns
+      // Promise<Registration>; a synchronous function / { dispose() } object is
+      // tolerated too.
+      if (ctx && ctx.permission && typeof ctx.permission.hook === "function") {
+        let registrationPromise;
+        try {
+          registrationPromise = ctx.permission.hook("evaluate", (event) => {
+            // opencode upstream v2.0.15 (packages/core/src/plugin/hooks.ts)
+            // trigger() calls every still-registered callback in sequence with
+            // the SAME mutable event, and our own registration.dispose() is
+            // async — so during a reload window the retired generation's
+            // callback can still fire. It must do nothing: otherwise it would
+            // forward an ask the current generation then forwards again.
+            if (instance.disposed) return;
+            // Never throw into the host: a rejected evaluate callback must not
+            // wedge the permission pipeline.
+            return handleV2PermissionEvaluate(event).catch((err) => {
+              debugLog(`PERM hook error: ${err && err.message}`);
+            });
+          });
+        } catch (err) {
+          debugLog(`EVALUATE register-failed: ${err && err.message}`);
+          registrationPromise = null;
         }
+        if (registrationPromise) {
+          Promise.resolve(registrationPromise).then((registration) => {
+            if (instance.disposed) {
+              // Retired while the registration was in flight: dispose it now.
+              return disposeRegistrationBounded(registration);
+            }
+            instance.registration = registration || null;
+            debugLog("EVALUATE hook registered");
+            return undefined;
+          }, (err) => {
+            // A rejected registration must not fail setup or leak an unhandled
+            // rejection; event handling continues without a live hook.
+            debugLog(`EVALUATE register-failed: ${err && err.message}`);
+          });
+        }
+      } else {
+        debugLog("EVALUATE unavailable: no ctx.permission.hook");
+      }
+
+      return async () => {
+        // Only dispose if this cleanup's generation is still the active one. A
+        // cleanup that fires after a newer setup replaced it must leave the new
+        // subscription and identity-recovery state completely untouched.
+        if (definition._dispose !== disposeThisInstance) return;
+        definition._dispose = null;
+        try { await disposeThisInstance(); } catch {}
       };
     },
   };

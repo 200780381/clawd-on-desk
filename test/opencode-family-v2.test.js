@@ -324,6 +324,165 @@ describe("opencode v2 permission evaluate hook", () => {
     assert.strictEqual(event.effect, "ask");
     assert.strictEqual(fetchStub.calls.length, 0);
   });
+
+  it("PR #1045 follow-up: forwards every resource without a count cap", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const resources = Array.from({ length: 20 }, (_, i) => `res-${i}`);
+    const event = evaluation({ resources });
+    await def.__test.handleV2PermissionEvaluate(event);
+    assert.strictEqual(fetchStub.calls.length, 1);
+    assert.deepStrictEqual(fetchStub.calls[0].body.tool_input.resources, resources);
+  });
+
+  it("PR #1045 follow-up: never truncates a large object resource", async (t) => {
+    const { def } = await makeDefinition();
+    const big = { resource: "y".repeat(5000) };
+    const body = def.__test.buildV2PermissionBody(evaluation({ resources: [big] }), "v2:call_obj");
+    assert.deepStrictEqual(body.tool_input, { resource: JSON.stringify(big) });
+    assert.ok(body.tool_input.resource.length > 4096, "the object must not be truncated at 4096 chars");
+  });
+
+  it("PR #1045 follow-up: a non-200 response is never a decision", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    for (const [status, decision] of [[403, "allow"], [500, "deny"]]) {
+      fetchStub.calls.length = 0;
+      fetchStub.respondWith(() => ({
+        status,
+        headers: { get: () => "clawd-on-desk" },
+        text: async () => JSON.stringify({ decision }),
+      }));
+      const event = evaluation({ source: { type: "tool", id: `call_${status}` } });
+      await def.__test.handleV2PermissionEvaluate(event);
+      assert.strictEqual(event.effect, "ask", `status=${status} decision=${decision}`);
+      assert.strictEqual(event.message, undefined);
+      assert.strictEqual(fetchStub.calls.length, 1, "the response is still read");
+    }
+  });
+
+  // E1/E2 evidence (docs/investigations/opencode-v2-e1-evidence.md): ONE tool
+  // call can raise several DISTINCT asks (external_directory + edit) that share
+  // source.id / request_id. Dedup must be ask-scoped, never tool-call-scoped, or
+  // the second ask silently reuses the first decision (and an `always` grants a
+  // rule for an action the user never saw).
+  it("forwards distinct asks that share one tool-call id (allow)", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const first = evaluation({
+      action: "external_directory",
+      resources: ["/outside/dir/*"],
+      source: { type: "tool", id: "call_same" },
+    });
+    const second = evaluation({
+      action: "edit",
+      resources: ["/outside/dir/file.txt"],
+      source: { type: "tool", id: "call_same" },
+    });
+    await def.__test.handleV2PermissionEvaluate(first);
+    await def.__test.handleV2PermissionEvaluate(second);
+    assert.strictEqual(first.effect, "allow");
+    assert.strictEqual(second.effect, "allow");
+    assert.deepStrictEqual(fetchStub.calls.map((c) => c.body.tool_name), ["external_directory", "edit"]);
+  });
+
+  it("does not record an always rule for a distinct ask the user never saw", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    fetchStub.respondWith((n) => ({
+      status: 200,
+      headers: { get: () => "clawd-on-desk" },
+      text: async () => JSON.stringify({ decision: n === 1 ? "always" : "allow" }),
+    }));
+    await def.__test.handleV2PermissionEvaluate(evaluation({
+      action: "external_directory",
+      resources: ["/outside/dir/*"],
+      source: { type: "tool", id: "call_same" },
+    }));
+    await def.__test.handleV2PermissionEvaluate(evaluation({
+      action: "edit",
+      resources: ["/outside/dir/file.txt"],
+      source: { type: "tool", id: "call_same" },
+    }));
+    assert.strictEqual(
+      def.__test._alwaysAllowedBySessionAction.has("opencode:ses_v2perm\u0000edit"),
+      false,
+      "edit must not inherit the external_directory always rule"
+    );
+    assert.strictEqual(fetchStub.calls.length, 2, "both distinct asks were forwarded");
+  });
+
+  it("distinguishes asks by resources within one tool call and action", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    // Same session, tool-call id and action — only the resources differ.
+    await def.__test.handleV2PermissionEvaluate(evaluation({
+      action: "external_directory",
+      resources: ["/outside/one/*"],
+      source: { type: "tool", id: "call_res" },
+    }));
+    await def.__test.handleV2PermissionEvaluate(evaluation({
+      action: "external_directory",
+      resources: ["/outside/two/*"],
+      source: { type: "tool", id: "call_res" },
+    }));
+    assert.strictEqual(fetchStub.calls.length, 2, "each distinct resource set is its own ask");
+  });
+
+  it("distinguishes asks by action within one tool call and resources", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    await def.__test.handleV2PermissionEvaluate(evaluation({
+      action: "external_directory",
+      resources: ["/outside/dir/*"],
+      source: { type: "tool", id: "call_action" },
+    }));
+    await def.__test.handleV2PermissionEvaluate(evaluation({
+      action: "edit",
+      resources: ["/outside/dir/*"],
+      source: { type: "tool", id: "call_action" },
+    }));
+    assert.strictEqual(fetchStub.calls.length, 2, "action is part of the ask identity");
+  });
+
+  // A later ask with identical content is a NEW ask and must reach Clawd again.
+  // Only a currently-registered hook may answer; there is no content cache.
+  it("re-asks Clawd after a no-decision (204) for an identical ask", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    fetchStub.respondWith(() => ({
+      status: 204,
+      headers: { get: () => "clawd-on-desk" },
+      text: async () => "",
+    }));
+    const first = evaluation();
+    await def.__test.handleV2PermissionEvaluate(first);
+    assert.strictEqual(first.effect, "ask");
+    const second = evaluation();
+    await def.__test.handleV2PermissionEvaluate(second);
+    assert.strictEqual(second.effect, "ask");
+    assert.strictEqual(fetchStub.calls.length, 2, "an identical later ask is forwarded again");
+  });
+
+  it("re-asks Clawd after an allow for an identical ask", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const first = evaluation();
+    await def.__test.handleV2PermissionEvaluate(first);
+    assert.strictEqual(first.effect, "allow");
+    const second = evaluation();
+    await def.__test.handleV2PermissionEvaluate(second);
+    assert.strictEqual(second.effect, "allow");
+    assert.strictEqual(fetchStub.calls.length, 2, "an allow is not cached across asks");
+  });
 });
 
 describe("opencode v2 entry drift locks", () => {
@@ -1051,5 +1210,453 @@ describe("opencode v2 activation and ownership gates", () => {
     assert.strictEqual(orphan.__test._lastStatePerSession.size, 0, "orphan copy stays inert");
     const starts = fetchStub.calls.filter((c) => c.body && c.body.event === "SessionStart");
     assert.strictEqual(starts.length, 1, "only the live copy reports");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// opencode upstream v2.0.15 hook lifecycle
+// (packages/plugin/src/promise/registration.ts; packages/plugin/src/promise/
+// adapter.ts): `ctx.permission.hook()` returns Promise<Registration>, the host
+// disposes registrations when the plugin scope closes, and setup's cleanup is
+// awaited. Reload must not leak a live hook, and every ask is forwarded
+// independently — there is no content de-dup.
+// ---------------------------------------------------------------------------
+
+// Fake host matching the upstream shape: hook() returns Promise<Registration>,
+// tracks currently-live registrations (what the host would dispatch to), and
+// supports deferred/rejected registration for lifecycle tests.
+function v2SetupCtx(overrides = {}) {
+  const queue = [];
+  const waiters = [];
+  const registrations = new Set();
+  const handlers = [];
+  let hookPlan = null;
+  let disposePlan = null;
+  let disposedCount = 0;
+  let subscribedCount = 0;
+  const ctx = {
+    app: { name: "opencode", version: "2.0.15" },
+    event: {
+      subscribe({ signal } = {}) {
+        subscribedCount += 1;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                if (signal && signal.aborted) {
+                  return Promise.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                }
+                if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+                return new Promise((resolve, reject) => {
+                  const waiter = { resolve };
+                  waiters.push(waiter);
+                  if (signal) {
+                    signal.addEventListener("abort", () => {
+                      const idx = waiters.indexOf(waiter);
+                      if (idx >= 0) waiters.splice(idx, 1);
+                      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                    }, { once: true });
+                  }
+                });
+              },
+            };
+          },
+        };
+      },
+    },
+    permission: {
+      hook(_name, handler) {
+        handlers.push(handler);
+        const planned = hookPlan ? hookPlan(handler) : Promise.resolve();
+        return Promise.resolve(planned).then(() => {
+          registrations.add(handler);
+          return {
+            dispose: async () => {
+              registrations.delete(handler);
+              disposedCount += 1;
+              if (disposePlan) await disposePlan();
+            },
+          };
+        });
+      },
+    },
+    ...overrides,
+  };
+  return {
+    ctx,
+    handlers,
+    get active() { return [...registrations]; },
+    get disposedCount() { return disposedCount; },
+    get subscribed() { return subscribedCount; },
+    setHookPlan(fn) { hookPlan = fn; },
+    setDisposePlan(fn) { disposePlan = fn; },
+    // Mirror upstream hooks.ts trigger(): snapshot the live callback list at
+    // dispatch start, then await each callback in sequence with the SAME event.
+    async dispatch(event) {
+      const list = [...registrations];
+      for (const handler of list) {
+        await handler(event);
+      }
+      return event;
+    },
+    push(envelope) {
+      const waiter = waiters.shift();
+      if (waiter) waiter.resolve({ value: envelope, done: false });
+      else queue.push(envelope);
+    },
+  };
+}
+
+function permissionAsk(overrides = {}) {
+  return {
+    sessionID: "ses_reload_perm",
+    action: "shell",
+    resources: ["rm -rf /"],
+    source: { type: "tool", id: "call_reload" },
+    effect: "ask",
+    ...overrides,
+  };
+}
+
+// Fail loudly if a returned setup promise does not settle quickly.
+function settlesWithin(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} did not settle within ${ms}ms`)), ms);
+      if (timer && typeof timer.unref === "function") timer.unref();
+    }),
+  ]);
+}
+
+// A SINGLE shared hook registry across setups, mirroring upstream hooks.ts: the
+// callbacks map is a per-runtime singleton, so an old registration stays in the
+// list until its (async) dispose completes, alongside the new one.
+function v2HookHost() {
+  const entries = [];
+  let disposePlan = null;
+  const ctxFor = (overrides = {}) => ({
+    app: { name: "opencode", version: "2.0.15" },
+    event: {
+      subscribe() {
+        return { [Symbol.asyncIterator]() { return { next: () => new Promise(() => {}) }; } };
+      },
+    },
+    permission: {
+      hook(_name, handler) {
+        // The entry only becomes effective when the registration resolves,
+        // like the host's register().
+        return Promise.resolve().then(() => {
+          const entry = { handler, disposed: false };
+          entries.push(entry);
+          return {
+            dispose: async () => {
+              if (disposePlan) await disposePlan();
+              entry.disposed = true;
+            },
+          };
+        });
+      },
+    },
+    ...overrides,
+  });
+  return {
+    ctxFor,
+    activeCount() { return entries.filter((entry) => !entry.disposed).length; },
+    handlers() { return entries.filter((entry) => !entry.disposed).map((entry) => entry.handler); },
+    setDisposePlan(fn) { disposePlan = fn; },
+    // Upstream trigger(): snapshot the live list, await each callback in order,
+    // same mutable event.
+    async dispatch(event) {
+      const list = entries.filter((entry) => !entry.disposed).map((entry) => entry.handler);
+      for (const handler of list) await handler(event);
+      return event;
+    },
+  };
+}
+
+describe("opencode v2 reload / dispose ownership", () => {
+  it("a superseded disposer does not abort the current instance's subscription", async (t) => {
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const first = v2SetupCtx();
+    const cleanup1 = await def.setup(first.ctx);
+    const second = v2SetupCtx();
+    const cleanup2 = await def.setup(second.ctx);
+    t.after(cleanup2);
+
+    // The old host cleanup fires after its generation was already replaced.
+    await cleanup1();
+
+    second.push({ type: "session.created", data: { sessionID: "ses_reload" } });
+    await tick(80);
+    assert.ok(
+      fetchStub.calls.some((c) => c.body && c.body.session_id === "opencode:ses_reload"),
+      "the current subscription must keep receiving events"
+    );
+  });
+
+  it("a superseded disposer does not clear the current instance's identity recovery", async (t) => {
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const first = v2SetupCtx();
+    const cleanup1 = await def.setup(first.ctx);
+    const second = v2SetupCtx({ session: { get: () => new Promise(() => {}) } });
+    const cleanup2 = await def.setup(second.ctx);
+    t.after(cleanup2);
+
+    // Open a pending identity lookup on the CURRENT instance, then fire the
+    // superseded generation's cleanup.
+    def.__test.handleV2Event({ type: "session.tool.called", data: { sessionID: "ses_guard", id: "call_g" } });
+    await tick(20);
+    assert.strictEqual(def.__test._hydrationState.get("opencode:ses_guard"), "pending");
+    await cleanup1();
+    assert.strictEqual(
+      def.__test._hydrationState.get("opencode:ses_guard"),
+      "pending",
+      "the current instance's identity recovery must stay pending"
+    );
+    assert.ok(def.__test._pendingIdentityBySession.has("opencode:ses_guard"), "staged events stay staged");
+    assert.strictEqual(fetchStub.calls.length, 0, "nothing is posted for the hung session");
+  });
+
+  it("disposes the Registration on cleanup; a later ask no longer reaches the plugin", async (t) => {
+    // A runtime file gives the plugin a permission port, so "0 POSTs" proves the
+    // disposed hook was never invoked — not merely that no port was available.
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const host = v2SetupCtx();
+    const cleanup = await def.setup(host.ctx);
+    // Setup returns before the detached registration resolves; wait for it so
+    // cleanup exercises the MAIN path (dispose an already-effective
+    // registration), not the late "resolves after retire" path.
+    await tick(10);
+    assert.strictEqual(host.active.length, 1, "one registration while live");
+    assert.strictEqual(host.disposedCount, 0);
+    await cleanup();
+    assert.strictEqual(host.disposedCount, 1, "cleanup disposes the registration");
+    assert.strictEqual(host.active.length, 0, "no registration remains active");
+    await host.dispatch(permissionAsk());
+    assert.strictEqual(fetchStub.calls.length, 0, "a disposed hook never receives an ask");
+  });
+
+  it("a reload disposes the previous registration, leaving one live hook and one POST", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const first = v2SetupCtx();
+    const cleanup1 = await def.setup(first.ctx);
+    // Establish the first registration before reloading so the reload's
+    // teardown disposes an already-effective registration (main path).
+    await tick(10);
+    assert.strictEqual(first.active.length, 1);
+    const second = v2SetupCtx();
+    const cleanup2 = await def.setup(second.ctx);
+    t.after(cleanup2);
+
+    assert.strictEqual(first.disposedCount, 1, "the reload retired the old registration");
+    assert.strictEqual(first.active.length, 0);
+    assert.strictEqual(second.active.length, 1, "exactly one live registration");
+    // Dispatch through what the host considers live: exactly one POST.
+    const event = permissionAsk();
+    await second.dispatch(event);
+    assert.strictEqual(event.effect, "allow");
+    assert.strictEqual(fetchStub.calls.length, 1, "one POST for one ask");
+
+    // A late call of the superseded cleanup must not disturb the new instance.
+    await cleanup1();
+    assert.strictEqual(second.active.length, 1, "the new registration stays live");
+  });
+
+  it("tolerates a legacy synchronous unregister function from ctx.permission.hook", async (t) => {
+    const { def } = await makeDefinition();
+    let unregistered = 0;
+    const cleanup = await def.setup({
+      app: { name: "opencode", version: "2.0.15" },
+      permission: {
+        hook() {
+          return () => { unregistered += 1; };
+        },
+      },
+    });
+    assert.strictEqual(unregistered, 0);
+    await cleanup();
+    assert.strictEqual(unregistered, 1, "the legacy unregister function is invoked on dispose");
+  });
+
+  it("keeps setup and event delivery alive when hook registration rejects", async (t) => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    t.after(() => process.removeListener("unhandledRejection", onRejection));
+
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const host = v2SetupCtx();
+    host.setHookPlan(() => Promise.reject(new Error("register boom")));
+    const cleanup = await def.setup(host.ctx);
+    t.after(cleanup);
+    assert.strictEqual(host.active.length, 0, "no live registration");
+
+    host.push({ type: "session.created", data: { sessionID: "ses_reject" } });
+    await tick(80);
+    await tick(20);
+    assert.ok(
+      fetchStub.calls.some((c) => c.body && c.body.session_id === "opencode:ses_reject"),
+      "event subscription must continue without a hook"
+    );
+    assert.deepStrictEqual(rejections, [], "a rejected registration must not leak an unhandled rejection");
+  });
+
+  it("disposes a registration that resolves after the instance was retired", async (t) => {
+    const { def } = await makeDefinition();
+    let releaseRegistration;
+    const gate = new Promise((resolve) => { releaseRegistration = resolve; });
+    const first = v2SetupCtx();
+    first.setHookPlan(() => gate);
+    const firstSetup = def.setup(first.ctx); // parks on the pending registration
+
+    const second = v2SetupCtx();
+    const cleanup2 = await def.setup(second.ctx);
+    t.after(cleanup2);
+    // The second setup retired the first instance while its registration was
+    // still in flight: it has no effective registration yet.
+    assert.strictEqual(first.active.length, 0, "the late registration is not effective yet");
+    assert.strictEqual(second.active.length, 1);
+
+    releaseRegistration();
+    await firstSetup;
+    await tick(20);
+    assert.strictEqual(first.disposedCount, 1, "the late registration was disposed immediately");
+    assert.strictEqual(first.active.length, 0, "no live registration leaks from the retired instance");
+  });
+
+  // Robustness: setup must never wedge on the host. A never-settling previous
+  // dispose or hook registration must not delay the new generation's event
+  // subscription, and a slow previous dispose must not clear the current
+  // instance's identity recovery.
+  it("subscribes without waiting for the previous generation's dispose", async (t) => {
+    const { def } = await makeDefinition();
+    const first = v2SetupCtx();
+    await def.setup(first.ctx);
+    await tick(10);
+    assert.strictEqual(first.active.length, 1, "previous registration established");
+    first.setDisposePlan(() => new Promise(() => {})); // never settles
+
+    const second = v2SetupCtx();
+    const cleanup2 = await settlesWithin(def.setup(second.ctx), 300, "second setup");
+    t.after(cleanup2);
+    await tick(10);
+    assert.strictEqual(second.subscribed, 1, "the new generation must subscribe to events");
+    assert.strictEqual(second.active.length, 1, "its hook registration is live");
+  });
+
+  it("subscribes without waiting for ctx.permission.hook to resolve", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const host = v2SetupCtx();
+    host.setHookPlan(() => new Promise(() => {})); // never settles
+    const cleanup = await settlesWithin(def.setup(host.ctx), 300, "setup");
+    t.after(cleanup);
+    assert.strictEqual(host.subscribed, 1, "event subscription must not wait on the hook");
+
+    host.push({ type: "session.created", data: { sessionID: "ses_nohook" } });
+    await tick(80);
+    assert.ok(
+      fetchStub.calls.some((c) => c.body && c.body.session_id === "opencode:ses_nohook"),
+      "state events must flow even without a resolved hook"
+    );
+  });
+
+  it("a slow previous-generation dispose does not clear the new instance's identity recovery", async (t) => {
+    const { def } = await makeDefinition();
+    const first = v2SetupCtx();
+    await def.setup(first.ctx);
+    await tick(10);
+    assert.strictEqual(first.active.length, 1, "previous registration established");
+    first.setDisposePlan(() => new Promise((resolve) => setTimeout(resolve, 200)));
+
+    const second = v2SetupCtx({ session: { get: () => new Promise(() => {}) } });
+    const cleanup2 = await settlesWithin(def.setup(second.ctx), 300, "second setup");
+    t.after(cleanup2);
+
+    // Stage a pending identity lookup on the CURRENT instance.
+    def.__test.handleV2Event({ type: "session.tool.called", data: { sessionID: "ses_slow", id: "call_slow" } });
+    await tick(20);
+    assert.strictEqual(def.__test._hydrationState.get("opencode:ses_slow"), "pending");
+
+    // Wait past the previous generation's 200ms dispose. Its local teardown ran
+    // synchronously at reload, so the late registration dispose must not touch
+    // the new instance's state.
+    await tick(260);
+    assert.strictEqual(
+      def.__test._hydrationState.get("opencode:ses_slow"),
+      "pending",
+      "the new instance's identity recovery must survive a slow previous dispose"
+    );
+    assert.ok(def.__test._pendingIdentityBySession.has("opencode:ses_slow"), "staged events stay staged");
+  });
+
+  // opencode upstream v2.0.15 (packages/core/src/plugin/hooks.ts) trigger()
+  // calls EVERY still-registered callback in order with the same mutable event,
+  // and our dispose is async — so a retired generation's callback can fire
+  // during a reload window.
+  it("a retired callback does not forward; the current registration POSTs once", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const host = v2HookHost();
+
+    await def.setup(host.ctxFor());
+    await tick(10);
+    assert.strictEqual(host.activeCount(), 1, "previous registration effective");
+    host.setDisposePlan(() => new Promise(() => {})); // old dispose never completes
+    const cleanup2 = await def.setup(host.ctxFor());
+    t.after(cleanup2);
+    await tick(10);
+    assert.strictEqual(host.activeCount(), 2, "old and new callbacks coexist during reload");
+    const [retired, current] = host.handlers();
+    assert.ok(retired && current && retired !== current, "old and new callbacks are distinct");
+
+    // (i) The retired callback must not act even when invoked directly — this is
+    // the case a sequential shared-event dispatch would hide, because an
+    // "allow" from the old callback would short-circuit the new one.
+    const staleEvent = permissionAsk();
+    await retired(staleEvent);
+    assert.strictEqual(fetchStub.calls.length, 0, "the retired callback must not POST");
+    assert.strictEqual(staleEvent.effect, "ask");
+
+    // (ii) Upstream-style dispatch (old then new, one shared event) resolves the
+    // ask exactly once through the current callback.
+    const event = permissionAsk();
+    await host.dispatch(event);
+    assert.strictEqual(fetchStub.calls.length, 1, "only the current callback forwards");
+    assert.strictEqual(event.effect, "allow", "the current callback applied its decision");
+  });
+
+  it("an ask dispatched while only the retired callback is registered stays native (intentional)", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const host = v2HookHost();
+
+    await def.setup(host.ctxFor());
+    await tick(10);
+    assert.strictEqual(host.activeCount(), 1, "previous registration effective");
+    host.setDisposePlan(() => new Promise(() => {})); // old callback stays registered
+
+    // Reload, but dispatch BEFORE the new registration becomes effective: the
+    // live list holds only the retired callback.
+    const secondSetup = def.setup(host.ctxFor());
+    const event = permissionAsk();
+    await host.dispatch(event);
+    assert.strictEqual(fetchStub.calls.length, 0, "a retired callback must not POST");
+    assert.strictEqual(event.effect, "ask", "no decision — opencode's native prompt takes over");
+
+    const cleanup2 = await secondSetup;
+    t.after(cleanup2);
   });
 });
