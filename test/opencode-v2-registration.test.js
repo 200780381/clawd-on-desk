@@ -277,6 +277,66 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(entries[2].reason, "v2-non-string-entry");
   });
 
+  it("PR #1045 follow-up: duplicate plugins keys abort register with a byte-identical config", () => {
+    const home = makeHome();
+    const text = '{\n  "plugin": ["third-party@latest"],\n  "plugins": ["/a/opencode-plugin-v2"],\n  "plugins": ["/b/opencode-plugin-v2"]\n}\n';
+    fs.writeFileSync(configPath(home), text);
+    const result = registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) });
+    assert.strictEqual(result.status, "error");
+    assert.strictEqual(result.reason, "config-corrupt");
+    assert.strictEqual(fs.readFileSync(configPath(home), "utf8"), text, "config is never touched");
+  });
+
+  it("PR #1045 follow-up: duplicate plugins keys skip the v1-host sweep with a warning; v1 register succeeds", () => {
+    const home = makeHome();
+    const text = '{\n  "plugin": ["third-party@latest"],\n  "plugins": ["/a/opencode-plugin-v2"],\n  "plugins": ["/b/opencode-plugin-v2"]\n}\n';
+    fs.writeFileSync(configPath(home), text);
+    const result = registerOpencodePlugin({ silent: true, v2Host: "v1", ...managedRoots(home) });
+    assert.strictEqual(result.status, "ok", result.message);
+    assert.ok(
+      result.warnings.some((w) => /v2 plugins-key leftover sweep skipped/.test(w)),
+      result.warnings
+    );
+    assert.ok(
+      result.warnings.some((w) => /duplicate top-level "plugins"/.test(w)),
+      result.warnings
+    );
+    const cfg = readConfig(home);
+    assert.ok(Array.isArray(cfg.plugin) && cfg.plugin.length >= 1, "v1 entry registered");
+    // JSON.parse resolves the duplicate to its last value; the sweep must have
+    // left that key completely untouched.
+    assert.deepStrictEqual(cfg.plugins, ["/b/opencode-plugin-v2"]);
+  });
+
+  it("PR #1045 follow-up: duplicate plugins keys abort uninstall before removing an owned v1 entry", () => {
+    const home = makeHome();
+    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) }).status, "ok");
+    // The config now carries a Clawd-owned v1 entry that uninstall WOULD remove
+    // (plus the v2 key). Insert a duplicate top-level `plugins` key by text edit
+    // — JSON.parse cannot express one.
+    const registered = readConfig(home);
+    assert.ok(
+      registered.plugin.some((entry) => String(entry).includes("opencode-plugin")),
+      "an owned v1 entry is present and removable"
+    );
+    assert.strictEqual(registered.plugins.length, 1);
+    const text = fs.readFileSync(configPath(home), "utf8");
+    const duplicated = text.replace(
+      /("plugins"\s*:\s*\[[^\]]*\])/,
+      (_match, first) => `${first},\n  "plugins": ["/a/opencode-plugin-v2"]`
+    );
+    assert.notStrictEqual(duplicated, text, "duplicate plugins key inserted");
+    fs.writeFileSync(configPath(home), duplicated);
+
+    const result = unregisterOpencodePlugin({ silent: true, ...managedRoots(home) });
+    assert.strictEqual(result.status, "error");
+    assert.strictEqual(result.reason, "config-corrupt");
+    assert.strictEqual(result.registrationRemoved, false);
+    // Byte-identical proves the guard fired BEFORE the v1 entry was removed:
+    // the owned entry would otherwise have been swept from the file above.
+    assert.strictEqual(fs.readFileSync(configPath(home), "utf8"), duplicated, "config is never touched");
+  });
+
   it("describeV2Remediation names the plugins key, not plugin", () => {
     const remediation = v2Registry.describeV2Remediation(
       { rawEntry: "/bad/path", index: 2 },

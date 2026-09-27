@@ -86,6 +86,16 @@ function assertSingleV2Property(text, configPath) {
   }
 }
 
+// Attach the exact candidate file to a read/parse error so a caller that cannot
+// see the candidate list (Doctor, installer) can name the real offender instead
+// of the operation's default config path.
+function candidateError(cause, candidatePath, message) {
+  const error = new Error(message);
+  error.candidatePath = candidatePath;
+  error.cause = cause;
+  return error;
+}
+
 function readV2Candidates(cfg, configPath) {
   const paths = jsonc.__test.candidatePaths(cfg, configPath);
   return paths.map((candidate) => {
@@ -94,10 +104,19 @@ function readV2Candidates(cfg, configPath) {
       text = readTextFileStripBom(candidate, "utf-8");
     } catch (err) {
       if (err.code === "ENOENT") return { path: candidate, exists: false, text: null, tree: null };
-      throw new Error(`Failed to read ${candidate}: ${err.message}`);
+      throw candidateError(err, candidate, `Failed to read ${candidate}: ${err.message}`);
     }
-    const tree = jsonc.__test.parseJsoncStrict(text, candidate);
-    assertSingleV2Property(text, candidate);
+    let tree;
+    try {
+      tree = jsonc.__test.parseJsoncStrict(text, candidate);
+      assertSingleV2Property(text, candidate);
+    } catch (err) {
+      // parseJsoncStrict / assertSingleV2Property already name the candidate in
+      // their message; wrap so the path is also machine-readable.
+      throw candidateError(err, candidate, err && err.message
+        ? err.message
+        : `Failed to read ${candidate}: invalid JSONC`);
+    }
     return { path: candidate, exists: true, text, tree };
   });
 }

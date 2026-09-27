@@ -211,9 +211,28 @@ function inspectManagedOpencode(descriptor, options = {}) {
   const v2Host = cfg.v2PluginDirName
     ? hostDetect.__test.normalizeHostDetection(options.v2Host) || hostDetect.detectOpencodeHost(options)
     : null;
-  const v2States = cfg.v2PluginDirName
-    ? v2Registry.readV2Candidates(cfg, descriptor.configPath)
-    : [];
+  let v2States = [];
+  if (cfg.v2PluginDirName) {
+    try {
+      v2States = v2Registry.readV2Candidates(cfg, descriptor.configPath);
+    } catch (err) {
+      // A duplicate top-level `plugins` key (or any parse/read failure) is
+      // ambiguous config, exactly like a duplicate `plugin` key above. It must
+      // degrade to config-corrupt with no Fix, never escape as an exception
+      // that aborts the whole Doctor run. Name the candidate that actually
+      // failed — readV2Candidates reads several files, not just configPath.
+      const failingPath = err && typeof err.candidatePath === "string"
+        ? err.candidatePath
+        : descriptor.configPath;
+      return makeResult(descriptor, "config-corrupt", {
+        level: "warning",
+        parentDirExists: true,
+        configFileExists: true,
+        configPath: failingPath,
+        detail: err && err.message ? err.message : `${failingPath}: plugins-key config parse failed`,
+      });
+    }
+  }
   const assessV2 = () => {
     if (!cfg.v2PluginDirName) return null;
     const v2Effective = v2Registry.__test.selectEffectiveV2(v2States);

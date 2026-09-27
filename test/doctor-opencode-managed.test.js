@@ -364,6 +364,31 @@ describe("#1026 managed OpenCode Doctor", () => {
     assert.strictEqual(detail.status, "config-corrupt");
   });
 
+  it("PR #1045 follow-up: surfaces duplicate top-level plugins keys as config-corrupt without throwing", () => {
+    const home = makeHome();
+    const configText = '{\n  "plugins": ["/a/opencode-plugin-v2"],\n  "plugins": ["/b/opencode-plugin-v2"]\n}\n';
+    fs.writeFileSync(path.join(home, ".config", "opencode", "opencode.json"), configText);
+    const detail = runOne(managedDescriptor(home)).details[0];
+    assert.strictEqual(detail.status, "config-corrupt");
+    assert.strictEqual(detail.fixAction, undefined);
+    assert.match(detail.detail, /"plugins"/);
+    assert.strictEqual(fs.readFileSync(path.join(home, ".config", "opencode", "opencode.json"), "utf8"), configText);
+  });
+
+  it("PR #1045 follow-up: config-corrupt names the candidate file that actually failed", () => {
+    const home = makeHome();
+    // The failing candidate is opencode.jsonc, NOT the descriptor's default
+    // opencode.json.
+    const jsoncPath = path.join(home, ".config", "opencode", "opencode.jsonc");
+    const text = '{\n  "plugins": ["/a/opencode-plugin-v2"],\n  "plugins": ["/b/opencode-plugin-v2"]\n}\n';
+    fs.writeFileSync(jsoncPath, text);
+    const detail = runOne(managedDescriptor(home)).details[0];
+    assert.strictEqual(detail.status, "config-corrupt");
+    assert.strictEqual(detail.configPath, jsoncPath);
+    assert.ok(detail.detail.includes(jsoncPath), detail.detail);
+    assert.strictEqual(/opencode\.json:/.test(detail.detail), false, "detail must not name a different path");
+  });
+
   it("reports a masked safe owned entry as repairable, not ok", () => {
     const home = makeHome();
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
