@@ -13,12 +13,13 @@ own npm artifact and integrity:
 
 | DSH version | npm artifact | npm integrity (sha512) |
 | --- | --- | --- |
-| `0.1.5-rc.1` (preferred for new installs) | `@deepseek-ai/dsh@0.1.5-rc.1` | `sha512-rmNmzQCg3oIc1z8xH7izRSOuy1TNzq+/NILyfM+7e8DKOyV+yBtg47WEsqR2SiIe1ATec3L/rUa1YhIcfQ2XEg==` |
+| `0.1.5-rc.3` (preferred for new installs) | `@deepseek-ai/dsh@0.1.5-rc.3` | `sha512-c0W6Xqc4ChjFcCJkbzPeIxZQdnbKqe+QAcJzWGtogg0ZzsnZRcw3vopMyZ5oZU6E2fmyqGcyDR1sBeiCH4yHcg==` |
+| `0.1.5-rc.1` | `@deepseek-ai/dsh@0.1.5-rc.1` | `sha512-rmNmzQCg3oIc1z8xH7izRSOuy1TNzq+/NILyfM+7e8DKOyV+yBtg47WEsqR2SiIe1ATec3L/rUa1YhIcfQ2XEg==` |
 | `0.1.1-rc.2` | `@deepseek-ai/dsh@0.1.1-rc.2` | `sha512-UP1UIh6q3Gme/yXRn/QL2P8IsVlv8Shpg22TRJIZPsCRWLm4CBiA1MUvXmJAfsOEETBMLAl+xWPtFw6ICsN3wg==` |
 | `0.1.0-rc.6` | `@deepseek-ai/dsh@0.1.0-rc.6` | `sha512-brpZfED7ieRa2PQ5tUxMhHrM1pb2CmKFVM/f6yMULBDMicahk+Z2OsHgTwTDnoiZm23Ftu9rQz0NN4pflaoJcg==` |
 
 Install and Repair select the contract matching the detected host (or the owned
-marker when no CLI probe is available); new installs prefer `0.1.5-rc.1`.
+marker when no CLI probe is available); new installs prefer `0.1.5-rc.3`.
 Uninstall and manual `npx` commands select the contract of the installed
 marker. Pre-release versions are exact-pinned — a broad `>=0.1.x` range would
 admit artifacts this bridge has not verified. The public seams were first
@@ -29,8 +30,10 @@ The `0.1.5-rc.1` row was added after re-checking the same four public seams
 `approval/request` waterfall) in the published `0.1.5-rc.1` artifact. The
 optional title and context-pressure projections were also checked against
 the published rc.1 packages. A
-controlled macOS API-backed session and approval smoke followed; its scope is
-described below.
+controlled macOS session and approval smoke against a localhost mock Clawd
+endpoint followed; its scope is
+described below. The `0.1.5-rc.3` row is a static artifact check only — it has
+not been exercised on a real DSH host yet (see the pending entry below).
 Unlisted versions fail before Clawd changes the DSH profile.
 
 ## Behavior
@@ -87,7 +90,7 @@ mode is enabled; per-session grants are not offered in this experimental release
 
 ## Requirements
 
-- DSH `0.1.5-rc.1` (preferred), `0.1.1-rc.2`, or `0.1.0-rc.6` on the same machine.
+- DSH `0.1.5-rc.3` (preferred), `0.1.5-rc.1`, `0.1.1-rc.2`, or `0.1.0-rc.6` on the same machine.
 - The `web` profile.
 - `pnpm`, because the official DSH plugin command delegates profile mutation to
   pnpm.
@@ -121,9 +124,9 @@ or cleanup could delete.
 
 If DSH is only used through `npx`, Clawd does not download it automatically.
 Settings returns an exact manual `npx @deepseek-ai/dsh@<contract> plugin ... add`
-command (the contract matching the staged generation — `0.1.5-rc.1` for a
-preferred-contract install, `0.1.1-rc.2`, or `0.1.0-rc.6` when the installed
-marker is rc.6) pointing at the staged managed generation and explicitly setting the
+command (the contract matching the staged generation — `0.1.5-rc.3` for a
+preferred-contract install, or the marker's own version
+`0.1.5-rc.1`, `0.1.1-rc.2`, or `0.1.0-rc.6` otherwise) pointing at the staged managed generation and explicitly setting the
 canonical target `DSH_HOME` (PowerShell on Windows, POSIX environment-prefix
 syntax elsewhere). This keeps an alternate home from accidentally mutating the
 default `~/.dsh` when the command is pasted into a fresh terminal. After that command succeeds,
@@ -202,7 +205,8 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
   install/uninstall lifecycle through isolated pnpm and the real rc.6 macOS
   lifecycle, including no-CLI commands
   ([#938](https://github.com/rullerzhou-afk/clawd-on-desk/pull/938)).
-  Automated installer coverage includes rc.1 installation, first install below
+  Automated installer coverage includes rc.1 installation, rc.3 installation,
+  first install below
   a symlinked parent, rc.6 retention, rc.2 installation, cross-contract
   generation migration, and unlisted-version rejection.
 - On 2026-09-23, a **macOS rc.1 source-run** used isolated `HOME` and `DSH_HOME`,
@@ -223,6 +227,8 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
   percent: 50 }` at a mock Clawd `/state` endpoint, alongside SessionStart,
   UserPromptSubmit, and Stop. This verifies the DSH-to-bridge calculation and
   delivery, not a real user's usage, the Clawd UI, or a packaged app.
+- A real-machine run for **rc.3** has not been performed yet, so rc.3 is a
+  static artifact check only. <!-- rc.3 real-machine result: pending -->
 - Linux, WSL, remote SSH, non-web profiles, macOS packaging, and ARM64 packaging
   remain unverified.
 - There is no terminal-focus action because DSH web is a browser surface.

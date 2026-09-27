@@ -26,6 +26,12 @@ const BRIDGE_PROTOCOL_VERSION = 1;
 // has not verified.
 const DSH_VERSION_CONTRACTS = Object.freeze([
   Object.freeze({
+    version: "0.1.5-rc.3",
+    supportedDshRange: "=0.1.5-rc.3",
+    verifiedDshArtifact: "@deepseek-ai/dsh@0.1.5-rc.3",
+    verifiedDshArtifactIntegrity: "sha512-c0W6Xqc4ChjFcCJkbzPeIxZQdnbKqe+QAcJzWGtogg0ZzsnZRcw3vopMyZ5oZU6E2fmyqGcyDR1sBeiCH4yHcg==",
+  }),
+  Object.freeze({
     version: "0.1.5-rc.1",
     supportedDshRange: "=0.1.5-rc.1",
     verifiedDshArtifact: "@deepseek-ai/dsh@0.1.5-rc.1",

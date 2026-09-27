@@ -654,7 +654,7 @@ test("npx-only hosts get an exact manual command and can later pass read-only ve
 });
 
 test("npx-only uninstall selects the exact contract recorded by each supported marker", async (t) => {
-  for (const version of ["0.1.5-rc.1", "0.1.1-rc.2", "0.1.0-rc.6"]) {
+  for (const version of ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.1-rc.2", "0.1.0-rc.6"]) {
     const harness = makeHarness();
     const cli = makeOfficialCli(harness);
     t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
@@ -1895,14 +1895,15 @@ test("newer managed generations win and same-version hash conflicts require expl
 test("the verified-version table resolves only listed exact versions", () => {
   assert.deepStrictEqual(
     DSH_VERSION_CONTRACTS.map((contract) => contract.version),
-    ["0.1.5-rc.1", "0.1.1-rc.2", "0.1.0-rc.6"],
+    ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.1-rc.2", "0.1.0-rc.6"],
   );
+  assert.strictEqual(isSupportedDshVersion("0.1.5-rc.3"), true);
   assert.strictEqual(isSupportedDshVersion("0.1.5-rc.1"), true);
   assert.strictEqual(isSupportedDshVersion("0.1.1-rc.2"), true);
   assert.strictEqual(isSupportedDshVersion("0.1.0-rc.6"), true);
   assert.strictEqual(isSupportedDshVersion("0.1.0-rc.7"), false);
   assert.strictEqual(isSupportedDshVersion("0.2.0"), false);
-  assert.strictEqual(supportedDshRangeLabel(), "=0.1.5-rc.1 or =0.1.1-rc.2 or =0.1.0-rc.6");
+  assert.strictEqual(supportedDshRangeLabel(), "=0.1.5-rc.3 or =0.1.5-rc.1 or =0.1.1-rc.2 or =0.1.0-rc.6");
   const metadata = readJson(path.join(SOURCE_DIR, "package.json")).clawd;
   assert.strictEqual(metadata.supportedDshRange, DSH_VERSION_CONTRACTS[0].supportedDshRange);
   assert.strictEqual(metadata.verifiedDshArtifact, DSH_VERSION_CONTRACTS[0].verifiedDshArtifact);
@@ -2006,7 +2007,30 @@ test("an rc.1 host installs under its own contract and records it", async (t) =>
   assert.strictEqual(health.marker.installedDshVersion, "0.1.5-rc.1");
   assert.strictEqual(health.marker.supportedDshRange, "=0.1.5-rc.1");
   assert.strictEqual(health.marker.verifiedDshArtifact, "@deepseek-ai/dsh@0.1.5-rc.1");
-  assert.strictEqual(health.marker.verifiedDshArtifactIntegrity, DSH_VERSION_CONTRACTS[0].verifiedDshArtifactIntegrity);
+  assert.strictEqual(
+    health.marker.verifiedDshArtifactIntegrity,
+    dshContractForVersion("0.1.5-rc.1").verifiedDshArtifactIntegrity,
+  );
+});
+
+test("an rc.3 host installs under its own contract and records it", async (t) => {
+  const harness = makeHarness();
+  const cli = makeOfficialCli(harness);
+  t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
+  await installDeepSeekHarnessBridge(installOptions(harness, cli, { dshVersion: "0.1.5-rc.3" }));
+  const health = await inspectDeepSeekHarnessIntegration({
+    dshHome: harness.dshHome,
+    managedRoot: harness.managedRoot,
+    resolveCommandForInspection: false,
+  });
+  assert.strictEqual(health.status, "healthy");
+  assert.strictEqual(health.marker.installedDshVersion, "0.1.5-rc.3");
+  assert.strictEqual(health.marker.supportedDshRange, "=0.1.5-rc.3");
+  assert.strictEqual(health.marker.verifiedDshArtifact, "@deepseek-ai/dsh@0.1.5-rc.3");
+  assert.strictEqual(
+    health.marker.verifiedDshArtifactIntegrity,
+    "sha512-c0W6Xqc4ChjFcCJkbzPeIxZQdnbKqe+QAcJzWGtogg0ZzsnZRcw3vopMyZ5oZU6E2fmyqGcyDR1sBeiCH4yHcg==",
+  );
 });
 
 test("an rc.6 generation migrates to rc.2 when the host is upgraded", async (t) => {
