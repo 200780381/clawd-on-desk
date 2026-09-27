@@ -404,6 +404,83 @@ describe("#1026 managed OpenCode Doctor", () => {
     assert.deepStrictEqual(detail.fixAction, { type: "agent-integration", agentId: "opencode" });
   });
 
+  // The pre-#1039 four-file generation must keep classifying as an owned-stale
+  // shape so Repair can migrate it. This builds a
+  // REAL four-file generation (manifest, bundleHash and owner record all
+  // consistent with four files) rather than deleting the v2 key from a current
+  // five-file one — the old test never exercised this upgrade path.
+  function writeLegacyFourFileGeneration(home) {
+    const mg = require("../hooks/opencode-family-managed-generation");
+    const family = require("../agents/opencode-family");
+    const cfg = family.getFamilyConfig("opencode");
+    const sourcePluginDir = require("../hooks/opencode-install").resolveSourcePluginDir();
+    const bundle = mg.readSourceBundle(cfg, sourcePluginDir, fs);
+    const fourFiles = bundle.files.filter((file) => !file.rel.startsWith(`${cfg.v2PluginDirName}/`));
+    assert.strictEqual(fourFiles.length, 4, "legacy generation holds exactly four files");
+    const bundleHash = mg.computeBundleHash("opencode", fourFiles);
+    const target = mg.resolveManagedTarget({
+      cfg, agentId: "opencode", homeDir: home, fs, platform: process.platform,
+    });
+    const genDir = mg.generationDir(target, bundleHash);
+    for (const file of fourFiles) {
+      const abs = path.join(genDir, ...file.rel.split("/"));
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, file.bytes);
+    }
+    fs.writeFileSync(
+      path.join(genDir, "manifest.json"),
+      JSON.stringify(mg.buildManifest("opencode", fourFiles, bundleHash, null), null, 2)
+    );
+    mg.writeOwnerRecord(target, {
+      agentId: "opencode",
+      activeSourceRoot: path.dirname(sourcePluginDir),
+      activeSourceMarker: path.join(sourcePluginDir, "index.mjs"),
+      knownRegisteredPaths: [path.join(genDir, cfg.pluginDirName)],
+    }, fs, { platform: process.platform, pluginDirName: cfg.pluginDirName });
+    const entry = path.join(genDir, cfg.pluginDirName).replace(/\\/g, "/");
+    writeJson(path.join(home, ".config", "opencode", "opencode.json"), { plugin: [entry] });
+    return { genDir, entry, bundleHash, cfg };
+  }
+
+  it("PR #1045 follow-up: migrates a real four-file legacy generation through Repair", () => {
+    const home = makeHome();
+    const legacy = writeLegacyFourFileGeneration(home);
+    assert.strictEqual(fs.existsSync(path.join(legacy.genDir, legacy.cfg.v2PluginDirName)), false);
+
+    // 1. Doctor sees a repairable owned-stale generation, never ok.
+    const before = runOne(managedDescriptor(home)).details[0];
+    assert.ok(["legacy-path", "broken-path"].includes(before.status), `unexpected status ${before.status}`);
+    assert.ok(before.fixAction, "the legacy generation must be repairable");
+
+    // 2. Repair (register under a v2 host) materializes a new five-file
+    //    generation and points BOTH keys at it.
+    const repaired = registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
+    assert.strictEqual(repaired.status, "ok", repaired.message);
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, ".config", "opencode", "opencode.json"), "utf8"));
+    const v1Entry = cfg.plugin.find((entry) => String(entry).includes("opencode-plugin"));
+    const v2Entry = cfg.plugins.find((entry) => String(entry).includes("opencode-plugin-v2"));
+    assert.ok(v1Entry && v2Entry, "both keys registered");
+    assert.strictEqual(path.dirname(String(v1Entry)), path.dirname(String(v2Entry)), "same generation");
+    const migratedGenDir = path.dirname(String(v1Entry).replace(/\//g, path.sep));
+    assert.notStrictEqual(path.resolve(migratedGenDir), path.resolve(legacy.genDir), "migrated to the five-file hash");
+    for (const rel of ["index.mjs", "package.json"]) {
+      assert.ok(fs.existsSync(path.join(migratedGenDir, legacy.cfg.pluginDirName, rel)));
+    }
+    assert.ok(fs.existsSync(path.join(migratedGenDir, legacy.cfg.v2PluginDirName, "index.mjs")), "five-file generation");
+
+    // 3. Doctor is healthy after the migration.
+    const after = runOne(managedDescriptor(home)).details[0];
+    assert.strictEqual(after.status, "ok");
+    assert.strictEqual(after.fixAction, undefined);
+
+    // 4. A second Repair is a no-op with a byte-identical config.
+    const cfgPath = path.join(home, ".config", "opencode", "opencode.json");
+    const stable = fs.readFileSync(cfgPath, "utf8");
+    const again = registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
+    assert.strictEqual(again.skipped, true, "second Repair is a no-op");
+    assert.strictEqual(fs.readFileSync(cfgPath, "utf8"), stable);
+  });
+
   it("the real opencode descriptor opts into the managed inspector", () => {
     const descriptor = getAgentDescriptor("opencode");
     assert.strictEqual(descriptor.managedMaterialization, true);
