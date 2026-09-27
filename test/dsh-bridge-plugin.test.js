@@ -326,3 +326,130 @@ test("DSH plugin registers public seams only and contains session/created except
   assert.strictEqual(projectionUnsubscribes, 1);
   disposer();
 });
+
+test("DSH plugin sends projection pressure, missing operands, and title updates to the sender", async () => {
+  const { createSessionObservers } = await bridge();
+  const posted = [];
+  const sender = { enqueue: (payload) => { posted.push(payload); return true; } };
+  const observers = createSessionObservers(sender);
+  const projectionListeners = [];
+  observers.attachProjections({
+    sessionProjections: {
+      onChanged(handler) { projectionListeners.push(handler); return () => {}; },
+      snapshot() { return { values: {} }; },
+    },
+    effect() {},
+  });
+  const session = { id: "s1", header: { cwd: "/repo" } };
+  projectionListeners[0](session, "contextPressure", { projectedTokens: 78, contextWindow: 100 });
+  projectionListeners[0](session, "contextPressure", { contextWindow: 100 });
+  observers.handleSessionEvent(session, { type: "session/title", data: { title: "Fix DSH" } });
+  assert.deepStrictEqual(posted.map((payload) => ({
+    session_id: payload.session_id,
+    metadata_only: payload.metadata_only,
+    session_title: payload.session_title,
+    context_usage: payload.context_usage,
+  })), [
+    {
+      session_id: "deepseek-harness:s1",
+      metadata_only: true,
+      session_title: undefined,
+      context_usage: { used: 78, limit: 100, percent: 78 },
+    },
+    {
+      session_id: "deepseek-harness:s1",
+      metadata_only: true,
+      session_title: undefined,
+      context_usage: null,
+    },
+    {
+      session_id: "deepseek-harness:s1",
+      metadata_only: true,
+      session_title: "Fix DSH",
+      context_usage: undefined,
+    },
+  ]);
+});
+
+test("DSH plugin seeds a new session from the projection snapshot without waiting for onChanged", async () => {
+  const { createSessionObservers } = await bridge();
+  const session = { id: "restored", header: { cwd: "/repo" } };
+
+  const restored = [];
+  const restoredObservers = createSessionObservers({
+    enqueue: (payload) => { restored.push(payload); return true; },
+  });
+  let restoredOnChangedRegistrations = 0;
+  restoredObservers.attachProjections({
+    sessionProjections: {
+      onChanged() { restoredOnChangedRegistrations += 1; return () => {}; },
+      snapshot() {
+        return { values: { title: "Restored", contextPressure: { projectedTokens: 78, contextWindow: 100 } } };
+      },
+    },
+    effect() {},
+  });
+  assert.strictEqual(restoredOnChangedRegistrations, 1);
+  restoredObservers.handleSessionCreated(session);
+  assert.strictEqual(restored.length, 1, "a complete snapshot must not emit a second metadata post");
+  assert.strictEqual(restored[0].event, "SessionStart");
+  assert.strictEqual(restored[0].state, "idle");
+  assert.strictEqual(restored[0].session_id, "deepseek-harness:restored");
+  assert.strictEqual(restored[0].session_title, "Restored");
+  assert.deepStrictEqual(restored[0].context_usage, { used: 78, limit: 100, percent: 78 });
+
+  const missing = [];
+  const missingObservers = createSessionObservers({
+    enqueue: (payload) => { missing.push(payload); return true; },
+  });
+  missingObservers.attachProjections({
+    sessionProjections: {
+      onChanged() { return () => {}; },
+      snapshot() {
+        return { values: { title: "Restored", contextPressure: { contextWindow: 100 } } };
+      },
+    },
+    effect() {},
+  });
+  missingObservers.handleSessionCreated(session);
+  assert.deepStrictEqual(missing.map((payload) => ({
+    event: payload.event,
+    metadata_only: payload.metadata_only,
+    session_title: payload.session_title,
+    context_usage: payload.context_usage,
+  })), [
+    {
+      event: "SessionStart",
+      metadata_only: undefined,
+      session_title: "Restored",
+      context_usage: undefined,
+    },
+    {
+      event: undefined,
+      metadata_only: true,
+      session_title: undefined,
+      context_usage: null,
+    },
+  ]);
+});
+
+test("DSH plugin ignores projection changes for keys other than contextPressure", async () => {
+  const { createSessionObservers } = await bridge();
+  const posted = [];
+  const observers = createSessionObservers({
+    enqueue: (payload) => { posted.push(payload); return true; },
+  });
+  const projectionListeners = [];
+  observers.attachProjections({
+    sessionProjections: {
+      onChanged(handler) { projectionListeners.push(handler); return () => {}; },
+      snapshot() { return { values: {} }; },
+    },
+    effect() {},
+  });
+  const session = { id: "s2", header: { cwd: "/repo" } };
+  for (const key of ["title", "model", "cwd"]) {
+    projectionListeners[0](session, key, "ignored");
+  }
+  assert.deepStrictEqual(posted, [], "non-contextPressure projection keys must not enqueue anything");
+});

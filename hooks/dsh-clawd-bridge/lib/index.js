@@ -304,22 +304,22 @@ export function createApprovalHandler(
   }
 }
 
-export function apply(ctx, config = {}) {
-  if (
-    !ctx
-    || typeof ctx.on !== 'function'
-    || typeof ctx.inject !== 'function'
-    || typeof ctx.effect !== 'function'
-  ) return
-  const generation = new AbortController()
-  const sender = createStateSender(generation.signal)
-  let projectionRegistry = null
-  const permissionTimeoutMs = Number.isFinite(config.permissionTimeoutMs)
-    ? Math.max(1000, config.permissionTimeoutMs)
+// Builds the public-seam observer set for one plugin generation. `sender` is
+// the only outbound dependency, so tests can inject a recording sender without
+// touching the network; apply() wires these into the DSH context and owns
+// disposal.
+export function createSessionObservers(sender, options = {}) {
+  const lifetimeSignal = options.lifetimeSignal || null
+  const permissionTimeoutMs = Number.isFinite(options.permissionTimeoutMs)
+    ? options.permissionTimeoutMs
     : DEFAULT_PERMISSION_TIMEOUT_MS
+  const requestPermissionImpl = typeof options.requestPermissionImpl === 'function'
+    ? options.requestPermissionImpl
+    : requestPermission
+  let projectionRegistry = null
 
   const safely = (work) => (...args) => {
-    if (generation.signal.aborted) return
+    if (lifetimeSignal?.aborted) return
     try {
       work(...args)
     } catch {
@@ -328,7 +328,7 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  ctx.on('session/created', safely((session) => {
+  const handleSessionCreated = safely((session) => {
     let metadata = null
     try {
       metadata = projectionRegistry?.snapshot(session, ['title', 'contextPressure'])?.values
@@ -347,9 +347,9 @@ export function apply(ctx, config = {}) {
       // DSH's ContextMeter, which hides occupancy without both operands.
       sender.enqueue(metadataPayload(session, { contextPressure: metadata?.contextPressure }))
     }
-  }))
+  })
 
-  ctx.on('session/event', safely((session, event) => {
+  const handleSessionEvent = safely((session, event) => {
     if (event?.type === 'session/title') {
       const titlePayload = metadataPayload(session, { title: event?.data?.title })
       if (titlePayload) sender.enqueue(titlePayload)
@@ -357,16 +357,16 @@ export function apply(ctx, config = {}) {
     const mapping = mapSessionEvent(event)
     if (!mapping) return
     sender.enqueue(statePayload(session, mapping, { eventSeq: event?.seq }))
-  }))
+  })
 
-  ctx.on('session/disposed', safely((session) => {
+  const handleSessionDisposed = safely((session) => {
     sender.enqueue(statePayload(session, {
       event: 'SessionEnd',
       state: 'sleeping',
     }, { sessionSeq: session?.seq }))
-  }))
+  })
 
-  ctx.inject(['sessionProjections'], (projectionCtx) => {
+  const attachProjections = (projectionCtx) => {
     const registry = projectionCtx?.sessionProjections
     if (!registry || typeof registry.onChanged !== 'function') return
     projectionRegistry = registry
@@ -379,16 +379,49 @@ export function apply(ctx, config = {}) {
       if (typeof unsubscribe === 'function') unsubscribe()
       if (projectionRegistry === registry) projectionRegistry = null
     }, 'clawd projection detachment')
-  })
+  }
 
-  ctx.inject(['approval'], (approvalCtx) => {
+  const attachApproval = (approvalCtx) => {
     if (!approvalCtx || typeof approvalCtx.on !== 'function') return
     approvalCtx.on(
       'approval/request',
-      createApprovalHandler(requestPermission, permissionTimeoutMs, generation.signal),
+      createApprovalHandler(requestPermissionImpl, permissionTimeoutMs, lifetimeSignal),
       { prepend: true },
     )
+  }
+
+  return {
+    handleSessionCreated,
+    handleSessionEvent,
+    handleSessionDisposed,
+    attachProjections,
+    attachApproval,
+  }
+}
+
+export function apply(ctx, config = {}) {
+  if (
+    !ctx
+    || typeof ctx.on !== 'function'
+    || typeof ctx.inject !== 'function'
+    || typeof ctx.effect !== 'function'
+  ) return
+  const generation = new AbortController()
+  const sender = createStateSender(generation.signal)
+  const permissionTimeoutMs = Number.isFinite(config.permissionTimeoutMs)
+    ? Math.max(1000, config.permissionTimeoutMs)
+    : DEFAULT_PERMISSION_TIMEOUT_MS
+  const observers = createSessionObservers(sender, {
+    lifetimeSignal: generation.signal,
+    permissionTimeoutMs,
   })
+
+  ctx.on('session/created', observers.handleSessionCreated)
+  ctx.on('session/event', observers.handleSessionEvent)
+  ctx.on('session/disposed', observers.handleSessionDisposed)
+
+  ctx.inject(['sessionProjections'], observers.attachProjections)
+  ctx.inject(['approval'], observers.attachApproval)
 
   ctx.effect(() => () => {
     generation.abort()
