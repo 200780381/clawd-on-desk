@@ -135,9 +135,13 @@ const COMPLETION_HOUSEKEEPING_EVENTS = new Set([
 ]);
 // #406: forward progress for a session cancels its pending (debounced)
 // completion — these events all mean the agent loop is still running.
+// SubagentStop is deliberately absent: a finishing subagent is closing
+// evidence, not parent progress, and Claude sends one 1.5-15s after the Stop
+// from a background helper (#1060), so it must not veto a completion that has
+// already reached its quiet window.
 const COMPLETION_CANCEL_EVENTS = new Set([
   "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-  "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+  "SubagentStart", "PreCompact", "PostCompact",
   "PermissionRequest", "CodexUserInputRequest", "Elicitation", "StopFailure", "ApiError", "SessionEnd",
 ]);
 const CLAUDE_ELICITATION_COMPLETION_PROBE_DELAY_MS = 2000;
@@ -1946,7 +1950,9 @@ function mergeSessionProcessMetadata(existing, incoming = {}, options = {}) {
 // first prompt line. The first title that reaches the server wins — a title
 // whose POST fails is not permanently claimed, and follow-up prompts never
 // overwrite the first one (matching Trae's constant session title).
-const FIRST_WINS_TITLE_AGENT_IDS = new Set(["traecode"]);
+// MiniMax Code carries no session title in its hook payload either, so its
+// prompt-derived titles follow the same first-wins rule.
+const FIRST_WINS_TITLE_AGENT_IDS = new Set(["traecode", "minimax"]);
 
 function resolveIncomingSessionTitle(existing, agentId, incomingTitle) {
   const normalized = normalizeTitle(incomingTitle);

@@ -3162,6 +3162,14 @@ describe("updateSession()", () => {
     assert.strictEqual(api.sessions.get("s1").sessionTitle, "第一个问题");
   });
 
+  it("keeps the FIRST title for minimax sessions (same prompt-derived rule as traecode)", () => {
+    update(api, { id: "s3", state: "thinking", event: "UserPromptSubmit", agentId: "minimax", sessionTitle: "first prompt" });
+    assert.strictEqual(api.sessions.get("s3").sessionTitle, "first prompt");
+
+    update(api, { id: "s3", state: "thinking", event: "UserPromptSubmit", agentId: "minimax", sessionTitle: "second prompt" });
+    assert.strictEqual(api.sessions.get("s3").sessionTitle, "first prompt");
+  });
+
   it("lets the latest title win for non-traecode agents (unchanged behaviour)", () => {
     update(api, { id: "s2", state: "thinking", event: "UserPromptSubmit", agentId: "claude-code", sessionTitle: "旧标题" });
     update(api, { id: "s2", state: "thinking", event: "UserPromptSubmit", agentId: "claude-code", sessionTitle: "新标题" });
@@ -5239,6 +5247,59 @@ describe("Stop completion gate (#406)", () => {
     assert.strictEqual(api.deriveSessionBadge(api.sessions.get("s1")), "done");
   });
 
+  it("debounce: a trailing background-assistant SubagentStop does not cancel completion (#1060 follow-up)", () => {
+    update(api, { id: "s1", state: "attention", event: "Stop" });
+    assert.strictEqual(api.sessions.get("s1").state, "working", "held during the window");
+    mock.timers.tick(500);
+    // A background helper (suggestions etc.) reports in after the Stop with no
+    // matching SubagentStart; it must not veto the pending completion.
+    update(api, {
+      id: "s1",
+      event: "SubagentStop",
+      subagentId: "suggestion-child",
+      subagentType: "Explore",
+    });
+    mock.timers.tick(500);
+    assert.strictEqual(api.sessions.get("s1").state, "idle");
+    assert.ok(soundsPlayed.includes("complete"), "the quiet window still completes");
+    assert.strictEqual(api.deriveSessionBadge(api.sessions.get("s1")), "done");
+  });
+
+  it("debounce: a trailing SubagentStop does not cancel a bg-final-text Stop (#1060 follow-up)", () => {
+    update(api, {
+      id: "s1",
+      state: "attention",
+      event: "Stop",
+      backgroundTasksCount: 1,
+      assistantLastOutput: "Done.",
+    });
+    mock.timers.tick(500);
+    update(api, {
+      id: "s1",
+      event: "SubagentStop",
+      subagentId: "suggestion-child",
+      subagentType: "Explore",
+    });
+    mock.timers.tick(500);
+    assert.strictEqual(api.sessions.get("s1").state, "idle");
+    assert.ok(soundsPlayed.includes("complete"), "the bg-final-text window still completes");
+    assert.strictEqual(api.deriveSessionBadge(api.sessions.get("s1")), "done");
+  });
+
+  it("debounce: a SubagentStart still cancels a pending completion (#1060 follow-up)", () => {
+    update(api, { id: "s1", state: "attention", event: "Stop" });
+    mock.timers.tick(500);
+    update(api, {
+      id: "s1",
+      state: "juggling",
+      event: "SubagentStart",
+      subagentId: "child-a",
+    });
+    mock.timers.tick(2000);
+    assert.strictEqual(api.sessions.get("s1").state, "juggling");
+    assert.ok(!soundsPlayed.includes("complete"), "real forward progress still cancels completion");
+  });
+
   it("debounce: dismissSession cancels a pending completion before same-id lease restore", () => {
     const rawSessionId = "debounce-dismiss-restore";
     const sessionId = resolveSessionIdentity(rawSessionId, "local").sessionId;
@@ -5617,6 +5678,50 @@ describe("Stop completion gate (#406)", () => {
     assert.strictEqual(session.state, "idle");
     assert.strictEqual(session.assistantLastOutput, "Final answer from Claude Desktop.");
     assert.strictEqual(api.getCurrentState(), "attention");
+    assert.ok(soundsPlayed.includes("complete"));
+    assert.strictEqual(api.deriveSessionBadge(session), "done");
+  });
+
+  it("Claude transcript probe survives a trailing background-assistant SubagentStop (#1060 follow-up)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-claude-stop-fallback-"));
+    const transcript = path.join(dir, "transcript.jsonl");
+    const rawSessionId = "claude-probe-subagent-stop";
+    const sessionId = resolveSessionIdentity(rawSessionId, "local").sessionId;
+    fs.writeFileSync(transcript, [
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "AskUserQuestion" }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "Allow" }] } }),
+    ].join("\n") + "\n");
+
+    update(api, {
+      id: sessionId,
+      state: "working",
+      event: "PostToolUse",
+      rawSessionId,
+      toolName: "AskUserQuestion",
+      transcriptPath: transcript,
+    });
+
+    mock.timers.tick(1000);
+    // The trailing helper reports in before the transcript gains a final reply;
+    // it must not kill the probe that is still waiting for that reply.
+    update(api, {
+      id: sessionId,
+      rawSessionId,
+      event: "SubagentStop",
+      subagentId: "suggestion-child",
+      subagentType: "Explore",
+    });
+    assert.strictEqual(api.sessions.get(sessionId).state, "working");
+
+    fs.appendFileSync(transcript, JSON.stringify({
+      type: "assistant",
+      message: { content: "Final answer after the trailing subagent stop." },
+    }) + "\n");
+    mock.timers.tick(1000);
+
+    const session = api.sessions.get(sessionId);
+    assert.strictEqual(session.state, "idle");
+    assert.strictEqual(session.assistantLastOutput, "Final answer after the trailing subagent stop.");
     assert.ok(soundsPlayed.includes("complete"));
     assert.strictEqual(api.deriveSessionBadge(session), "done");
   });

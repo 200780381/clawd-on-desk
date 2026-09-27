@@ -188,7 +188,7 @@ const createPetWindowRuntime = require("./pet-window-runtime");
 const { collectRequiredAssetFiles } = require("./theme-schema");
 const { describeGeometrySync } = require("./pet-accessory-state");
 const { createDisplayedVisualProjection } = require("./displayed-visual-projection");
-const { isVisualMirrored, resolveMirroredFile } = require("./mirrored-files");
+const { getRightSideMirrorFiles, isVisualMirrored, resolveMirroredFile } = require("./mirrored-files");
 const { createTestReactionHandler } = require("./test-reaction");
 const createMacHideController = require("./mac-hide");
 const {
@@ -484,11 +484,12 @@ let feishuApprovalSyncPromise = Promise.resolve();
 let feishuApprovalConfigSignature = "";
 let feishuSessionAutomationRouteSignature = "";
 let feishuApprovalSecretsRevision = 0;
-// One-way Slack notifier. Unlike Feishu there is no connection to restart, but
-// queued automatic sends must never cross a configuration boundary. The
-// revision invalidates work captured before a preference or secret change.
+// One-way Slack notifier. Unlike Feishu there is no connection to restart.
+// Queued automatic sends re-read the destination and the per-event gates before
+// each attempt, so a preference or secret change is picked up without a
+// revision counter that would also discard real backlogs on every settings
+// click.
 let slackNotifyClient = null;
-let slackNotifyConfigRevision = 0;
 const shortcutHandlers = {
   togglePet: () => togglePetVisibility(),
   quickSelectSession: () => showQuickSelect(),
@@ -1487,10 +1488,27 @@ function inferVisualSource(displayState, file) {
 
 // Last free-roam walk heading sent to the renderer (roam visuals face right).
 let roamHeadingLeft = false;
+// Last pet screen side sent to the renderer; decides the mirror of idle
+// animations that opt in with mirrorOnRightSide.
+let petOnRightSide = false;
+
+function syncPetScreenSide() {
+  const bounds = getPetWindowBounds();
+  if (!bounds) return;
+  const cx = bounds.x + bounds.width / 2;
+  const wa = getNearestWorkArea(cx, bounds.y + bounds.height / 2);
+  if (!wa) return;
+  petOnRightSide = cx > wa.x + wa.width / 2;
+  // Sent unconditionally: a reloaded renderer starts back at "left".
+  sendRawToRenderer("pet-screen-side", petOnRightSide);
+}
 
 function requestDisplayedVisual(displayState, file, options = {}) {
   if (!displayedVisualProjection) return null;
   const activeTheme = getActiveTheme();
+  // Re-sampled on every idle request, so a drag or roam since the last idle
+  // animation is picked up before the next one starts.
+  if (displayState === "idle") syncPetScreenSide();
   // A mirrored visual (left mini edge, leftward roam) may show a variant with
   // pre-mirrored glyphs (theme mirroredFiles). It shares the original's
   // silhouette, so the hit box still comes from the original file.
@@ -1498,6 +1516,8 @@ function requestDisplayedVisual(displayState, file, options = {}) {
     miniMode: _mini.getMiniMode(),
     miniEdge: _mini.getMiniEdge(),
     roamHeadingLeft,
+    file,
+    petOnRightSide,
   }));
   return displayedVisualProjection.request({
     themeId: activeTheme && activeTheme._id,
@@ -1509,6 +1529,21 @@ function requestDisplayedVisual(displayState, file, options = {}) {
     deliver: options.deliver || ((payload) => sendRawToRenderer("state-change", payload)),
     onLogicalSettlement: options.onLogicalSettlement,
   });
+}
+
+function refreshIdleVisualAfterDrag() {
+  if (!displayedVisualProjection || _state.getCurrentState() !== "idle") return null;
+  const snapshot = displayedVisualProjection.getSnapshot();
+  const visual = snapshot.requested || snapshot.committed;
+  // Reactions restore their visual themselves. Do not interrupt a click
+  // reaction that started during the drag or replace a transitional visual.
+  if (!visual || visual.displayState !== "idle" || visual.source === "reaction") return null;
+  const file = _state.getCurrentSvg();
+  if (!getRightSideMirrorFiles(getActiveTheme()).includes(file)) return null;
+  // A theme without a drag reaction keeps its resting sprite throughout the
+  // drag. Re-request after the final clamp so side, glyph variant and hitbox
+  // go through the same path as the initial idle request.
+  return requestDisplayedVisual("idle", file);
 }
 
 function resetDisplayedVisualProjection(detail = "projection-reset", options = {}) {
@@ -2942,6 +2977,24 @@ const _serverCtx = {
   dismissOpencodeFamilyPermissionResolvedExternally,
   syncPermissionShortcuts,
   permLog,
+  // #898: the settings watcher pauses Claude hook auto-repair when settings.json
+  // shrinks suspiciously (a third-party overwrite). The server already dedups to
+  // once per persisting shrink via its shrinkNotified flag; surface that pause
+  // as an active Windows tray balloon so the user knows repair is on hold without
+  // opening Doctor — mirroring fireCodexHookNudge's balloon.
+  notifySuspiciousShrink: () => {
+    try {
+      if (process.platform !== "win32") return;
+      const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
+      trayBalloonOwner.show(tray, {
+        iconType: "warning",
+        title: translate("claudeHookGuardNudgeTitle"),
+        content: translate("claudeHookGuardNudgeBody"),
+      });
+    } catch (err) {
+      console.warn("Clawd: Claude hook guard balloon failed:", err && err.message);
+    }
+  },
 };
 const _server = require("./server")(_serverCtx);
 const { startHttpServer, getHookServerPort } = _server;
@@ -3664,7 +3717,6 @@ function writeSlackNotifySecrets(secrets) {
     platform: process.platform,
   });
   if (result && result.status === "ok") {
-    slackNotifyConfigRevision += 1;
     broadcastSlackNotifyStatus();
   }
   return result;
@@ -3675,7 +3727,6 @@ function getSlackNotifyClient() {
     slackNotifyClient = createSlackNotifyClient({
       getConfig: () => getSlackNotifyPrefs(),
       getSecrets: () => getSlackNotifySecrets(),
-      getConfigRevision: () => slackNotifyConfigRevision,
       getLang: () => _settingsController.get("lang") || lang || "en",
       log: slackNotifyLog,
     });
@@ -4703,7 +4754,6 @@ _settingsController.subscribeKey("feishuApproval", () => {
   }
 });
 _settingsController.subscribeKey("slackNotify", () => {
-  slackNotifyConfigRevision += 1;
   broadcastSlackNotifyStatus();
 });
 _settingsController.subscribeKey("mobilePreviewEnabled", (enabled) => {
@@ -5151,6 +5201,7 @@ function createWindow() {
     sendToRenderer,
     requestDragReaction,
     requestClickReaction,
+    refreshIdleVisualAfterDrag,
     settleVisual: (event, payload) => {
       if (
         !win

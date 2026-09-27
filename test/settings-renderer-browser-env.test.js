@@ -1621,6 +1621,7 @@ function loadAgentsTabForTest({
           rowCodexNativeNotificationSoundDesc: "Native sound desc",
           badgePermissionBubble: "Permission bubble",
           traecodeEnableHint: "Enable hooks in Trae before they fire.",
+          minimaxEnableHint: "Enable the Clawd plugin in MiniMax Code before hooks fire.",
           eventSourceHook: "Hook",
           eventSourceLogPoll: "Log poll",
           eventSourcePlugin: "Plugin",
@@ -11848,6 +11849,38 @@ describe("settings renderer browser environment", () => {
     harness.core.ops.requestRender({ content: true });
 
     assert.strictEqual(harness.content.querySelector(".agent-traecode-hint"), null);
+  });
+
+  it("shows the MiniMax enable hint on the card when the integration is installed", () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: { minimax: { integrationInstalled: true, enabled: true } },
+      },
+      agentMetadata: [
+        { id: "minimax", name: "MiniMax Code", eventSource: "hook", capabilities: {} },
+      ],
+    });
+
+    harness.core.ops.requestRender({ content: true });
+
+    const hint = harness.content.querySelector(".agent-minimax-hint");
+    assert.ok(hint, "MiniMax hint should render on the installed card");
+    assert.match(collectText(hint), /MiniMax Code/);
+  });
+
+  it("omits the MiniMax enable hint until the integration is installed", () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: { minimax: { integrationInstalled: false, enabled: false } },
+      },
+      agentMetadata: [
+        { id: "minimax", name: "MiniMax Code", eventSource: "hook", capabilities: {} },
+      ],
+    });
+
+    harness.core.ops.requestRender({ content: true });
+
+    assert.strictEqual(harness.content.querySelector(".agent-minimax-hint"), null);
   });
 
   it("keeps Start with Codex independent and commits through the preference API", async () => {

@@ -217,6 +217,7 @@ const MANAGED_CLEANUP_AGENT_IDS = Object.freeze([
   "qoderwork",
   "traecode",
   "qwenwork",
+  "minimax",
 ]);
 
 // ── updateRegistry ──
