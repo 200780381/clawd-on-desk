@@ -2807,6 +2807,10 @@ function buildPermissionBubblePayload(permEntry) {
     familyDisplayName: isOpencodeFamilyEntry(permEntry)
       ? ((getFamilyConfig(permEntry.agentId) || {}).displayName || permEntry.agentId)
       : null,
+    // v2 family entries keep their "always" rule inside the host's background
+    // service (plugin memory), not the CLI process, so the blanket-always
+    // tooltip must not tell the user a terminal restart revokes it.
+    familyV2: permEntry.isOpencodeV2 === true,
     isAntigravity: permEntry.isAntigravity || false,
     // Provenance for the renderer: lets the bubble relabel Codex MCP tool calls
     // (issue #445) without touching approval semantics. Mirrors the flags above.
