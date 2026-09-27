@@ -641,6 +641,13 @@ function handleStatePost(req, res, options) {
           // maps to no Clawd state). Not gated on the Claude telemetry flag —
           // it's not Claude statusline data.
           if (sessionTitle) metaUpdate.sessionTitle = sessionTitle;
+          // DSH metadata bypasses the lifecycle sequence fence, so it must
+          // only ever annotate DSH's own session. Pass the expected owner so
+          // updateSessionMetadata drops a colliding raw id owned by another
+          // agent instead of silently rewriting its title/usage.
+          if (agentId === "deepseek-harness" && Object.keys(metaUpdate).length > 0) {
+            metaUpdate.expectedAgentId = "deepseek-harness";
+          }
           if (Object.keys(metaUpdate).length > 0) {
             metadataAccepted = ctx.updateSessionMetadata(session_id || "default", metaUpdate) === true;
           }

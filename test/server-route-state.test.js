@@ -244,6 +244,7 @@ describe("server-route-state POST", () => {
       sessionTitle: "Fix DSH integration",
       contextUsage: { used: 78, limit: 100, percent: 78 },
       contextUsageOrigin: null,
+      expectedAgentId: "deepseek-harness",
     });
     assert.strictEqual(event.statusCode, 200);
     assert.strictEqual(fence.snapshot(common.session_id).lastEventSeq, 0);
@@ -304,6 +305,75 @@ describe("server-route-state POST", () => {
       assert.strictEqual(unavailable.headers[CLAWD_METADATA_ACCEPTED_HEADER], "1");
       assert.strictEqual(session.contextUsage, null);
       assert.strictEqual(session.updatedAt, before);
+    } finally {
+      api.cleanup();
+    }
+  });
+
+  it("drops DSH projection metadata when the raw id belongs to another agent's session", async () => {
+    const api = makeMetadataStateRuntime();
+    const rawId = "deepseek-harness:collision";
+    const sessionId = localSessionKey(rawId);
+    const post = (body, ctx = { updateSessionMetadata: api.updateSessionMetadata }) => callStatePost(
+      JSON.stringify({
+        agent_id: "deepseek-harness",
+        hook_source: "dsh-plugin",
+        session_id: rawId,
+        metadata_only: true,
+        ...body,
+      }),
+      {
+        ctx,
+        options: { dshStateSequenceFence: createDshStateSequenceFence() },
+      },
+    );
+    try {
+      // A different agent owns a session whose raw id happens to start with
+      // DSH's namespace. DSH metadata must not be able to annotate it.
+      api.updateSession(sessionId, "working", "PreToolUse", {
+        agentId: "codex",
+        profileId: "local",
+        rawSessionId: rawId,
+      });
+      api.updateSessionMetadata(sessionId, {
+        sessionTitle: "codex owns this",
+        contextUsage: { used: 1, limit: 10, percent: 10 },
+      });
+      const collision = api.sessions.get(sessionId);
+      const beforeTitle = collision.sessionTitle;
+      const beforeUsage = collision.contextUsage;
+      const rejected = await post({
+        session_title: "DSH takeover",
+        context_usage: { used: 78, limit: 100, percent: 78 },
+      });
+      assert.strictEqual(rejected.statusCode, 204);
+      assert.strictEqual(rejected.headers[CLAWD_METADATA_ACCEPTED_HEADER], undefined);
+      assert.strictEqual(collision.sessionTitle, beforeTitle);
+      assert.deepStrictEqual(collision.contextUsage, beforeUsage);
+
+      // DSH's own session on the same namespace is still annotated.
+      const dshRaw = "deepseek-harness:own";
+      const dshKey = localSessionKey(dshRaw);
+      api.updateSession(dshKey, "idle", "SessionStart", {
+        agentId: "deepseek-harness",
+        profileId: "local",
+        rawSessionId: dshRaw,
+      });
+      const accepted = await callStatePost(JSON.stringify({
+        agent_id: "deepseek-harness",
+        hook_source: "dsh-plugin",
+        session_id: dshRaw,
+        metadata_only: true,
+        session_title: "DSH own",
+        context_usage: { used: 78, limit: 100, percent: 78 },
+      }), {
+        ctx: { updateSessionMetadata: api.updateSessionMetadata },
+        options: { dshStateSequenceFence: createDshStateSequenceFence() },
+      });
+      assert.strictEqual(accepted.headers[CLAWD_METADATA_ACCEPTED_HEADER], "1");
+      const dshSession = api.sessions.get(dshKey);
+      assert.strictEqual(dshSession.sessionTitle, "DSH own");
+      assert.deepStrictEqual(dshSession.contextUsage, { used: 78, limit: 100, percent: 78 });
     } finally {
       api.cleanup();
     }
