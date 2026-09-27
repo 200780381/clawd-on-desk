@@ -484,11 +484,12 @@ let feishuApprovalSyncPromise = Promise.resolve();
 let feishuApprovalConfigSignature = "";
 let feishuSessionAutomationRouteSignature = "";
 let feishuApprovalSecretsRevision = 0;
-// One-way Slack notifier. Unlike Feishu there is no connection to restart, but
-// queued automatic sends must never cross a configuration boundary. The
-// revision invalidates work captured before a preference or secret change.
+// One-way Slack notifier. Unlike Feishu there is no connection to restart.
+// Queued automatic sends re-read the destination and the per-event gates before
+// each attempt, so a preference or secret change is picked up without a
+// revision counter that would also discard real backlogs on every settings
+// click.
 let slackNotifyClient = null;
-let slackNotifyConfigRevision = 0;
 const shortcutHandlers = {
   togglePet: () => togglePetVisibility(),
   quickSelectSession: () => showQuickSelect(),
@@ -3716,7 +3717,6 @@ function writeSlackNotifySecrets(secrets) {
     platform: process.platform,
   });
   if (result && result.status === "ok") {
-    slackNotifyConfigRevision += 1;
     broadcastSlackNotifyStatus();
   }
   return result;
@@ -3727,7 +3727,6 @@ function getSlackNotifyClient() {
     slackNotifyClient = createSlackNotifyClient({
       getConfig: () => getSlackNotifyPrefs(),
       getSecrets: () => getSlackNotifySecrets(),
-      getConfigRevision: () => slackNotifyConfigRevision,
       getLang: () => _settingsController.get("lang") || lang || "en",
       log: slackNotifyLog,
     });
@@ -4755,7 +4754,6 @@ _settingsController.subscribeKey("feishuApproval", () => {
   }
 });
 _settingsController.subscribeKey("slackNotify", () => {
-  slackNotifyConfigRevision += 1;
   broadcastSlackNotifyStatus();
 });
 _settingsController.subscribeKey("mobilePreviewEnabled", (enabled) => {
