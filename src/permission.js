@@ -4039,12 +4039,16 @@ function permLog(msg) {
   rotatedAppend(ctx.permDebugLog, `[${new Date().toISOString()}] ${msg}\n`);
 }
 
-// Fire-and-forget POST to the family plugin's reverse bridge. The plugin runs
-// inside the host and does NOT expose the host's own permission route
-// externally — TUI mode has no TCP listener at all (see Phase 2 Spike in
-// docs/plans/plan-opencode-integration.md). Instead the plugin starts a tiny
+// Fire-and-forget POST to the family plugin's reverse bridge. The default TUI
+// has no TCP listener at all (see Phase 2 Spike in
+// docs/plans/plan-opencode-integration.md), so the plugin starts a tiny
 // Bun.serve (CLI/TUI) or node:http (Desktop) listener on a random port and
-// forwards our decision to the host's in-process Hono router via ctx.client._client.post().
+// forwards our decision to the host's router. Under `opencode serve` / `web`
+// the host does listen, but ctx.client targets that listening address; a
+// wildcard address (0.0.0.0 / [::]) is a listen address rather than a
+// destination, and the host process's Bun fetch would hand it to HTTP_PROXY, so
+// the plugin rewrites those hosts to loopback per call (#1065). This side always
+// talks to the plugin's own 127.0.0.1 bridge.
 //
 // Shape: POST http://127.0.0.1:<plugin-port>/reply
 //   Authorization: Bearer <hex token>
