@@ -56,17 +56,22 @@ const MAX_PERMISSION_BODY_BYTES = 524288;
 // opencode v2 sends a single shell command as tool_input.resource
 // (hooks/opencode-family-plugin/core.mjs buildV2PermissionBody), while the
 // destructive-action reminder scans command-carrying fields only. Alias a
-// lone shell `resource` to `command` for the detail/reminder view so a v2
+// shell `resource` or string `resources` to `command` for the detail/reminder view so a v2
 // `rm -rf` is held for a human under permission automation and the bubble
 // shows the destructive hint. The raw resource field stays in place for
-// display; the stored toolInput keeps the original payload. Multi-resource
-// requests ({ resources: [...] }) are intentionally left unmapped.
+// display; the stored toolInput keeps the original payload.
 function mapOpencodeV2ShellResource(toolName, rawInput) {
   if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) return rawInput;
-  if (typeof rawInput.resource !== "string" || !rawInput.resource) return rawInput;
   if (typeof rawInput.command === "string" && rawInput.command) return rawInput;
   if (!shouldScanIrreversibleCommand(toolName)) return rawInput;
-  return { ...rawInput, command: rawInput.resource };
+  if (typeof rawInput.resource === "string" && rawInput.resource) {
+    return { ...rawInput, command: rawInput.resource };
+  }
+  if (Array.isArray(rawInput.resources) && rawInput.resources.length > 0
+    && rawInput.resources.every((resource) => typeof resource === "string")) {
+    return { ...rawInput, command: rawInput.resources.join("\n") };
+  }
+  return rawInput;
 }
 
 // ExitPlanMode (Plan Review) and AskUserQuestion (elicitation) happen to
