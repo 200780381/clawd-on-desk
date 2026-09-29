@@ -40,10 +40,10 @@ Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数�
 - 用户主题目录：`<userData>/themes/<id>/theme.json`
 - `mirroredFiles`（顶层，`{ 原文件: 镜像显示用变体 }`）：只要运行时要把某个文件镜像画出（判定复用 `pet-accessory-mirror.js`：Mini 左边缘、向左漫游、走向左边缘的 crabwalk，也覆盖 `roamFlipAssets` / `miniMode.flipAssets` 反向绘制的主题），main 在 `requestDisplayedVisual` 生成显示请求时就换成变体，renderer、结算 ACK 与 committed visual 看到同一个文件；hitbox 仍按原文件解析（变体只改字纹）。漫游中途掉头不产生新 state，所以 `setRoamHeading` 在朝向真的变化、且当前 roam 文件有变体时，会重发一次 roam 显示请求
 - `theme.json` 必需状态：`idle`、`working`、`thinking`
-- `states.idle[0]` 是主题默认的 follow-idle；Settings 的“默认待机动画”选项来自该主题声明的 idle 状态与 idle animation pool，并按主题分别持久化到 `prefs.idleVisual`
+- `states.idle[0]` 是主题默认的 follow-idle；Settings 的“默认待机动画”选项依次来自 `states.idle`、`idleAnimations` 和可选的 `idleVisualOptions`（去重），并按主题分别持久化到 `prefs.idleVisual`。`idleVisualOptions` 只供用户选择，不进入随机待机池
 - 若启用 `eyeTracking.enabled`，`eyeTracking.states` 所列状态中的全部文件都必须是 SVG（`idleAnimations` 池不受此 schema 约束）；实际挂载眼追的文件还必须提供配置对应的追踪目标。逻辑 `idle` 只有 `states.idle[0]` 这个 follow-idle 会挂载眼追（模板的 legacy 目标是 `#eyes-js`），用户选择的非默认静置视觉不启用眼球跟随或 spin-to-dizzy
 - 若 `sleepSequence.mode` 为 `full`（默认），需提供 `yawning / dozing / collapsing / waking`；`direct` 可直接进入 `sleeping`
-- 若 `miniMode.supported` 为 true，需提供 8 个基础 mini 状态；`mini-working` 是可选增强，缺失时优雅跳过
+- 若 `miniMode.supported` 为 true，需提供 8 个基础 mini 状态；`mini-working`、`mini-peek-hold`、`mini-sleep-peek` 是可选增强，缺失时优雅降级
 - 能力缺失时走 `VISUAL_FALLBACK_STATES` 回退链
 - 默认配置集中在 `theme-loader.js` 顶部的 `DEFAULT_*` 常量；loader 保持 stateless，`src/theme-runtime.js` 是唯一 active-theme owner，主题 reload/sync/cache 不得另设模块级真相
 - 变体是白名单 deep-merge；数组和特定字段会整体替换
@@ -124,6 +124,8 @@ Settings 是独立 `BrowserWindow`，采用 5 层结构：
 - `checkMiniModeSnap()` 检查所有显示器右边缘
 - `miniIdleNow` 独立于 `idleNow`，只走眼球追踪，不走睡眠序列
 - `animateWindowX()` + `animateWindowParabola()` 负责滑动与抛物线动画
+- 醒着悬停立即切 `mini-peek`；其 autoReturn 到时若鼠标仍在，有 `mini-peek-hold` 则循环保持，否则回 `mini-idle`，两者均以 `miniPeeked` 防止重复探身。睡着悬停有 `mini-sleep-peek` 才切图；没有时只滑窗口。离开分别回 `mini-idle` / `mini-sleep`，关闭 DND 会让睡眠探身滑回并回 `mini-idle`
+- `miniMode.peek` 可选设置 `offsetRatio`（按当前窗口宽取整，默认固定 25px）、`delayMs`（默认 0）和 `durationMs`（默认 200，滑出滑回共用）；`miniMode.sleepPeek` 逐字段继承 `peek`，再回默认。缓动仍为 `t·(2−t)`。延迟期间离开、退出 mini、主题刷新、拖拽、菜单、mini 过渡或显示器变化会取消待执行滑动；滑动仍通过 mini 的窗口保护与 `finalizeMiniProtectionExit` 收尾。点击横向加宽读取实际滑动距离
 - `savePrefs()` 会持久化 `miniMode/preMiniX/preMiniY`
 
 Mini 状态映射：
@@ -133,11 +135,13 @@ Mini 状态映射：
 | `mini-idle` | `clawd-mini-idle.svg` | 待机：呼吸、眨眼、手臂晃动、眼球追踪 |
 | `mini-enter` | `clawd-mini-enter.svg` | 一次性滑入弹跳 |
 | `mini-peek` | `clawd-mini-peek.svg` | Hover 探头 |
+| `mini-peek-hold` | 主题可选 | `mini-peek` autoReturn 后仍悬停时循环保持；缺失则 `mini-idle` |
 | `mini-alert` | `clawd-mini-alert.svg` | 通知 |
 | `mini-happy` | `clawd-mini-happy.svg` | 完成 |
 | `mini-crabwalk` | `clawd-mini-crabwalk.svg` | 右键进入时的螃蟹步 |
 | `mini-enter-sleep` | `clawd-mini-enter-sleep.svg` | DND 下入场 |
 | `mini-sleep` | `clawd-mini-sleep.svg` | DND 休眠 |
+| `mini-sleep-peek` | 主题可选 | DND 休眠时悬停；缺失则保持 `mini-sleep` 画面 |
 | `mini-working` | 主题可选 | 1 会话 mini typing；缺失则静默跳过 |
 
 ## State To Animation Mapping
@@ -146,7 +150,7 @@ Mini 状态映射：
 
 - working 子动画：Clawd 主题为 1 会话 → typing，2 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作
 - juggling 子动画：1 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作）
-- mini 状态有独立动画槽；`mini-working` 是可选能力
+- mini 状态有独立动画槽；`mini-working`、`mini-peek-hold`、`mini-sleep-peek` 是可选能力
 - 睡眠序列和 DND 行为见上面的 State Machine
 - `attention / error / sweeping / notification / carrying` 是一次性状态，显示后按 `autoReturn` 回退
 

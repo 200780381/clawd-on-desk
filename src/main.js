@@ -1140,7 +1140,7 @@ const petWindowRuntime = createPetWindowRuntime({
   getMiniMode: () => _mini.getMiniMode(),
   getMiniTransitioning: () => _mini.getMiniTransitioning(),
   getMiniContainedSeam: () => _mini.getContainedSeam(),
-  getMiniPeekOffset: () => _mini.PEEK_OFFSET,
+  getMiniPeekOffset: () => _mini.getMiniPeekOffset(),
   getCurrentPixelSize: () => getCurrentPixelSize(),
   getEffectiveCurrentPixelSize: (workArea) => getEffectiveCurrentPixelSize(workArea),
   getAllowEdgePinning: () => allowEdgePinningCached,
@@ -2319,6 +2319,7 @@ const _stateCtx = {
   set miniSleepPeeked(v) { _mini.setMiniSleepPeeked(v); },
   get miniPeeked() { return _mini.getMiniPeeked(); },
   set miniPeeked(v) { _mini.setMiniPeeked(v); },
+  cancelPendingMiniPeek: (resetState) => _mini.cancelPendingMiniPeek(resetState),
   get idlePaused() { return idlePaused; },
   set idlePaused(v) { idlePaused = v; },
   get forceEyeResend() { return forceEyeResend; },
@@ -2349,7 +2350,7 @@ const _stateCtx = {
   isAgentNotificationHookEnabled: (agentId) =>
     _runtimeAgentGate.isAgentNotificationHookEnabled(agentId),
   resolveAgentDisplayName: _resolveAgentDisplayName,
-  miniPeekIn: () => miniPeekIn(),
+  miniPeekIn: (mode) => miniPeekIn(mode),
   miniPeekOut: () => miniPeekOut(),
   buildContextMenu: () => buildContextMenu(),
   buildTrayMenu: () => buildTrayMenu(),
@@ -2588,6 +2589,7 @@ const _tickCtx = {
   set miniSleepPeeked(v) { _mini.setMiniSleepPeeked(v); },
   get miniPeeked() { return _mini.getMiniPeeked(); },
   set miniPeeked(v) { _mini.setMiniPeeked(v); },
+  cancelPendingMiniPeek: (resetState) => _mini.cancelPendingMiniPeek(resetState),
   get mouseOverPet() { return mouseOverPet; },
   set mouseOverPet(v) { mouseOverPet = v; },
   get forceEyeResend() { return forceEyeResend; },
@@ -2601,7 +2603,7 @@ const _tickCtx = {
   applyState,
   getIdleVisualChoice,
   getEffectiveAccessoryIds: getEffectivePetAccessoryIds,
-  miniPeekIn: () => miniPeekIn(),
+  miniPeekIn: (mode) => miniPeekIn(mode),
   miniPeekOut: () => miniPeekOut(),
   getObjRect,
   getHitRectScreen,
@@ -4443,7 +4445,10 @@ const _menuCtx = {
   get isQuitting() { return isQuitting; },
   set isQuitting(v) { isQuitting = v; },
   get menuOpen() { return menuOpen; },
-  set menuOpen(v) { menuOpen = v; },
+  set menuOpen(v) {
+    if (v) _mini.cancelPendingMiniPeek(true);
+    menuOpen = v;
+  },
   get tray() { return tray; },
   set tray(v) { tray = v; },
   get contextMenuOwner() { return contextMenuOwner; },
@@ -5216,7 +5221,10 @@ function createWindow() {
       if (themeRuntime.isReloadInProgress()) return;
       petWindowRuntime.recoverVisiblePetAfterRendererLoad();
     },
-    setDragLocked: (value) => { petWindowRuntime.setDragLocked(value); },
+    setDragLocked: (value) => {
+      if (value) _mini.cancelPendingMiniPeek(true);
+      petWindowRuntime.setDragLocked(value);
+    },
     setMouseOverPet: (value) => { mouseOverPet = !!value; },
     cancelRoam: () => _roam.cancelRoam(),
     beginDragSnapshot: () => beginDragSnapshot(),
@@ -5450,6 +5458,9 @@ const _miniCtx = {
   get doNotDisturb() { return doNotDisturb; },
   set doNotDisturb(v) { doNotDisturb = v; },
   get currentState() { return _state.getCurrentState(); },
+  get mouseOverPet() { return mouseOverPet; },
+  get dragLocked() { return petWindowRuntime.isDragLocked(); },
+  get menuOpen() { return menuOpen; },
   notifyUpdaterSilentExit: () => notifyUpdaterSilentExit(),
   SIZES,
   getCurrentPixelSize,
@@ -5466,6 +5477,7 @@ const _miniCtx = {
   clampToScreenVisual,
   getNearestWorkArea,
   getPetWindowBounds,
+  getHitRectScreen,
   applyPetWindowBounds,
   applyPetWindowPosition,
   setViewportOffsetY,

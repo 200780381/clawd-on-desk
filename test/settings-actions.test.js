@@ -2873,6 +2873,18 @@ describe("setIdleVisual command", () => {
     assert.match(r.message, /not an idle visual/);
   });
 
+  it("accepts a selectable-only idle visual through the existing setting command", () => {
+    const theme = {
+      ...activeTheme,
+      idleVisualOptions: [{ file: "pool.apng" }],
+    };
+    const result = commandRegistry.setIdleVisual(
+      { themeId: "clawd", file: "pool.apng" },
+      makeDeps({ getActiveTheme: () => theme })
+    );
+    assert.deepStrictEqual(result, { status: "ok", commit: { idleVisual: { clawd: "pool.apng" } } });
+  });
+
   it("commits the merged map for a valid pool file, preserving other themes", () => {
     const deps = makeDeps({
       snapshot: { ...prefs.getDefaults(), idleVisual: { calico: "calico-idle-stretch.svg" } },
