@@ -564,9 +564,13 @@ function renderIrreversibleBadge(data, isPlanReview = false) {
   // suggestion buttons, and the no-decision fallback are untouched. textContent only.
   let hintInput = data.toolInput;
   if (data.familyAgentId && shouldScanIrreversibleCommand(data.toolName)
-    && hintInput && typeof hintInput.resource === "string" && hintInput.resource
-    && !(typeof hintInput.command === "string" && hintInput.command)) {
-    hintInput = { ...hintInput, command: hintInput.resource };
+    && hintInput && !(typeof hintInput.command === "string" && hintInput.command)) {
+    if (typeof hintInput.resource === "string" && hintInput.resource) {
+      hintInput = { ...hintInput, command: hintInput.resource };
+    } else if (Array.isArray(hintInput.resources) && hintInput.resources.length > 0
+      && hintInput.resources.every((resource) => typeof resource === "string")) {
+      hintInput = { ...hintInput, command: hintInput.resources.join("\n") };
+    }
   }
   const irreversible = detectIrreversible(data.toolName, hintInput);
   // A held card's reason is decided in the main process, which scanned the

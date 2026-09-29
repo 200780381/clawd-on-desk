@@ -1,5 +1,5 @@
 "use strict";
-// opencode host major-version detection (upstream PR #1045 review).
+// opencode host major-version detection (PR #1045 follow-up).
 //
 // opencode <= 1.18.15 REJECTS unknown top-level config keys
 // ("Unrecognized key: plugins"), so the v2 `plugins`-key entry may only be
@@ -20,10 +20,13 @@
 //
 // Probing order mirrors hooks/pi-install.js: try the bare command first (a
 // terminal-launched Clawd has the user's PATH), then a login shell so a
-// GUI-launched Clawd still sees the user's real PATH; Windows resolves via
-// `where`. Only Node builtins — this module must stay dep-free.
+// GUI-launched Clawd still sees the user's real PATH; Windows walks PATH
+// directly because `where` prints OEM-encoded paths that UTF-8 corrupts.
+// Only Node builtins — this module must stay dep-free.
 
 const childProcess = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 const LOCATE_TIMEOUT_MS = 1500;
 const VERSION_PROBE_TIMEOUT_MS = 5000;
@@ -73,19 +76,42 @@ function firstNonEmptyLine(text) {
 // Returns the raw --version output ("" when no probe produced a parseable
 // version), so tests can inject `options.opencodeVersion` instead of a fake
 // binary.
-function probeVersionText(execFileImpl, platform) {
+function windowsEnvValue(env, name) {
+  const key = Object.keys(env || {}).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  return key ? env[key] : undefined;
+}
+
+function findWindowsOpencode(env, fsImpl) {
+  const searchPath = windowsEnvValue(env, "PATH");
+  if (typeof searchPath !== "string") return null;
+  const rawExt = windowsEnvValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD";
+  const extensions = String(rawExt).split(";").map((ext) => ext.trim())
+    .filter((ext) => /^\.(?:com|exe|bat|cmd)$/i.test(ext));
+  for (const part of searchPath.split(";")) {
+    const dir = part.trim().replace(/^"(.*)"$/, "$1");
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = path.win32.join(dir, `opencode${ext.toLowerCase()}`);
+      try {
+        if (fsImpl.statSync(candidate).isFile()) return candidate;
+      } catch {}
+    }
+  }
+  return null;
+}
+
+function probeVersionText(execFileImpl, platform, options = {}) {
   const versionArgs = ["--version"];
   if (platform === "win32") {
-    const whereOut = probeOutput(execFileImpl, "where", ["opencode"], LOCATE_TIMEOUT_MS);
     // npm also puts an extensionless POSIX shim on PATH. Windows cannot
     // execFile it, and .cmd/.bat launchers require cmd.exe (EINVAL otherwise).
-    const bin = String(whereOut || "").split(/\r?\n/).map((line) => line.trim())
-      .find((line) => /\.(?:exe|com|cmd|bat)$/i.test(line));
+    const env = options.env || process.env;
+    const bin = findWindowsOpencode(env, options.fs || fs);
     if (!bin) return "";
     if (/\.(?:cmd|bat)$/i.test(bin)) {
-      // Do not interpolate paths that cmd would expand or reinterpret.
+      // Refuse characters that can be reinterpreted by the cmd launcher.
       if (/["%\r\n]/.test(bin)) return "";
-      return probeOutput(execFileImpl, process.env.ComSpec || "cmd.exe",
+      return probeOutput(execFileImpl, windowsEnvValue(env, "ComSpec") || "cmd.exe",
         ["/d", "/v:off", "/s", "/c", `""${bin}" --version"`], VERSION_PROBE_TIMEOUT_MS,
         { windowsVerbatimArguments: true }) || "";
     }
@@ -113,14 +139,14 @@ function normalizeHostDetection(value) {
 //   - options.opencodeVersion:       raw `--version` output to parse
 function detectOpencodeHost(options = {}) {
   const explicit = normalizeHostDetection(options.opencodeHostDetection)
-    || normalizeHostDetection(process.env.CLAWD_OPENCODE_HOST);
+    || normalizeHostDetection((options.env || process.env).CLAWD_OPENCODE_HOST);
   if (explicit) return explicit;
 
   const execFileImpl = options.execFile || childProcess.execFileSync;
   const platform = options.platform || process.platform;
   const versionText = typeof options.opencodeVersion === "string"
     ? options.opencodeVersion
-    : probeVersionText(execFileImpl, platform);
+    : probeVersionText(execFileImpl, platform, options);
   const version = parseOpencodeVersion(versionText);
   if (!version) return "unknown";
   return version.major >= 2 ? "v2" : "v1";
@@ -131,5 +157,5 @@ module.exports = {
   VERSION_PROBE_TIMEOUT_MS,
   parseOpencodeVersion,
   detectOpencodeHost,
-  __test: { probeOutput, firstNonEmptyLine, probeVersionText, normalizeHostDetection },
+  __test: { probeOutput, firstNonEmptyLine, probeVersionText, findWindowsOpencode, normalizeHostDetection },
 };

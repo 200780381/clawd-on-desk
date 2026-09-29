@@ -194,10 +194,11 @@ Required all-platform checks:
 - Install MiMo Code into a commented/trailing-comma JSONC config, exercise
   Allow/Always/Deny and DND fallback, then uninstall and confirm user config is preserved.
 - opencode v2 acceptance (#1039, macOS real-machine verified 2026-09-24 with opencode 2.0.15 + GLM): dual-key register, live state flow idle→thinking→working→attention, and the FULL bubble decision round-trip against a live Clawd running the v2 branch — Allow (sequential asks per tool call), Deny (opencode reports "Permission denied"), family-Always plus same-session always-hit with zero bubbles, auto-tools automation interop (decision in ~3ms without a bubble), and the fail-closed leg against a Clawd without the v2 branch. Pending: the Windows real-machine matrix (both opencode 1.18.31 contract and 2.0.15) and a packaged-build (asar) spot check of the same flows.
+- Host version controls v2 registration: confirmed v2 writes `plugins`, confirmed v1 removes only Clawd-owned v2 entries, and unknown leaves `plugins` untouched. In the Windows smoke, include an opencode install path containing non-ASCII characters and verify the PATH/PATHEXT probe plus `opencode service restart`; a new session alone does not guarantee the shared service reloads its plugin.
 - Windows packaged opencode acceptance (#1026, requires a real opencode 1.18.31):
   install the Program Files Clawd package, confirm the opencode config points at
   `%USERPROFILE%\.clawd\integrations\...\generations\<hash>\opencode-plugin` (never
-  `app.asar.unpacked`), and that the managed four-file generation bytes/hash match the
+  `app.asar.unpacked`), and that the managed five-file generation bytes/hash match the
   packaged source with no deny-write ACL. Start a real opencode session and confirm
   exactly one Clawd state stream and one permission request per interaction (no double
   load from a duplicate entry). Restart Clawd twice and confirm startup sync is

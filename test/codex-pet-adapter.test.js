@@ -899,7 +899,7 @@ describe("codex-pet-adapter wrapper generation and materialization", () => {
     assert.strictEqual(fs.existsSync(wrapperPath), true);
   });
 
-  it("upgrades a suffixed v5 managed theme to v6 without reallocating its id", () => {
+  it("upgrades a suffixed v5 managed theme to v7 without reallocating its id", () => {
     const root = makeTempDir();
     const petsDir = path.join(root, "pets");
     copyFixturePackage(petsDir, "tiny-atlas-png");
@@ -925,13 +925,38 @@ describe("codex-pet-adapter wrapper generation and materialization", () => {
     assert.strictEqual(upgraded.updated, 1);
     assert.strictEqual(upgraded.themes[0].themeId, themeId);
     assert.strictEqual(fs.readFileSync(path.join(unmanagedDir, "theme.json"), "utf8"), "{\"name\":\"User Theme\"}\n");
-    assert.strictEqual(readJson(markerPath).adapterVersion, 6);
+    assert.strictEqual(readJson(markerPath).adapterVersion, 7);
     assert.strictEqual(fs.existsSync(path.join(assetsDir, adapter.DIRECTIONAL_DRAG_WRAPPER)), true);
     assert.strictEqual(fs.existsSync(path.join(assetsDir, "codex-pet-running-left-loop.svg")), false);
     assert.strictEqual(fs.existsSync(path.join(assetsDir, "codex-pet-running-right-loop.svg")), false);
     const themeJson = readJson(path.join(themeDir, "theme.json"));
     assert.strictEqual(themeJson.reactions.drag.fileLeft, adapter.DIRECTIONAL_DRAG_WRAPPER);
     assert.strictEqual(themeJson.reactions.drag.fileRight, adapter.DIRECTIONAL_DRAG_WRAPPER);
+  });
+
+  it("PR #1022 follow-up: upgrades a v6 pet to the waving juggling pose", () => {
+    const root = makeTempDir();
+    const petsDir = path.join(root, "pets");
+    copyFixturePackage(petsDir, "tiny-atlas-png");
+    const userDataDir = path.join(root, "userData");
+    const first = adapter.syncCodexPetThemes({ codexPetsDir: petsDir, userDataDir });
+    const themeDir = path.join(userDataDir, "themes", first.themes[0].themeId);
+    const markerPath = path.join(themeDir, adapter.MARKER_FILENAME);
+    const themePath = path.join(themeDir, "theme.json");
+    const marker = readJson(markerPath);
+    marker.adapterVersion = 6;
+    writeJson(markerPath, marker);
+    const theme = readJson(themePath);
+    theme.states.juggling = ["codex-pet-running-loop.svg"];
+    theme.jugglingTiers[0].file = "codex-pet-running-loop.svg";
+    writeJson(themePath, theme);
+
+    const upgraded = adapter.syncCodexPetThemes({ codexPetsDir: petsDir, userDataDir });
+    assert.strictEqual(upgraded.updated, 1);
+    assert.strictEqual(readJson(markerPath).adapterVersion, 7);
+    const refreshed = readJson(themePath);
+    assert.strictEqual(refreshed.states.juggling[0], "codex-pet-waving-loop.svg");
+    assert.strictEqual(refreshed.jugglingTiers[0].file, "codex-pet-waving-loop.svg");
   });
 
   it("caches PNG unused-cell validation for unchanged startup syncs", () => {

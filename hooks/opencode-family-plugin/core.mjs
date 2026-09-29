@@ -2996,6 +2996,17 @@ export function createOpencodeFamilyPluginV2(config) {
   // "Always allow" decisions: key `${sessionId}\u0000${action}`. Insertion-
   // ordered; the oldest entry is evicted at the cap.
   const _alwaysAllowedBySessionAction = new Map();
+  const _blockingPermissionsBySession = new Map();
+
+  function abortV2BlockingPermissions(sessionId) {
+    const pending = _blockingPermissionsBySession.get(sessionId);
+    if (!pending) return;
+    _blockingPermissionsBySession.delete(sessionId);
+    for (const item of pending) {
+      item.snapshot.cancelled = true;
+      item.controller.abort();
+    }
+  }
   let _reqCounter = 0;
   let _permissionReqCounter = 0;
 
@@ -3481,6 +3492,10 @@ export function createOpencodeFamilyPluginV2(config) {
         ? envelope.durable.aggregateID
         : "");
     const sessionId = normalizeSessionId(rawSessionId) || null;
+    if (sessionId && ["session.execution.interrupted", "session.execution.failed",
+      "session.execution.succeeded", "session.deleted"].includes(type)) {
+      abortV2BlockingPermissions(sessionId);
+    }
 
     // Per-event cwd from the envelope location (authoritative for v2 —
     // ctx.location is the service-level directory, never a session cwd).
@@ -3758,7 +3773,16 @@ export function createOpencodeFamilyPluginV2(config) {
   async function deliverV2BlockingPermission(snapshot) {
     const candidates = getPermissionPortCandidates();
     for (const port of candidates) {
+      if (snapshot.cancelled) return { decision: null };
       const controller = new AbortController();
+      const sessionId = snapshot.body.session_id;
+      let pending = _blockingPermissionsBySession.get(sessionId);
+      if (!pending) {
+        pending = new Set();
+        _blockingPermissionsBySession.set(sessionId, pending);
+      }
+      const item = { controller, snapshot };
+      pending.add(item);
       const timer = setTimeout(() => controller.abort(), V2_PERMISSION_BLOCKING_TIMEOUT_MS);
       try {
         const res = await fetch(`http://127.0.0.1:${port}/permission`, {
@@ -3799,6 +3823,10 @@ export function createOpencodeFamilyPluginV2(config) {
         debugLog(`PERM[${snapshot.reqId}] port=${port} ERR ${err && err.name}/${err && err.message}`);
       } finally {
         clearTimeout(timer);
+        pending.delete(item);
+        if (pending.size === 0 && _blockingPermissionsBySession.get(sessionId) === pending) {
+          _blockingPermissionsBySession.delete(sessionId);
+        }
       }
     }
     return { decision: null };
@@ -3845,6 +3873,7 @@ export function createOpencodeFamilyPluginV2(config) {
     };
     debugLog(`PERM forward action=${action} session=${sessionId || "(default)"} req=${requestId}`);
     const outcome = await deliverV2BlockingPermission(snapshot);
+    if (snapshot.cancelled) return;
     if (outcome.decision === "allow") {
       event.effect = "allow";
       debugLog(`PERM resolved allow req=${requestId}`);
@@ -3929,6 +3958,7 @@ export function createOpencodeFamilyPluginV2(config) {
       // instance's identity-recovery state when its dispose finally resolves.
       const disposeThisInstance = () => {
         instance.disposed = true;
+        for (const sessionId of _blockingPermissionsBySession.keys()) abortV2BlockingPermissions(sessionId);
         controller.abort();
         dropV2IdentityRecovery();
         const registration = instance.registration;
@@ -4091,4 +4121,3 @@ export function createOpencodeFamilyPluginV2(config) {
 
   return definition;
 }
-

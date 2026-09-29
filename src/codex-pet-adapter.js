@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
 
-const ADAPTER_VERSION = 6;
+const ADAPTER_VERSION = 7;
 const MARKER_FILENAME = ".clawd-codex-pet.json";
 const THEME_ID_PREFIX = "codex-pet-";
 const DIRECTIONAL_DRAG_WRAPPER = "codex-pet-drag-directional-loop.svg";

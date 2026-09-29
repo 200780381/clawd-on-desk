@@ -237,6 +237,64 @@ describe("opencode v2 permission evaluate hook", () => {
     };
   }
 
+  it("issue #1039 follow-up: terminal session events abort only that session's pending approvals", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    const pending = [];
+    t.after(() => { for (const item of pending) item.reject(new Error("test cleanup")); });
+    fetchStub.respondWith((_, call) => {
+      if (!call.url.endsWith("/permission")) {
+        return { status: 204, headers: { get: () => "clawd-on-desk" }, text: async () => "" };
+      }
+      return new Promise((resolve, reject) => {
+        const item = { signal: call.options.signal, body: call.body, reject };
+        pending.push(item);
+        call.options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    });
+    for (const terminal of ["session.execution.interrupted", "session.execution.failed", "session.execution.succeeded", "session.deleted"]) {
+      const sid = `ses_${terminal.replaceAll(".", "_")}`;
+      const affected = evaluation({ sessionID: sid, source: { type: "tool", id: sid } });
+      const other = evaluation({ sessionID: `${sid}_other`, source: { type: "tool", id: `${sid}_other` } });
+      const first = def.__test.handleV2PermissionEvaluate(affected);
+      const second = def.__test.handleV2PermissionEvaluate(other);
+      await tick(10);
+      const affectedPost = pending.find((item) => item.body.session_id === `opencode:${sid}`);
+      const otherPost = pending.find((item) => item.body.session_id === `opencode:${sid}_other`);
+      assert.ok(affectedPost && otherPost);
+      def.__test.handleV2Event({ type: terminal, data: { sessionID: sid } });
+      await tick(10);
+      assert.strictEqual(affectedPost.signal.aborted, true, terminal);
+      assert.strictEqual(otherPost.signal.aborted, false, "other session remains pending");
+      otherPost.signal.dispatchEvent(new Event("abort"));
+      await Promise.all([first, second]);
+      assert.strictEqual(affected.effect, "ask", "cancellation cannot grant a decision");
+    }
+  });
+
+  it("issue #1039 follow-up: a late approval response cannot decide an interrupted ask", async (t) => {
+    writeRuntimeFile(t);
+    const fetchStub = stubFetch(t);
+    const { def } = await makeDefinition();
+    let answer;
+    fetchStub.respondWith((_, call) => call.url.endsWith("/permission")
+      ? new Promise((resolve) => { answer = () => resolve({
+        status: 200, headers: { get: () => "clawd-on-desk" }, text: async () => '{"decision":"allow"}',
+      }); })
+      : { status: 204, headers: { get: () => "clawd-on-desk" }, text: async () => "" });
+    const event = evaluation({ sessionID: "ses_late" });
+    const awaiting = def.__test.handleV2PermissionEvaluate(event);
+    await tick(10);
+    const call = fetchStub.calls.find((item) => item.url.endsWith("/permission"));
+    assert.ok(call && answer);
+    def.__test.handleV2Event({ type: "session.execution.interrupted", data: { sessionID: "ses_late" } });
+    assert.strictEqual(call.options.signal.aborted, true);
+    answer();
+    await awaiting;
+    assert.strictEqual(event.effect, "ask");
+  });
+
   it("leaves a configured allow untouched and sends nothing", async (t) => {
     const fetchStub = stubFetch(t);
     const { def } = await makeDefinition();
