@@ -26,7 +26,7 @@ A Clawd theme is a folder whose top level contains `theme.json`. The folder name
 
 4. Open `Settings...` -> `Theme` and select the theme. If Clawd was already open and the theme does not appear, restart Clawd.
 
-Avoid using a folder id that matches a built-in theme (`clawd`, `calico`, or `cloudling`) or an official downloadable theme id (`hash-sage`). Built-in themes take priority over user themes with the same id, and an official id is reserved for the downloadable official theme manager. Importing a theme with a reserved id is rejected.
+Avoid using a folder id that matches a built-in theme (`clawd`, `calico`, or `cloudling`) or an official downloadable theme id (`hash-sage` or `whale-chan`). Built-in themes take priority over user themes with the same id, and an official id is reserved for the downloadable official theme manager. Importing a theme with a reserved id is rejected.
 
 ## Create A New Theme
 

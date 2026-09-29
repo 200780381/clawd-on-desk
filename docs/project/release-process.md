@@ -14,10 +14,10 @@ npm test
 npm run audit:assets
 ```
 
-Official downloadable themes (for example Hash Sage) ship as versioned GitHub
+Official downloadable themes (for example Hash Sage and Whale-chan) ship as versioned GitHub
 Release assets in the separate `rullerzhou-afk/clawd-themes` repository, never
 inside Clawd. Before tagging, confirm the packaged resources still contain no
-`themes/hash-sage/**` payload and that `npm run audit:assets` reports the
+`themes/hash-sage/**` or `themes/whale-chan/**` payload and that `npm run audit:assets` reports the
 tracked-tree budget within policy. On a pull request, the
 `audit:pr-history-assets` gate additionally proves no large official-theme
 media entered the PR's reachable history.

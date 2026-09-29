@@ -28,7 +28,7 @@
 
 Clawd 住在你的桌面上，实时感知 AI 编程助手正在做什么。发起一个长任务，起身去做点别的，等螃蟹告诉你任务完成了再回来。
 
-你提问时它思考，工具运行时它打字，子代理工作时它会戴耳机律动或三球杂耍，审批权限时它弹卡片，任务完成时它庆祝，你离开时它睡觉。内置三套主题：**Clawd**（像素螃蟹）、**Calico**（三花猫）和 **Cloudling**（云宝），支持自定义主题，也支持导入 Codex Pet 动画包；另外可从 设置 → 主题 下载可选官方主题 **Hash Sage**（哈希仙人）。
+你提问时它思考，工具运行时它打字，子代理工作时它会戴耳机律动或三球杂耍，审批权限时它弹卡片，任务完成时它庆祝，你离开时它睡觉。内置三套主题：**Clawd**（像素螃蟹）、**Calico**（三花猫）和 **Cloudling**（云宝），支持自定义主题，也支持导入 Codex Pet 动画包；另外可从 设置 → 主题 下载可选官方主题 **Hash Sage**（哈希仙人）和 **Whale-chan**（鲸鱼娘）。
 
 > 支持 Windows 11、macOS 和 Ubuntu/Linux。Windows 发布包提供独立的 x64 和 ARM64 安装包。源码运行需要 Node.js。支持 **Claude Code**、**Codex CLI**、**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**WorkBuddy**、**Grok Build**、**Kiro CLI**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**ZCode**、**CodeWhale**、**opencode**、**MiMo Code**、**Pi**、**OMP**、**OpenClaw**、**Hermes Agent**、**Qoder**、**QoderWork**、**QwenWork（千问办公）**、**Reasonix CLI** 与 **DeepSeek Harness**。
 
@@ -377,4 +377,5 @@ Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 P
 - **三花猫** 素材由 鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 创作，保留所有权利。
 - **Cloudling（云宝）** 素材由 鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 创作，保留所有权利。云宝的视觉方向包含对 OpenAI Codex logo 的致敬；Codex / OpenAI 相关标识仍归 OpenAI 所有，本项目与 OpenAI 无官方关联，也未获 OpenAI 背书。
 - **Hash Sage（哈希仙人）** 以可选官方主题的形式由 [`rullerzhou-afk/clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 独立分发，素材版权归 鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 所有；许可证与完整署名见主题包内文件。它不适用本项目 AGPL-3.0 源码许可。
+- **Whale-chan（鲸鱼娘）** 以可选官方主题的形式由 [`rullerzhou-afk/clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 独立分发。原始角色形象、设定与上游素材的权利归各自原作者所有，本主题署名上游项目 [Neko3000/deepseek-whalechan](https://github.com/Neko3000/deepseek-whalechan) 所列的 ZipZipPipe 与上善无形；鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 新作的动画与特效采用 CC BY-NC-SA 4.0，完整条款见主题包内文件。本主题是非官方、非商业同人作品，与 DeepSeek 无关联，也未获其授权或背书；它不适用本项目 AGPL-3.0 源码许可。
 - **第三方画师作品**：版权归各自作者所有。
