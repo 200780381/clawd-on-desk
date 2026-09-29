@@ -25,15 +25,15 @@ Windows 的 hit window 在原生 activation controller 可用时按前台全屏�
 - DND 模式：跳过 dozing，直接 yawning → collapsing → sleeping；同时屏蔽 hook 事件
 - 隐藏桌宠（petHidden，入口：托盘 / 右键菜单 / 快捷键）：语义是「看不见宠物」而非免打扰——隐藏时收起宠物、Session HUD、update bubble 和当时 pending 的权限气泡（恢复显示时回来），但隐藏期间新到的权限请求仍照常弹气泡，这是有意设计、不要当 bug 修；要连权限气泡都静默是 DND 的职责（它有回终端确认的 fallback）。Allow/Deny 全局快捷键跟随「可见气泡」：隐藏期间只要有可见气泡就保持注册，但只作用于可见的请求，收起的旧气泡不会被盲操作（#601）。petHidden 不持久化，重启恢复显示
 - Windows 全屏自动隐藏会同时收起桌宠与浮层，并压住全屏期间新到的本地权限请求；退出全屏只恢复仍 pending 且未被其他隐藏条件排除的请求。它不同于手动 petHidden 的新请求例外。隐藏本身不产生决定，远程审批通道与用户配置的 auto-close 仍按原合同运行。
-- working 子动画：Clawd 主题为 1 个会话 → typing，2 个 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作
-- juggling 子动画：1 个 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作）
+- working 子动画：Clawd 主题为 1 个会话 → typing，2 个 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作，Whale-chan（鲸鱼娘，可选安装）为今天也在努力呀 / 魔法添饭 / 雨天踩水
+- juggling 子动画：1 个 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作；Whale-chan：1+ → 魔法添饭）
 
 ## Theme System
 
 Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数都来自主题配置。
 
 - 内置主题目录：`themes/clawd/`、`themes/calico/`、`themes/cloudling/`；`themes/template/` 是脚手架模板
-- 官方可下载主题：Clawd 主仓库**不**打包 Hash Sage 的主题素材；设置页从固定远端 catalog（`https://raw.githubusercontent.com/rullerzhou-afk/clawd-themes/main/catalog-v1.json`）读取主题信息、受限到 `<theme-id>-art.pages.dev/progress/` 的动画展示页，以及一个不超过 1 MiB 的版本化预览图。卡片显示“查看动画”与安装操作，不显示许可摘要或许可链接；完整许可仍保留在 catalog、仓库与主题包中。预览图与主题包都由 Electron main 下载到本地并校验固定 bytes/SHA-256 后才以 `file:` URL 交给 renderer；renderer 不直接加载远程图片。完整主题安装到 `<userData>/themes/<id>/`，并以 **external theme**（`isBuiltin=false`）加载，`trustedRuntime` 不生效。主题包下载/解压只在用户显式点击后发生，首版不做一键更新、backup/rollback 或断点续传。下载用 Electron main `net.request`（继承系统代理/证书，但**不能**像 Codex Pet 那样 pin DNS 结果），因此以「初始 URL 精确 repo/path + 每跳精确 CDN host allowlist + HTTPS/TLS + 无凭据 + 固定 bytes/SHA-256 + manual redirect/no-store/no-referrer」收窄请求面；catalog 无权扩展 host allowlist，未支持 host 返回稳定 `DOWNLOAD_HOST_UNSUPPORTED`
+- 官方可下载主题：Clawd 主仓库**不**打包 Hash Sage、Whale-chan 等官方主题的素材；设置页从固定远端 catalog（`https://raw.githubusercontent.com/rullerzhou-afk/clawd-themes/main/catalog-v1.json`）读取主题信息、受限到 `<theme-id>-art.pages.dev/progress/` 的动画展示页，以及一个不超过 1 MiB 的版本化预览图。卡片显示“查看动画”与安装操作，不显示许可摘要或许可链接；完整许可仍保留在 catalog、仓库与主题包中。预览图与主题包都由 Electron main 下载到本地并校验固定 bytes/SHA-256 后才以 `file:` URL 交给 renderer；renderer 不直接加载远程图片。完整主题安装到 `<userData>/themes/<id>/`，并以 **external theme**（`isBuiltin=false`）加载，`trustedRuntime` 不生效。主题包下载/解压只在用户显式点击后发生，首版不做一键更新、backup/rollback 或断点续传。下载用 Electron main `net.request`（继承系统代理/证书，但**不能**像 Codex Pet 那样 pin DNS 结果），因此以「初始 URL 精确 repo/path + 每跳精确 CDN host allowlist + HTTPS/TLS + 无凭据 + 固定 bytes/SHA-256 + manual redirect/no-store/no-referrer」收窄请求面；catalog 无权扩展 host allowlist，未支持 host 返回稳定 `DOWNLOAD_HOST_UNSUPPORTED`
 - 官方主题的 manager 专属目录：下载 `.part` 位于 `<userData>/theme-downloads/official/`，解压 staging 位于 `<userData>/theme-staging/official/`，均不在 `themes/` 下；manager 写入的 `.clawd-official-theme.json` marker 在 staging 内、最终同卷 `rename` 之前写入并复验。启动清理只遍历这两个专属目录的直接子级、只处理严格合法且超过 24 小时的孤儿
 - 主题目录的点号直接子目录（staging/backup/lock 等）永远不是主题：`theme-loader._scanThemesDir`、`theme-metadata.scanMetadata` 与 `_readThemeJson` 的按 id 直接读取用同一个「非点号直接子目录」判定，因此点目录既不会被扫描、也不会被选择或直接读取
 - 主题 mutation 的统一 domain lock：`setThemeSelection`、通用 `removeTheme`、内部 `officialTheme.commitInstall` / `officialTheme.uninstall` 共用 `lockKey = "theme"`；destructive fs 操作前在锁内复检 active/target/lstat/marker。`activateTheme` 在 fade sequencer 完成前就返回，因此卸载 active 主题必须等待 `waitForThemeReloadSettled()`；sequencer 在 runtime 切换后同步抛错时走无淡入淡出 fallback 并返回成功
@@ -148,8 +148,8 @@ Mini 状态映射：
 
 权威表格见 `docs/guides/state-mapping.md`。这里只保留实现层面的补充：
 
-- working 子动画：Clawd 主题为 1 会话 → typing，2 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作
-- juggling 子动画：1 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作）
+- working 子动画：Clawd 主题为 1 会话 → typing，2 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作，Whale-chan（鲸鱼娘，可选安装）为今天也在努力呀 / 魔法添饭 / 雨天踩水
+- juggling 子动画：1 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作；Whale-chan：1+ → 魔法添饭）
 - mini 状态有独立动画槽；`mini-working`、`mini-peek-hold`、`mini-sleep-peek` 是可选能力
 - 睡眠序列和 DND 行为见上面的 State Machine
 - `attention / error / sweeping / notification / carrying` 是一次性状态，显示后按 `autoReturn` 回退
