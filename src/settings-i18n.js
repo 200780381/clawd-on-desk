@@ -8131,6 +8131,7 @@
     "arismarioneves", "wang4433", "shengmai-justin", "aaronWool", "Zamaniego", "CheeseAgent", "RS-Nocsi", "Cobb04",
     "eugenewang5425", "draintovmasyan783-creator", "Yueh-H", "TalexDreamSoul", "FuZoe", "undefined-moe",
     "pu-1205", "Free-LZJ", "easyhak", "jlimcode", "xfurqan0", "brantshin", "mantertius", "VonSdite", "sunnyswag",
+    "hanzhe-one", "52mzd", "gzx19990101", "ypjn", "jin-codes",
   ];
 
   root.ClawdSettingsI18n = {
