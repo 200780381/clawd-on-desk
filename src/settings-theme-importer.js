@@ -6,6 +6,7 @@ const codexPetImporter = require("./codex-pet-importer");
 const { MARKER_FILENAME: OFFICIAL_THEME_MARKER_FILENAME } = require("./official-theme-installer");
 const {
   collectRequiredAssetFiles,
+  filterIdleVisualOptionsByAsset,
   mergeDefaults,
   validateTheme,
 } = require("./theme-schema");
@@ -146,6 +147,9 @@ function validateExtractedTheme({ fs, path, stagingDir, themeId }) {
   if (errors.length > 0) throw new Error(`theme.json validation failed: ${errors.join("; ")}`);
 
   const effective = mergeDefaults(raw, themeId, false);
+  filterIdleVisualOptionsByAsset(effective, (filename) => {
+    try { return fs.statSync(path.join(stagingDir, "assets", filename)).isFile(); } catch { return false; }
+  });
   const missingAssets = collectRequiredAssetFiles(effective)
     .filter((filename) => !fs.existsSync(path.join(stagingDir, "assets", filename)));
   if (missingAssets.length > 0) {

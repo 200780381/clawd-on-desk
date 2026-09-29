@@ -15,6 +15,7 @@ const { createTranslator } = require("../src/i18n");
 const { makeSessionKey, resolveSessionIdentity } = require("../src/session-key");
 const { isSessionInProgress } = require("../src/state-session-snapshot");
 const { countLiveSubagents } = require("../src/state-visual-resolver");
+const { resolveIdleVisualChoice } = require("../src/idle-visual");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,59 @@ function makePidKill(alivePids) {
 function cloneTheme(theme) {
   return JSON.parse(JSON.stringify(theme));
 }
+
+describe("optional mini peek states", () => {
+  let api;
+
+  beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"] }));
+  afterEach(() => {
+    if (api) api.cleanup();
+    mock.timers.reset();
+    api = null;
+  });
+
+  it("returns mini-peek to mini-idle for an undeclared hold state", () => {
+    const theme = cloneTheme(_defaultTheme);
+    theme.timings.autoReturn["mini-peek"] = 80;
+    const ctx = makeCtx({ theme, miniMode: true, mouseOverPet: true });
+    api = require("../src/state")(ctx);
+    api.applyState("mini-peek");
+    mock.timers.tick(80);
+    assert.equal(api.getCurrentState(), "mini-idle");
+    assert.equal(ctx.miniPeeked, true);
+  });
+
+  it("returns mini-peek to the declared hold without replaying the peek", () => {
+    const theme = cloneTheme(_defaultTheme);
+    theme.miniMode.states["mini-peek-hold"] = ["hold.svg"];
+    theme.timings.autoReturn["mini-peek"] = 80;
+    theme.timings.autoReturn["mini-peek-hold"] = 40;
+    let slides = 0;
+    const ctx = makeCtx({ theme, miniMode: true, mouseOverPet: true, miniPeekIn: () => { slides++; } });
+    api = require("../src/state")(ctx);
+    api.applyState("mini-peek");
+    mock.timers.tick(80);
+    assert.equal(api.getCurrentState(), "mini-peek-hold");
+    assert.equal(ctx.miniPeeked, true);
+    assert.equal(slides, 0);
+    mock.timers.tick(80);
+    assert.equal(api.getCurrentState(), "mini-peek-hold", "hold stays looping even if a timing is declared");
+  });
+
+  it("turning DND off from mini-sleep-peek slides home and restores mini-idle", () => {
+    const theme = cloneTheme(_defaultTheme);
+    theme.miniMode.states["mini-sleep-peek"] = ["sleep-peek.svg"];
+    let outs = 0;
+    const ctx = makeCtx({ theme, miniMode: true, doNotDisturb: true,
+      miniSleepPeeked: true, miniPeekOut: () => { outs++; } });
+    api = require("../src/state")(ctx);
+    api.applyState("mini-sleep-peek");
+    api.disableDoNotDisturb();
+    assert.equal(outs, 1);
+    assert.equal(ctx.miniSleepPeeked, false);
+    assert.equal(api.getCurrentState(), "mini-idle");
+  });
+});
 
 /** Shorthand for updateSession with named params */
 function update(api, o = {}) {
@@ -1417,6 +1471,19 @@ describe("cleanStaleSessions()", () => {
     api.cleanStaleSessions();
     assert.strictEqual(api.sessions.size, 0);
     assert.deepStrictEqual(changes[changes.length - 1], ["idle", "clawd-idle-reading.svg"]);
+  });
+
+  it("rests on a selected selectable-only file through the normal userIdle path", () => {
+    const theme = cloneTheme(_defaultTheme);
+    theme.idleVisualOptions = [{ file: "pool.apng" }];
+    const changes = [];
+    api = require("../src/state")(makeCtx({
+      theme,
+      getIdleVisualChoice: () => resolveIdleVisualChoice(theme, { clawd: "pool.apng" }),
+      sendToRenderer: (ev, ...args) => { if (ev === "state-change") changes.push(args); },
+    }));
+    api.applyState("idle");
+    assert.deepStrictEqual(changes.at(-1), ["idle", "pool.apng"]);
   });
 
   it("agentPid alive + sourcePid dead + stale idle → retain", () => {

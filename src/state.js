@@ -564,7 +564,7 @@ function scheduleAutoReturn(state) {
         if (state === "mini-peek") {
           // Peek animation done — stay peeked but show idle (don't re-trigger peek)
           ctx.miniPeeked = true;
-          applyState("mini-idle");
+          applyState(hasOwnVisualFiles("mini-peek-hold") ? "mini-peek-hold" : "mini-idle");
         } else {
           ctx.miniPeekIn();
           applyState("mini-peek");
@@ -855,7 +855,7 @@ function applyState(state, svgOverride, options = {}) {
       autoReturnTimer = null;
       applyResolvedDisplayState();
     }, WAKE_DURATION);
-  } else if (AUTO_RETURN_MS[state]) {
+  } else if (state !== "mini-peek-hold" && state !== "mini-sleep-peek" && AUTO_RETURN_MS[state]) {
     scheduleAutoReturn(state);
   }
 }
@@ -3560,6 +3560,7 @@ function enableDoNotDisturb() {
   // consumers still receive the accepted turn boundary.
   stopWakePoll();
   if (ctx.miniMode) {
+    if (typeof ctx.cancelPendingMiniPeek === "function") ctx.cancelPendingMiniPeek(true);
     applyState("mini-sleep");
   } else {
     applyDndSleepState();
