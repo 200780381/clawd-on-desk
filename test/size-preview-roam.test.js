@@ -173,6 +173,25 @@ it("keeps a pending walk from starting while preview protection is active", asyn
   });
 });
 
+it("resumes the first roam delay when an abandoned preview is cleaned up", async () => {
+  await withHarness({}, async (h) => {
+    h.roam.tick();
+    await h.session.begin(); // the renderer never sends its matching end
+    h.clock.advance(8000);
+    assert.equal(h.state, "idle");
+    assert.equal(h.writes.length, 0);
+    h.roam.tick(); // normal background tick resets the first-walk delay while held
+
+    await h.session.cleanup();
+    h.roam.tick();
+    h.clock.advance(7999);
+    assert.equal(h.state, "idle");
+    h.clock.advance(1);
+    assert.equal(h.state, "roam");
+    assert.ok(h.writes.length > 0);
+  });
+});
+
 it("resumes roaming with the committed size after preview ends", async () => {
   await withHarness({}, async (h) => {
     h.roam.tick();

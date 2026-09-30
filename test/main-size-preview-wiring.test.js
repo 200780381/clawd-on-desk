@@ -22,6 +22,16 @@ it("wires menu resize and roaming to the shared size preview state", () => {
   assert.ok(roam.includes("isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),"));
 });
 
+it("cleans up the size preview when the Settings renderer is reset", () => {
+  const settings = section(
+    "const settingsWindowRuntime = createSettingsWindowRuntime({",
+    "  onBeforeClosed: () => {"
+  );
+  assert.ok(settings.includes(
+    "onRendererReset: () => { void settingsSizePreviewSession.cleanup(); },"
+  ));
+});
+
 it("passes the effective pet size to Settings and notifies after display reflow", () => {
   const ipc = section("const settingsIpcRuntime = registerSettingsIpc({", "sendToRenderer,");
   assert.match(ipc, /getSizeContext: getSizeSliderContext,/);

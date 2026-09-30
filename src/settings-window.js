@@ -516,6 +516,17 @@ function createSettingsWindowRuntime(options = {}) {
         sendRequestedTab(createdWindow);
       });
     }
+    if (createdWindow.webContents && typeof createdWindow.webContents.on === "function") {
+      const notifyRendererReset = () => {
+        if (settingsWindow !== createdWindow) return;
+        if (typeof options.onRendererReset === "function") options.onRendererReset();
+      };
+      createdWindow.webContents.on("render-process-gone", notifyRendererReset);
+      createdWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+        if (isInPlace || isMainFrame === false) return;
+        notifyRendererReset();
+      });
+    }
     // textScale is per-display: re-resolve after the user drags the window
     // somewhere else (debounced — "move" fires continuously during drags).
     let moveTextScaleTimer = null;

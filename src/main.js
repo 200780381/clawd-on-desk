@@ -882,6 +882,8 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   onSaveBounds: (bounds) => _settingsController.applyUpdate("settingsWindowBounds", bounds),
   getTitle: () => translate("settingsWindowTitle"),
   onBeforeCreate: () => bumpAnimationOverridePreviewPosterGeneration(),
+  // A replaced or crashed Settings page cannot send its preview-ending IPC.
+  onRendererReset: () => { void settingsSizePreviewSession.cleanup(); },
   onBeforeClosed: () => {
     if (roamFencePickerRuntime) roamFencePickerRuntime.cancel();
     bumpAnimationOverridePreviewPosterGeneration();
