@@ -21,3 +21,13 @@ it("wires menu resize and roaming to the shared size preview state", () => {
   assert.ok(menu.includes("resetKeepSizeFrozen: () => resetKeepSizeFrozen(),"));
   assert.ok(roam.includes("isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),"));
 });
+
+it("cleans up the size preview when the Settings renderer is reset", () => {
+  const settings = section(
+    "const settingsWindowRuntime = createSettingsWindowRuntime({",
+    "  onBeforeClosed: () => {"
+  );
+  assert.ok(settings.includes(
+    "onRendererReset: () => { void settingsSizePreviewSession.cleanup(); },"
+  ));
+});
