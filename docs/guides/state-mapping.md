@@ -184,7 +184,7 @@ Re-downloading after an uninstall is a lossy upgrade: it clears this theme's cus
 
 ## Whale-chan (optional official theme)
 
-Whale-chan (鲸鱼娘) is **not** bundled with Clawd either. It is an optional official theme downloaded on demand from the same `rullerzhou-afk/clawd-themes` repository (Settings → Theme → Official themes) and requires Clawd 1.2.0. Once installed it runs as an external APNG theme with the same logical states, effects baked into each APNG, and no cursor eye tracking:
+Whale-chan (鲸鱼娘) is **not** bundled with Clawd either. It is an optional official theme downloaded on demand from the same `rullerzhou-afk/clawd-themes` repository (Settings → Theme → Official themes) and requires Clawd 1.2.0. Once installed it runs as an external animated-image theme (animated WebP since theme 1.0.1) with the same logical states, effects baked into each animation, and no cursor eye tracking:
 
 | State | Whale-chan animation |
 |---|---|

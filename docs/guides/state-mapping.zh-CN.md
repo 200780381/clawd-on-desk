@@ -108,7 +108,7 @@ OMP 在 Clawd 中同样是 state-only 集成：Clawd 不接管权限、不新增
 
 ## Whale-chan（可选官方主题）
 
-Whale-chan（鲸鱼娘）不随 Clawd 内置，而是从 `rullerzhou-afk/clawd-themes` 按需下载（设置 → 主题 → 官方主题），需要 Clawd 1.2.0。它是外部 APNG 主题，特效已烘入动画，没有鼠标眼球跟随；逻辑状态与其他主题相同。
+Whale-chan（鲸鱼娘）不随 Clawd 内置，而是从 `rullerzhou-afk/clawd-themes` 按需下载（设置 → 主题 → 官方主题），需要 Clawd 1.2.0。它是外部动图主题（主题 1.0.1 起为 WebP 动画），特效已烘入动画，没有鼠标眼球跟随；逻辑状态与其他主题相同。
 
 | 状态 | Whale-chan 动画 |
 |---|---|
