@@ -879,6 +879,8 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   onSaveBounds: (bounds) => _settingsController.applyUpdate("settingsWindowBounds", bounds),
   getTitle: () => translate("settingsWindowTitle"),
   onBeforeCreate: () => bumpAnimationOverridePreviewPosterGeneration(),
+  // A replaced or crashed Settings page cannot send its preview-ending IPC.
+  onRendererReset: () => { void settingsSizePreviewSession.cleanup(); },
   onBeforeClosed: () => {
     if (roamFencePickerRuntime) roamFencePickerRuntime.cancel();
     bumpAnimationOverridePreviewPosterGeneration();
@@ -4384,6 +4386,8 @@ function showResumeInput(t) {
 const _menuCtx = {
   get win() { return win; },
   get sessions() { return sessions; },
+  cancelRoam: () => _roam.cancelRoam(),
+  resetKeepSizeFrozen: () => resetKeepSizeFrozen(),
   // Recovery actions must defeat a stranded drag lock (syncHitWin defers while
   // it is held); see pet-window-runtime releaseStrandedDragLock.
   releaseStrandedDragLock: () => petWindowRuntime.releaseStrandedDragLock(),
@@ -5536,6 +5540,7 @@ const _roamCtx = {
   clampToScreenVisual,
   getMiniMode: () => _mini.getMiniMode(),
   getCurrentState: () => _state.getCurrentState(),
+  isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),
   get miniTransitioning() { return _mini.getMiniTransitioning(); },
   applyState: (state, svgOverride, opts) => _state.applyState(state, svgOverride, opts),
   setState: (state, svgOverride, opts) => _state.setState(state, svgOverride, opts),
