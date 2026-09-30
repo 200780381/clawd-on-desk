@@ -955,3 +955,23 @@ test("applyTextScaleToWindow pokes the slider context even when zoom injection i
   runtime.applyTextScaleToWindow();
   assert.deepStrictEqual(sends, ["settings:text-scale-context-changed"]);
 });
+
+test("notifySizeContextChanged sends only to a live Settings webContents", () => {
+  const { runtime } = createRuntime();
+  assert.doesNotThrow(() => runtime.notifySizeContextChanged());
+
+  runtime.open();
+  const win = FakeBrowserWindow.instances[0];
+  const sends = [];
+  win.webContents.send = (channel) => sends.push(channel);
+  runtime.notifySizeContextChanged();
+  assert.deepStrictEqual(sends, ["settings:size-context-changed"]);
+
+  win.webContents.isDestroyed = () => true;
+  assert.doesNotThrow(() => runtime.notifySizeContextChanged());
+  assert.deepStrictEqual(sends, ["settings:size-context-changed"]);
+
+  win.emit("closed");
+  assert.doesNotThrow(() => runtime.notifySizeContextChanged());
+  assert.deepStrictEqual(sends, ["settings:size-context-changed"]);
+});

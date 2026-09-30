@@ -167,6 +167,7 @@ const {
   getLaunchPixelSize,
   getLaunchSizingWorkArea,
   getProportionalPixelSize,
+  resolveSizeSliderContext,
 } = require("./size-utils");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon, loadTrayFlashIcon } = require("./tray-flash-icon");
@@ -1237,6 +1238,19 @@ function getPixelSizeFor(sizeKey, overrideWa) {
   }
   if (!wa) wa = getPrimaryWorkAreaSafe() || SYNTHETIC_WORK_AREA;
   return getProportionalPixelSize(ratio, wa);
+}
+
+function getSizeSliderContext() {
+  let wa = null;
+  if (win && !win.isDestroyed()) {
+    const { x, y, width, height } = getPetWindowBounds();
+    wa = getNearestWorkArea(x + width / 2, y + height / 2);
+  }
+  if (!wa) wa = getPrimaryWorkAreaSafe() || SYNTHETIC_WORK_AREA;
+  return resolveSizeSliderContext(
+    currentSize, getEffectiveCurrentPixelSize(), wa,
+    keepSizeAcrossDisplaysCached && isProportionalMode()
+  );
 }
 
 function getCurrentPixelSize(overrideWa) {
@@ -4991,6 +5005,7 @@ const settingsIpcRuntime = registerSettingsIpc({
       resolveTextScaleForKey(textScaleByDisplay, textScale, getSettingsDisplayKey()) * 100
     ),
   }),
+  getSizeContext: getSizeSliderContext,
   sendToRenderer,
   getDoNotDisturb: () => doNotDisturb,
   getSoundMuted: () => soundMuted,
@@ -5370,6 +5385,7 @@ function createWindow() {
     displayMetricsGeometryTimer = setTimeout(() => {
       displayMetricsGeometryTimer = null;
       petWindowRuntime.handleDisplayMetricsChanged();
+      settingsWindowRuntime.notifySizeContextChanged();
     }, 400);
   };
   // PR #751 second-review C-6 (Codex non-blocking): §4.3.14's
@@ -5395,8 +5411,14 @@ function createWindow() {
   // existing invalidateDisplaysCache() call) — previously only
   // metrics-changed did, leaving a stale inset alive across a monitor
   // unplug/replug or a genuine topology addition.
-  screen.on("display-removed", () => petWindowRuntime.handleDisplayRemoved());
-  screen.on("display-added", () => petWindowRuntime.handleDisplayAdded());
+  screen.on("display-removed", () => {
+    petWindowRuntime.handleDisplayRemoved();
+    settingsWindowRuntime.notifySizeContextChanged();
+  });
+  screen.on("display-added", () => {
+    petWindowRuntime.handleDisplayAdded();
+    settingsWindowRuntime.notifySizeContextChanged();
+  });
 
   // textScale is per-display: when the topology changes, window→display
   // mappings (and therefore effective scales) can change wholesale. Debounced

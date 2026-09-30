@@ -333,6 +333,14 @@ function createSettingsWindowRuntime(options = {}) {
     try { wc.send("settings:text-scale-context-changed"); } catch {}
   }
 
+  function notifySizeContextChanged() {
+    const win = getWindow();
+    const wc = win && win.webContents;
+    if (!wc || (typeof wc.isDestroyed === "function" && wc.isDestroyed())) return;
+    if (typeof wc.send !== "function") return;
+    try { wc.send("settings:size-context-changed"); } catch {}
+  }
+
   // Hook bursts often contain several activity boundaries for one tool call.
   // Coalesce them before crossing IPC so an open Footprints page can update
   // promptly without rebuilding itself for every individual hook event.
@@ -576,6 +584,7 @@ function createSettingsWindowRuntime(options = {}) {
     open,
     openWhenReady,
     applyTextScaleToWindow,
+    notifySizeContextChanged,
     applyTitleToWindow,
     notifyRecapChanged,
   };
