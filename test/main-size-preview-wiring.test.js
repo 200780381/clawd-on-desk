@@ -21,3 +21,16 @@ it("wires menu resize and roaming to the shared size preview state", () => {
   assert.ok(menu.includes("resetKeepSizeFrozen: () => resetKeepSizeFrozen(),"));
   assert.ok(roam.includes("isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),"));
 });
+
+it("passes the effective pet size to Settings and notifies after display reflow", () => {
+  const ipc = section("const settingsIpcRuntime = registerSettingsIpc({", "sendToRenderer,");
+  assert.match(ipc, /getSizeContext: getSizeSliderContext,/);
+  const context = section("function getSizeSliderContext() {", "function getCurrentPixelSize(");
+  assert.match(context, /getEffectiveCurrentPixelSize\(\)/);
+  assert.match(context, /getNearestWorkArea\(x \+ width \/ 2, y \+ height \/ 2\)/);
+  assert.match(context, /keepSizeAcrossDisplaysCached && isProportionalMode\(\)/);
+  const events = section("const reapplyDisplayGeometryAfterMetricsChange = () => {", "// Read primary display safely");
+  assert.match(events, /petWindowRuntime\.handleDisplayMetricsChanged\(\);\s*settingsWindowRuntime\.notifySizeContextChanged\(\);/);
+  assert.match(events, /petWindowRuntime\.handleDisplayRemoved\(\);\s*settingsWindowRuntime\.notifySizeContextChanged\(\);/);
+  assert.match(events, /petWindowRuntime\.handleDisplayAdded\(\);\s*settingsWindowRuntime\.notifySizeContextChanged\(\);/);
+});
