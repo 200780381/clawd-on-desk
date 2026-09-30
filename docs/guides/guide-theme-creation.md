@@ -635,12 +635,29 @@ If two themes have very different visible body heights even though the window si
 - `contentBox` — the visible body area in viewBox units, not the whole exported canvas. Settings also frames the theme card thumbnail with it: measured against the preview file's own `fileViewBoxes` entry when that file has a valid one and the content box fits inside it, and against the root `viewBox` otherwise
 - `centerX` — the horizontal anchor inside the viewBox
 - `baselineY` — the standing baseline inside the viewBox
-- `visibleHeightRatio` — how tall the visible body should be relative to the window height
+- `visibleHeightRatio` — the height of `contentBox` as a fraction of the window height (default `0.58`). See [Character Size](#character-size) for how to pick it
 - `baselineBottomRatio` — distance from the baseline to the bottom of the window
 
 Mini mode still uses the existing `objectScale` + per-file offsets, so this is mainly for normal mode alignment.
 
 The theme card's preview file is the optional top-level `preview` when you declare one, and `states.idle[0]` otherwise; a variant card uses the variant's own `preview` (or its first `idleAnimations` file) when that asset exists, and is framed by that file. Point `preview` at a file whose canvas contains `contentBox` — a file drawn on a smaller canvas makes the card fall back to the root `viewBox`.
+
+### Character Size
+
+The size slider sets the window size, not the character size. How much of that window the character fills is up to the theme, so two themes can look very different at the same slider position. To match the built-in themes:
+
+- Make `contentBox` hug the idle pose: measure the pose's visible bounding box in viewBox units. Transparent canvas margins are not part of the body.
+- Aim for that bounding box to have `sqrt(width × height)` at about 36% of the window's side length. Clawd, Calico and Cloudling all sit within a few percent of that.
+- With a tight `contentBox`, that works out to `visibleHeightRatio ≈ 0.36 × sqrt(contentBox.height / contentBox.width)`:
+
+  | Tight `contentBox`, height : width | `visibleHeightRatio` |
+  |---|---|
+  | wide, 1 : 1.5 | about 0.29 |
+  | square, 1 : 1 | about 0.36 |
+  | standing figure, 1.5 : 1 | about 0.44 |
+
+- Do not copy `0.58` from the example above onto a tight `contentBox`. Clawd's own `contentBox` is about twice as tall as its body, which is why its ratio is that large. With a box that hugs the body, `0.58` makes the character clearly too large: about 1.6 times the built-in size for a square pose, and close to twice for a wide one.
+- The formula is a starting point. Check the result next to Clawd at the same slider position and nudge the ratio until the two appear about the same size. Every normal-mode state scales with this ratio. Once the pet is in mini mode, the ratio no longer applies.
 
 ## Asset Guidelines
 
