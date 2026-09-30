@@ -34,3 +34,12 @@ it("passes the effective pet size to Settings and notifies after display reflow"
   assert.match(events, /petWindowRuntime\.handleDisplayRemoved\(\);\s*settingsWindowRuntime\.notifySizeContextChanged\(\);/);
   assert.match(events, /petWindowRuntime\.handleDisplayAdded\(\);\s*settingsWindowRuntime\.notifySizeContextChanged\(\);/);
 });
+
+it("rebases the size from the current slider context before disabling keep-size", () => {
+  const rebase = section("function rebaseSizeToRealizedPixels() {", "function getCurrentPixelSize(");
+  assert.match(rebase, /const context = getSizeSliderContext\(\);/);
+  assert.match(rebase, /if \(!context \|\| context\.synced\) return;/);
+  assert.match(rebase, /_deferredResizePet\(formatSizeKey\(context\.ui\)\);/);
+  const injectedDeps = section("injectedDeps: {", "_settingsController.subscribeKey(");
+  assert.match(injectedDeps, /rebaseSizeToRealizedPixels:\s*\(\)\s*=>\s*rebaseSizeToRealizedPixels\(\),/);
+});

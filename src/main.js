@@ -169,6 +169,7 @@ const {
   getProportionalPixelSize,
   resolveSizeSliderContext,
 } = require("./size-utils");
+const { formatSizeKey } = require("./settings-size-slider");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon, loadTrayFlashIcon } = require("./tray-flash-icon");
 const {
@@ -562,6 +563,7 @@ const _settingsController = createSettingsController({
     clearRecentHookEvents: (id) => _server.clearRecentHookEvents(id),
     identifyCustomApplication: (sourcePath) => require("./custom-applications").identifyCustomApplication(sourcePath),
     resizePet: _deferredResizePet,
+    rebaseSizeToRealizedPixels: () => rebaseSizeToRealizedPixels(),
     getActiveSessionAliasKeys: () =>
       _state && typeof _state.getActiveSessionAliasKeys === "function"
         ? _state.getActiveSessionAliasKeys()
@@ -1249,6 +1251,12 @@ function getSizeSliderContext() {
     currentSize, getEffectiveCurrentPixelSize(), wa,
     keepSizeAcrossDisplaysCached && isProportionalMode()
   );
+}
+
+function rebaseSizeToRealizedPixels() {
+  const context = getSizeSliderContext();
+  if (!context || context.synced) return;
+  _deferredResizePet(formatSizeKey(context.ui));
 }
 
 function getCurrentPixelSize(overrideWa) {
