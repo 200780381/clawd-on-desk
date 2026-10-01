@@ -5310,6 +5310,12 @@ html, body {
   margin: 4px 0 12px;
   color: var(--text-secondary, #8a8a8a);
 }
+/* One wrapper per official card row so progress patches can rebuild just that
+   row. contents keeps the children participating in the footer's flex layout
+   exactly as if they had been appended directly. */
+.theme-official-controls {
+  display: contents;
+}
 .theme-official-note {
   flex: 0 0 100%;
   font-size: 12px;

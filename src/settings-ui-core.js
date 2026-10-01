@@ -2076,7 +2076,19 @@
   function applyOfficialThemeProgress(progress) {
     if (!progress || typeof progress !== "object") return;
     runtime.officialThemeOperation = progress.phase && progress.phase !== "idle" ? progress : null;
-    if (state.activeTab === "theme") requestRender({ content: true, preserveScroll: true });
+    if (state.activeTab !== "theme") return;
+    // Progress events arrive many times per download. A full content render
+    // would tear down and rebuild every theme card each time, which drops the
+    // CSS hover highlight on whatever card the cursor is over (and the
+    // scroll-into-place flicker that comes with it). Let the tab update just
+    // its progress rows when it can; fall back to the full render otherwise.
+    const activeTab = tabs[state.activeTab];
+    if (activeTab
+      && typeof activeTab.patchOfficialThemeProgress === "function"
+      && activeTab.patchOfficialThemeProgress()) {
+      return;
+    }
+    requestRender({ content: true, preserveScroll: true });
   }
 
   function clearTransientStateForChanges(changes) {
