@@ -136,6 +136,14 @@ function createThemeTab({
         if (opts.labelKey) el.textContent = opts.labelKey;
         return el;
       },
+      // Minimal stand-in for the shared core helper; the real implementation
+      // (including aria-busy) is covered by the follow-up suite.
+      setButtonState: (btn, patch = {}) => {
+        btn.disabled = patch.disabled === true || patch.pending === true;
+        if (patch.pending === true) btn.classList.add("pending");
+        else if (patch.pending === false) btn.classList.remove("pending");
+        return btn;
+      },
       buildSwitch: () => new dom.FakeElement("div"),
       buildSettingsSelect: () => new dom.FakeElement("div"),
       openExternalSafe: () => {},
@@ -145,6 +153,10 @@ function createThemeTab({
       fetchThemes: () => Promise.resolve(runtime.themeList),
       showToast: () => {},
       focusSettingsTarget: () => {},
+      // Snapshots are trusted in this fake harness; the real gating is covered
+      // by the follow-up suite.
+      officialProgressSnapshotsTrusted: () => true,
+      refreshThemesAfterOfficialOperation: () => Promise.resolve(),
     },
     readers: { getLang: () => "en" },
     tabs: {},
