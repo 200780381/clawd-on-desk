@@ -179,11 +179,11 @@ test("legacy v1 hook_source keeps the fire-and-forget 200-ACK contract", async (
   assert.strictEqual(h.shown[0].isOpencodeV2, undefined);
 });
 
-// Upstream PR #1045 review: the v2 plugin sends a single shell command as
+// PR #1045 follow-up: the v2 plugin sends a single shell command as
 // tool_input.resource, which the destructive-action reminder never scanned —
 // a v2 `rm -rf` was auto-approved under permission automation and the bubble
 // showed no hint. The v2 adapter must alias a lone shell resource to command.
-test("upstream #1045 review: a v2 shell resource feeds the destructive-action reminder", async (t) => {
+test("PR #1045 follow-up: a v2 shell resource feeds the destructive-action reminder", async (t) => {
   const h = await setup(t);
   const posted = postPermission(h.port, makeV2Payload({
     tool_input: { resource: "git push --force origin main" },
@@ -210,7 +210,7 @@ test("upstream #1045 review: a v2 shell resource feeds the destructive-action re
   assert.deepStrictEqual(JSON.parse(result.body), { decision: "allow" });
 });
 
-test("upstream #1045 review: a benign v2 shell resource gets no reminder hold", async (t) => {
+test("PR #1045 follow-up: a benign v2 shell resource gets no reminder hold", async (t) => {
   const h = await setup(t);
   const posted = postPermission(h.port, makeV2Payload({
     tool_input: { resource: "npm test" },
@@ -225,7 +225,7 @@ test("upstream #1045 review: a benign v2 shell resource gets no reminder hold", 
   assert.strictEqual(result.status, 200);
 });
 
-test("upstream #1045 review: a non-shell v2 resource is not command-mapped", async (t) => {
+test("PR #1045 follow-up: a non-shell v2 resource is not command-mapped", async (t) => {
   const h = await setup(t);
   const posted = postPermission(h.port, makeV2Payload({
     tool_name: "write",
@@ -241,7 +241,7 @@ test("upstream #1045 review: a non-shell v2 resource is not command-mapped", asy
   assert.strictEqual(result.status, 200);
 });
 
-test("upstream #1045 review: mapOpencodeV2ShellResource aliasing rules", () => {
+test("PR #1045 follow-up: mapOpencodeV2ShellResource aliasing rules", () => {
   const { mapOpencodeV2ShellResource } = require("../src/server-route-permission");
 
   // Lone shell resource → command alias, original kept.
@@ -259,9 +259,11 @@ test("upstream #1045 review: mapOpencodeV2ShellResource aliasing rules", () => {
     mapOpencodeV2ShellResource("shell", { command: "safe", resource: "rm -rf /tmp/x" }),
     { command: "safe", resource: "rm -rf /tmp/x" }
   );
-  // Multi-resource shape and non-shell tools pass through untouched.
+  // Multi-resource shell commands are joined for scanning, retaining the payload.
   const multi = { resources: ["a", "b"] };
-  assert.strictEqual(mapOpencodeV2ShellResource("shell", multi), multi);
+  assert.deepStrictEqual(mapOpencodeV2ShellResource("shell", multi), {
+    resources: ["a", "b"], command: "a\nb",
+  });
   const read = { resource: "/etc/hosts" };
   assert.strictEqual(mapOpencodeV2ShellResource("read", read), read);
   // Degenerate inputs pass through.
@@ -271,4 +273,50 @@ test("upstream #1045 review: mapOpencodeV2ShellResource aliasing rules", () => {
     mapOpencodeV2ShellResource("shell", { resource: 42 }),
     { resource: 42 }
   );
+});
+
+test("issue #1039 follow-up: a destructive multi-resource shell ask waits under automation", async (t) => {
+  const h = await createPermissionIngressHarness({ ctxOverrides: {
+    getEffectivePermissionAutomationMode: () => "auto-tools",
+    isDestructiveReminderEnabled: () => true,
+  } });
+  t.after(() => h.close());
+  const posted = postPermission(h.port, makeV2Payload({
+    tool_input: { resources: ["cd /repo", "rm -rf /repo/src"] },
+  }));
+  await waitUntil(() => h.shown.length === 1);
+  assert.strictEqual(h.shown[0].permissionReminder.tag, "file-delete");
+  assert.strictEqual(posted.settled, false);
+  h.permission.resolvePermissionEntry(h.shown[0], "allow");
+  assert.strictEqual((await posted.response).status, 200);
+});
+
+test("issue #1039 follow-up: benign multi-resource shell asks have no reminder hold", async (t) => {
+  const h = await createPermissionIngressHarness({ ctxOverrides: {
+    getEffectivePermissionAutomationMode: () => "auto-tools",
+    isDestructiveReminderEnabled: () => true,
+  } });
+  t.after(() => h.close());
+  const posted = postPermission(h.port, makeV2Payload({
+    tool_input: { resources: ["cd /repo", "npm test"] },
+  }));
+  await waitUntil(() => h.shown.length === 1);
+  assert.strictEqual(h.shown[0].permissionReminder, null);
+  assert.strictEqual(posted.settled, false);
+  h.permission.resolvePermissionEntry(h.shown[0], "allow");
+  assert.strictEqual((await posted.response).status, 200);
+});
+
+test("issue #1039 follow-up: multi-resource shell alias only downgrades automatic approval", () => {
+  const { mapOpencodeV2ShellResource } = require("../src/server-route-permission");
+  const { preparePermissionReminder, reminderHolds } = require("../src/permission-reminder");
+  const { classifyPermissionInteraction, evaluatePermissionAutomation, AUTOMATION_ACTION } = require("../src/permission-automation-policy");
+  const interaction = classifyPermissionInteraction({ agentId: "opencode", toolName: "shell" });
+  const action = (resources) => {
+    const { permissionReminder: reminder } = preparePermissionReminder("shell", mapOpencodeV2ShellResource("shell", { resources }));
+    return { reminder, action: evaluatePermissionAutomation({ mode: "auto-tools", interaction, reminderHold: reminderHolds(reminder) }) };
+  };
+  assert.strictEqual(action(["cd /repo", "rm -rf /repo/src"]).action, AUTOMATION_ACTION.DEFER);
+  assert.strictEqual(action(["cd /repo", "npm test"]).action, AUTOMATION_ACTION.AUTO_ALLOW);
+  assert.strictEqual(mapOpencodeV2ShellResource("shell", { resources: ["rm -rf /", { value: "x" }] }).command, undefined);
 });

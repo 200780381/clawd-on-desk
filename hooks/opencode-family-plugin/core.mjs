@@ -26,20 +26,33 @@
 //     runtime.json, then fall back to a full SERVER_PORTS scan
 //
 // Phase 2 bridge (permission replies):
-//   The host TUI does NOT bind an external HTTP listener (verified via
-//   Phase 2 Spike — ctx.serverUrl is a phantom URL, ctx.client.fetch is
-//   bound to Server.Default().fetch() in-process). So Clawd cannot call
-//   the host's REST API directly from outside the Bun process. Instead we
-//   start a tiny loopback bridge here: Clawd POSTs decisions to the
-//   bridge, and the bridge calls ctx.client._client.post() — the same
-//   in-process Hono router that `opencode serve` would expose externally.
-//   CLI/TUI uses Bun.serve(); Desktop's Electron utilityProcess runs the
-//   sidecar under Node, so it uses node:http with the same Web Request handler.
-//   A random 32-byte hex token gates the bridge endpoint since localhost
-//   TCP is visible to any process on the machine. Permission POSTs never send
-//   that token to a scanned/cached responder: they require the live, owner-only
-//   runtime.json target. This is a same-OS-user trust boundary, not isolation
-//   from another malicious process already running as the same user.
+//   Default TUI: the host does NOT bind an external HTTP listener (verified via
+//   Phase 2 Spike — ctx.serverUrl is a phantom URL, ctx.client.fetch is bound
+//   to Server.Default().fetch() in-process), so calls back to the host never
+//   leave the Bun process. Under `opencode serve` / `opencode web` (including
+//   `--hostname 0.0.0.0`) Server.url is the real listening address instead, so
+//   ctx.client becomes an ordinary HTTP client and every call back to the host
+//   is a real request routed by the host process's Bun fetch — which honors
+//   HTTP_PROXY / NO_PROXY and does NOT auto-bypass the proxy for 127.0.0.1,
+//   localhost or 0.0.0.0. A user NO_PROXY that lists only localhost/127.0.0.1
+//   therefore hands requests to a wildcard listen address to a proxy that may
+//   not be able to route them back to this machine; resolveLoopbackBaseUrl()
+//   rewrites the wildcard host to loopback per call (0.0.0.0 → 127.0.0.1,
+//   [::] → [::1]) so replies take the same 127.0.0.1 path the plugin's own
+//   Clawd POSTs use.
+//   Clawd cannot call the host's REST API directly from outside the process in
+//   either mode: the default TUI binds no listener Clawd could reach, and under
+//   `serve` / `web` Clawd neither knows the listen address nor holds the server
+//   password. So both modes go through a tiny loopback bridge started here:
+//   Clawd POSTs decisions to the bridge, and the bridge calls
+//   ctx.client._client.post() — the same router that `opencode serve` exposes
+//   externally. CLI/TUI uses Bun.serve(); Desktop's Electron utilityProcess runs
+//   the sidecar under Node, so it uses node:http with the same Web Request
+//   handler. A random 32-byte hex token gates the bridge endpoint since
+//   localhost TCP is visible to any process on the machine. Permission POSTs
+//   never send that token to a scanned/cached responder: they require the live,
+//   owner-only runtime.json target. This is a same-OS-user trust boundary, not
+//   isolation from another malicious process already running as the same user.
 
 import { readFileSync, writeFileSync, mkdirSync, lstatSync, statSync, realpathSync, promises as fsp } from "fs";
 import { homedir, platform } from "os";
@@ -268,6 +281,50 @@ function normalizeServerUrl(raw) {
   if (!raw) return "";
   const s = String(raw);
   return s.endsWith("/") ? s : s + "/";
+}
+
+// Read ctx.client's configured baseUrl, or null when the client/config is
+// unavailable or malformed. Never throws at the host — a missing configuration
+// is treated exactly like "leave the client alone".
+function readClientBaseUrl(client) {
+  try {
+    const config = client && client._client && typeof client._client.getConfig === "function"
+      ? client._client.getConfig()
+      : null;
+    return config && typeof config.baseUrl === "string" && config.baseUrl ? config.baseUrl : null;
+  } catch {
+    return null;
+  }
+}
+
+// #1065: under `opencode serve` / `opencode web` the host hands the plugin a
+// real HTTP client whose baseUrl is the *listening* address. Connecting to a
+// wildcard (0.0.0.0 / [::]) can reach the local machine directly, but it is a
+// listen address, not a destination: when the host process sets HTTP_PROXY, Bun
+// routes such requests through the proxy, and neither wildcard is auto-bypassed
+// by a NO_PROXY that only lists localhost/127.0.0.1 — and the proxy may not be
+// able to route the request back here. The plugin already POSTs to Clawd over
+// 127.0.0.1, so a wildcard baseUrl is rewritten to loopback per call to take
+// the same path. Every other host (including the TUI's in-process placeholder
+// `localhost`) is left untouched.
+// A concrete LAN bind (e.g. `--hostname 192.168.1.5`) is deliberately NOT
+// rewritten: the server may not be listening on loopback, so a proxied host
+// must add that address to NO_PROXY itself.
+// Returns the per-call baseUrl override, or null when no rewrite is needed.
+export function resolveLoopbackBaseUrl(client) {
+  const configured = readClientBaseUrl(client);
+  if (!configured) return null;
+  let url;
+  try { url = new URL(configured); } catch { return null; }
+  let host;
+  if (url.hostname === "0.0.0.0") host = "127.0.0.1";
+  else if (url.hostname === "[::]") host = "[::1]";
+  else return null;
+  url.hostname = host;
+  const rewritten = url.toString();
+  // HeyApi joins the baseUrl and the route path directly, so drop any trailing
+  // slash (the same normalization mergeConfigs applies) to avoid `//permission`.
+  return rewritten.endsWith("/") ? rewritten.slice(0, -1) : rewritten;
 }
 
 // #830 context usage: opencode's message.updated events carry the session
@@ -1762,7 +1819,12 @@ export function createOpencodeFamilyPlugin(config) {
     });
     let limit = null;
     try {
-      const providers = normalizeProviderListResult(await client.provider.list());
+      const loopbackBaseUrl = resolveLoopbackBaseUrl(client);
+      const providers = normalizeProviderListResult(
+        loopbackBaseUrl
+          ? await client.provider.list({ baseUrl: loopbackBaseUrl })
+          : await client.provider.list()
+      );
       if (Array.isArray(providers)) {
         const provider = (providerID && providers.find((p) => p && p.id === providerID)) || null;
         const models = provider && provider.models;
@@ -2041,10 +2103,14 @@ export function createOpencodeFamilyPlugin(config) {
       && state.liveRevision === liveRevision;
     const id = rawId.startsWith(sessionIdPrefix) ? rawId.slice(sessionIdPrefix.length) : rawId;
     state.nextHydrationAt = Date.now() + CONTEXT_HISTORY_RETRY_MS;
+    // #1065: when the host listens on a wildcard address, per-call baseUrl keeps
+    // the history read on loopback (see resolveLoopbackBaseUrl).
+    const loopbackBaseUrl = resolveLoopbackBaseUrl(instance.client);
     // Defer SDK entry until after the current event enqueues its lifecycle
     // POST. Hydrated metadata must never race ahead of that session creation.
     state.hydration = readContextHistory(instance, (signal) => current()
       ? instance.client.session.messages({
+        ...(loopbackBaseUrl ? { baseUrl: loopbackBaseUrl } : {}),
         path: { id },
         query: { directory: instance.directory, limit: CONTEXT_HISTORY_LIMIT },
         signal,
@@ -2087,8 +2153,11 @@ export function createOpencodeFamilyPlugin(config) {
       || typeof instance.client?.session?.messages !== "function") return;
     const revision = instance.lifecycleRevision;
     const current = () => !instance.disposed && instance.lifecycleRevision === revision;
+    // #1065: keep the bootstrap read on loopback for wildcard listen addresses.
+    const loopbackBaseUrl = resolveLoopbackBaseUrl(instance.client);
     try {
       const result = await readContextHistory(instance, (signal) => instance.client.session.list({
+        ...(loopbackBaseUrl ? { baseUrl: loopbackBaseUrl } : {}),
         query: { directory: instance.directory, limit: CONTEXT_BOOTSTRAP_LIMIT, roots: true }, signal,
       }));
       if (!current()) return;
@@ -2252,10 +2321,151 @@ export function createOpencodeFamilyPlugin(config) {
     try { return timingSafeEqual(candidate, _bridgeTokenBuf); } catch { return false; }
   }
 
+  // #1065: turn the SDK's non-2xx `error` payload into a single-line, bounded
+  // diagnostic. HeyApi sets `error` to the parsed body ({} for an empty body, an
+  // object for JSON, a string for text), so the old `String(error)` degraded to
+  // `[object Object]` and hid the real failure. Known string fields are redacted
+  // on a best-effort basis, unrecognized objects expose only their key names,
+  // and the bridge token is redacted verbatim. Percent-encoded credentials are
+  // not decoded, so encoded secrets are not recognized.
+  function boundedBridgeError(value) {
+    const clean = String(value)
+      .replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return clean.length > 300 ? `${clean.slice(0, 299)}…` : clean;
+  }
+
+  // Read a property that may be a throwing getter without ever surfacing the
+  // throw. undefined means "not readable".
+  function safeRead(target, key) {
+    try {
+      return target == null ? undefined : target[key];
+    } catch {
+      return undefined;
+    }
+  }
+
+  function safeErrorString(target, key) {
+    const value = safeRead(target, key);
+    if (value == null) return "";
+    try {
+      return typeof value === "string" ? value : String(value);
+    } catch {
+      return "";
+    }
+  }
+
+  // #1065: upstream hosts and proxies can echo credentials, query strings or
+  // userinfo, and Doctor uploads these logs without redaction, so strip them
+  // before the text is logged or returned. The bridge token is never sent
+  // upstream, but it is redacted too as defense in depth. Header keys may be
+  // written with JSON/escaped quotes, so the separator tolerates quotes and
+  // backslashes before `:` / `=`.
+  function redactBridgeErrorText(value) {
+    let text = String(value);
+    if (_bridgeTokenHex) text = text.split(_bridgeTokenHex).join("[redacted]");
+    text = text.replace(
+      /\b(authorization|proxy-authorization|cookie|set-cookie)\b(["'\\]*\s*[:=]\s*)[^\r\n]*/gi,
+      "$1$2[redacted]"
+    );
+    text = text.replace(/\b(Basic|Bearer|Digest)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "$1 [redacted]");
+    text = text.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1[redacted]@");
+    text = text.replace(/\?[^\s"'<>#]*=[^\s"'<>#]*/g, "?[redacted]");
+    return text;
+  }
+
+  // #1065: bound before redacting so pathological inputs (many "?" without "=",
+  // many "a." without "://") cannot drive the redaction regexes quadratic on the
+  // host's event loop. Only the first 1024 chars are considered; when the input
+  // is longer, the truncated tail segment (the trailing run with no whitespace)
+  // is dropped so a secret split by the cut cannot be partially recognized, and
+  // a trailing " [truncated]" marker records that the source was cut. The
+  // remaining text is redacted and then capped at 300 chars for output.
+  function normalizeBridgeText(value) {
+    const raw = String(value);
+    if (raw.length > 1024) {
+      const bounded = raw.slice(0, 1024).replace(/\S*$/, "");
+      return boundedBridgeError(`${redactBridgeErrorText(bounded)} [truncated]`);
+    }
+    return boundedBridgeError(redactBridgeErrorText(raw));
+  }
+
+  // #1065: a field name, stripped of control characters and capped at 40 chars.
+  function boundedErrorKey(key) {
+    const clean = String(key)
+      .replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return clean.length > 40 ? `${clean.slice(0, 39)}…` : clean;
+  }
+
+  function bridgeErrorDetail(error) {
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+      const data = safeRead(error, "data");
+      const dataMessage = data && typeof data === "object" ? safeRead(data, "message") : undefined;
+      if (typeof dataMessage === "string" && dataMessage) return dataMessage;
+      const message = safeRead(error, "message");
+      if (typeof message === "string" && message) return message;
+      const tag = safeRead(error, "_tag");
+      if (typeof tag === "string" && tag) return tag;
+      const name = safeRead(error, "name");
+      if (typeof name === "string" && name) return name;
+      // An unrecognized object can hold arbitrary values under arbitrary keys,
+      // and redaction regexes cannot recognize every spelling, so expose only
+      // the key names (bounded) and never the values.
+      let keys;
+      try {
+        keys = Object.keys(error);
+      } catch {
+        return "unserializable error body";
+      }
+      if (keys.length === 0) return "";
+      return `unrecognized error body (keys: ${keys.slice(0, 5).map(boundedErrorKey).join(", ")})`;
+    }
+    return error == null ? "" : String(error);
+  }
+
+  function describeBridgeError(error, status, statusText) {
+    const numericStatus = Number.isFinite(status) ? status : 0;
+    try {
+      const prefix = `HTTP ${numericStatus}${statusText ? ` ${statusText}` : ""}`;
+      const detail = bridgeErrorDetail(error);
+      const message = detail && detail.trim() ? detail : "empty response body";
+      return normalizeBridgeText(`${prefix}: ${message}`);
+    } catch {
+      return `HTTP ${numericStatus}: unreadable error body`;
+    }
+  }
+
+  // #1065: the transport itself failed (DNS, connection refused, socket reset).
+  // Keep the thrown name/code so permission-debug.log shows a connection-layer
+  // failure rather than an upstream error response.
+  function describeBridgeThrow(err) {
+    try {
+      const parts = ["request failed:"];
+      const name = safeRead(err, "name");
+      const code = safeRead(err, "code");
+      const message = safeRead(err, "message");
+      if (name) parts.push(String(name));
+      if (code) parts.push(String(code));
+      if (message) parts.push(String(message));
+      return normalizeBridgeText(parts.join(" "));
+    } catch {
+      return "request failed: unreadable error";
+    }
+  }
+
   // Handle POST /reply from Clawd. Reads { request_id, reply } and forwards to
-  // the host's in-process Hono router via ctx.client._client.post(). Return
+  // the host via ctx.client._client.post(). The default TUI forwards in-process;
+  // `serve` / `web` make this a real HTTP request to the host's listening
+  // address, subject to the host process's HTTP_PROXY / NO_PROXY, so a wildcard
+  // baseUrl is rewritten to loopback per call (resolveLoopbackBaseUrl). Return
   // 200 on success (the host's own route returned 2xx), 4xx on auth/shape
-  // errors, 502 if the upstream call itself throws.
+  // errors, 502 when the upstream call returns an error or throws — the error
+  // body carries { ok:false, status, error } with the upstream status and a
+  // readable message.
   async function handleBridgeRequest(req) {
     const url = new URL(req.url);
     if (req.method !== "POST" || url.pathname !== "/reply") {
@@ -2282,6 +2492,21 @@ export function createOpencodeFamilyPlugin(config) {
     }
 
     debugLog(`BRIDGE → ${AGENT_ID} permission reply requestId=${requestId} reply=${reply}`);
+    // #1065: log only the target origin (no path/query) so a wildcard→loopback
+    // rewrite is visible without leaking the full URL. On rewrite, include the
+    // original origin so the log cannot be mistaken for a real localhost target.
+    const configuredBaseUrl = readClientBaseUrl(target.client);
+    const loopbackBaseUrl = resolveLoopbackBaseUrl(target.client);
+    const targetOrigin = loopbackBaseUrl || configuredBaseUrl;
+    if (targetOrigin) {
+      try {
+        const origin = new URL(targetOrigin).origin;
+        const configuredOrigin = loopbackBaseUrl && configuredBaseUrl
+          ? new URL(configuredBaseUrl).origin
+          : null;
+        debugLog(`BRIDGE reply target=${origin}${configuredOrigin ? ` (rewritten from ${configuredOrigin})` : ""}`);
+      } catch { /* malformed config keeps the reply path */ }
+    }
     try {
       // HeyApi v1's raw client accepts the v2 route plus an explicit query.
       // The directory is intentionally explicit even though the originating
@@ -2289,16 +2514,24 @@ export function createOpencodeFamilyPlugin(config) {
       // to the permission's owning Instance across multi-directory warmup.
       const result = await target.client._client.post({
         url: `/permission/${encodeURIComponent(requestId)}/reply`,
+        ...(loopbackBaseUrl ? { baseUrl: loopbackBaseUrl } : {}),
         query: target.directory ? { directory: target.directory } : undefined,
         body: { reply },
         headers: { "Content-Type": "application/json" },
       });
       // HeyApi returns { data, error, request, response } by default. `error`
       // is only set on non-2xx responses; successful reply just has `data`.
+      const status = result && result.response && Number.isFinite(result.response.status)
+        ? result.response.status
+        : 0;
+      const statusText = result && result.response && typeof result.response.statusText === "string"
+        ? result.response.statusText
+        : "";
       const hasError = result && result.error != null;
-      debugLog(`BRIDGE reply done requestId=${requestId} hasError=${hasError}`);
+      const errorText = hasError ? describeBridgeError(result.error, status, statusText) : "";
+      debugLog(`BRIDGE reply done requestId=${requestId} status=${status} hasError=${hasError}${hasError ? ` error=${errorText}` : ""}`);
       if (hasError) {
-        return new Response(JSON.stringify({ ok: false, error: String(result.error) }), {
+        return new Response(JSON.stringify({ ok: false, status, error: errorText }), {
           status: 502,
           headers: { "Content-Type": "application/json" },
         });
@@ -2309,8 +2542,9 @@ export function createOpencodeFamilyPlugin(config) {
         headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
-      debugLog(`BRIDGE reply THROW requestId=${requestId} msg=${err && err.message}`);
-      return new Response(JSON.stringify({ ok: false, error: String(err && err.message) }), {
+      const throwText = describeBridgeThrow(err);
+      debugLog(`BRIDGE reply THROW requestId=${requestId} status=0 error=${throwText}`);
+      return new Response(JSON.stringify({ ok: false, status: 0, error: throwText }), {
         status: 502,
         headers: { "Content-Type": "application/json" },
       });
@@ -2393,7 +2627,7 @@ export function createOpencodeFamilyPlugin(config) {
       const response = await handleBridgeRequest(new Request(requestUrl, init));
       await writeNodeBridgeResponse(res, response);
     } catch (err) {
-      debugLog(`BRIDGE node request THROW: ${err && err.message}`);
+      debugLog(`BRIDGE node request THROW: ${normalizeBridgeText(safeErrorString(err, "message"))}`);
       if (!res.headersSent && !res.destroyed) {
         res.statusCode = 500;
         res.end("internal error");
@@ -2711,6 +2945,11 @@ const V2_PERMISSION_BLOCKING_TIMEOUT_MS = 590 * 1000;
 const V2_PERMISSION_MAX_BODY_BYTES = 512 * 1024;
 const V2_STATE_POST_MAX_PENDING = 32;
 const V2_ALWAYS_ALLOW_MAX_ENTRIES = 128;
+// Upper bound on awaiting a host hook registration's dispose(). Upstream
+// opencode v2.0.15 register/dispose are Effect.runPromise calls expected to
+// settle immediately; 2s is generous for a slow service while still bounding
+// plugin unload. A timeout only logs — the local teardown already happened.
+const V2_REGISTRATION_DISPOSE_TIMEOUT_MS = 2000;
 
 /**
  * Create the opencode v2 plugin definition for a specific agent.
@@ -2757,6 +2996,17 @@ export function createOpencodeFamilyPluginV2(config) {
   // "Always allow" decisions: key `${sessionId}\u0000${action}`. Insertion-
   // ordered; the oldest entry is evicted at the cap.
   const _alwaysAllowedBySessionAction = new Map();
+  const _blockingPermissionsBySession = new Map();
+
+  function abortV2BlockingPermissions(sessionId) {
+    const pending = _blockingPermissionsBySession.get(sessionId);
+    if (!pending) return;
+    _blockingPermissionsBySession.delete(sessionId);
+    for (const item of pending) {
+      item.snapshot.cancelled = true;
+      item.controller.abort();
+    }
+  }
   let _reqCounter = 0;
   let _permissionReqCounter = 0;
 
@@ -3242,6 +3492,10 @@ export function createOpencodeFamilyPluginV2(config) {
         ? envelope.durable.aggregateID
         : "");
     const sessionId = normalizeSessionId(rawSessionId) || null;
+    if (sessionId && ["session.execution.interrupted", "session.execution.failed",
+      "session.execution.succeeded", "session.deleted"].includes(type)) {
+      abortV2BlockingPermissions(sessionId);
+    }
 
     // Per-event cwd from the envelope location (authoritative for v2 —
     // ctx.location is the service-level directory, never a session cwd).
@@ -3471,22 +3725,28 @@ export function createOpencodeFamilyPluginV2(config) {
     }
   }
 
+  // Forward every resource verbatim (objects as JSON strings). The whole-body
+  // byte budget checked by the caller is the ONLY truncation boundary: an
+  // "allow" decides the whole ask, so a silently dropped or clipped resource
+  // would approve something the user never saw.
+  function normalizeV2Resources(value) {
+    const resources = Array.isArray(value) ? value : [];
+    return resources.map((item) => (typeof item === "string" ? item
+      : (item && typeof item === "object" ? JSON.stringify(item) : String(item))));
+  }
+
   function buildV2PermissionBody(event, requestId) {
     const sessionId = normalizeSessionId(typeof event.sessionID === "string" ? event.sessionID : "")
       || DEFAULT_SESSION_ID;
     const action = typeof event.action === "string" && event.action ? event.action : "unknown";
-    const resources = Array.isArray(event.resources) ? event.resources : [];
-    const boundedResources = resources
-      .map((value) => (typeof value === "string" ? value
-        : (value && typeof value === "object" ? JSON.stringify(value).slice(0, 4096) : String(value))))
-      .slice(0, 16);
+    const forwardedResources = normalizeV2Resources(event.resources);
     const body = {
       agent_id: AGENT_ID,
       hook_source: HOOK_SOURCE,
       tool_name: action,
-      tool_input: boundedResources.length === 1
-        ? { resource: boundedResources[0] }
-        : { resources: boundedResources },
+      tool_input: forwardedResources.length === 1
+        ? { resource: forwardedResources[0] }
+        : { resources: forwardedResources },
       // v2 has no host-side pattern persistence; the single always-candidate is
       // the action itself and resolves to a session-scoped in-plugin rule.
       patterns: [],
@@ -3507,12 +3767,22 @@ export function createOpencodeFamilyPluginV2(config) {
 
   // Decision contract with Clawd's v2 blocking adapter (server-route-permission
   // opencode-v2 branch): 200 + identity header + JSON { decision, message? }
-  // resolves the await; 204 / identity mismatch / unparseable body / timeout /
-  // transport error all mean "no decision" and leave the effect untouched.
+  // resolves the await; every other status (including 204), identity mismatch,
+  // unparseable body, timeout and transport error all mean "no decision" and
+  // leave the effect untouched.
   async function deliverV2BlockingPermission(snapshot) {
     const candidates = getPermissionPortCandidates();
     for (const port of candidates) {
+      if (snapshot.cancelled) return { decision: null };
       const controller = new AbortController();
+      const sessionId = snapshot.body.session_id;
+      let pending = _blockingPermissionsBySession.get(sessionId);
+      if (!pending) {
+        pending = new Set();
+        _blockingPermissionsBySession.set(sessionId, pending);
+      }
+      const item = { controller, snapshot };
+      pending.add(item);
       const timer = setTimeout(() => controller.abort(), V2_PERMISSION_BLOCKING_TIMEOUT_MS);
       try {
         const res = await fetch(`http://127.0.0.1:${port}/permission`, {
@@ -3531,6 +3801,13 @@ export function createOpencodeFamilyPluginV2(config) {
           return { decision: null };
         }
         const text = await res.text();
+        // Only a 200 carries Clawd's decision. A 403/500 body that happens to
+        // contain a valid JSON decision must never be honoured — drain it and
+        // treat it as no-decision so the native prompt takes over.
+        if (res.status !== 200) {
+          debugLog(`PERM[${snapshot.reqId}] port=${port} status=${res.status} no-decision`);
+          return { decision: null };
+        }
         let parsed = null;
         try { parsed = JSON.parse(text); } catch {}
         const decision = parsed && typeof parsed.decision === "string" ? parsed.decision : null;
@@ -3546,6 +3823,10 @@ export function createOpencodeFamilyPluginV2(config) {
         debugLog(`PERM[${snapshot.reqId}] port=${port} ERR ${err && err.name}/${err && err.message}`);
       } finally {
         clearTimeout(timer);
+        pending.delete(item);
+        if (pending.size === 0 && _blockingPermissionsBySession.get(sessionId) === pending) {
+          _blockingPermissionsBySession.delete(sessionId);
+        }
       }
     }
     return { decision: null };
@@ -3571,6 +3852,11 @@ export function createOpencodeFamilyPluginV2(config) {
     const toolCallId = event.source && typeof event.source.id === "string" && event.source.id
       ? event.source.id
       : `req${++_permissionReqCounter}`;
+    // `request_id` stays tool-call-scoped: E1/E2 evidence shows one tool call
+    // can raise SEVERAL distinct asks (external_directory + edit) that all share
+    // source.id and this request_id, so it is NOT an ask identity. Every ask is
+    // forwarded independently — residual hooks are removed by disposing their
+    // registration (see setup), never by collapsing content here.
     const requestId = `v2:${toolCallId}`;
     const body = buildV2PermissionBody(event, requestId);
     const payload = JSON.stringify(body);
@@ -3587,6 +3873,7 @@ export function createOpencodeFamilyPluginV2(config) {
     };
     debugLog(`PERM forward action=${action} session=${sessionId || "(default)"} req=${requestId}`);
     const outcome = await deliverV2BlockingPermission(snapshot);
+    if (snapshot.cancelled) return;
     if (outcome.decision === "allow") {
       event.effect = "allow";
       debugLog(`PERM resolved allow req=${requestId}`);
@@ -3621,32 +3908,85 @@ export function createOpencodeFamilyPluginV2(config) {
       const app = ctx && ctx.app && typeof ctx.app === "object" ? ctx.app : {};
       debugLog(`INIT v2 pid=${process.pid} app=${app.name || "?"}@${app.version || "?"} gate=${managedGate.mode}`);
 
-      // Reload idempotency: a host reload() re-runs setup. Abort the previous
-      // subscription so exactly one event loop and one evaluate hook stay live.
-      if (definition._dispose) {
-        try { definition._dispose(); } catch {}
-        definition._dispose = null;
-      }
-
+      // Reload idempotency: a host reload() re-runs setup. Tear down the
+      // previous generation so exactly one event loop and one evaluate hook stay
+      // live. The teardown is captured locally (not read off the shared field at
+      // call time) so a later, superseded cleanup cannot touch this generation.
       const controller = new AbortController();
-
-      if (ctx && ctx.permission && typeof ctx.permission.hook === "function") {
+      const instance = { disposed: false, registration: null };
+      const disposeRegistration = (registration) => {
+        if (!registration) return undefined;
+        if (typeof registration === "function") return registration();
+        if (typeof registration.dispose === "function") return registration.dispose();
+        return undefined;
+      };
+      // Bounded wrapper: a host whose registration.dispose() hangs must not
+      // wedge reload or plugin unload. The bound only logs; local teardown has
+      // already run by the time this is called.
+      const disposeRegistrationBounded = (registration) => {
+        let pending;
         try {
-          ctx.permission.hook("evaluate", (event) => {
-            // Never throw into the host: a rejected evaluate callback must not
-            // wedge the permission pipeline.
-            return handleV2PermissionEvaluate(event).catch((err) => {
-              debugLog(`PERM hook error: ${err && err.message}`);
-            });
-          });
-          debugLog("EVALUATE hook registered");
+          pending = disposeRegistration(registration);
         } catch (err) {
-          debugLog(`EVALUATE register-failed: ${err && err.message}`);
+          debugLog(`EVALUATE dispose-failed: ${err && err.message}`);
+          return Promise.resolve();
         }
-      } else {
-        debugLog("EVALUATE unavailable: no ctx.permission.hook");
+        if (!pending || typeof pending.then !== "function") return Promise.resolve(pending);
+        return new Promise((resolve) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            debugLog(`EVALUATE dispose-timeout ms=${V2_REGISTRATION_DISPOSE_TIMEOUT_MS}`);
+            resolve();
+          }, V2_REGISTRATION_DISPOSE_TIMEOUT_MS);
+          if (timer && typeof timer.unref === "function") timer.unref();
+          pending.then(
+            () => { if (settled) return; settled = true; clearTimeout(timer); resolve(); },
+            (err) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              debugLog(`EVALUATE dispose-failed: ${err && err.message}`);
+              resolve();
+            },
+          );
+        });
+      };
+      // Local teardown is SYNCHRONOUS and runs BEFORE the (possibly slow)
+      // registration dispose: a superseded generation must not clear the next
+      // instance's identity-recovery state when its dispose finally resolves.
+      const disposeThisInstance = () => {
+        instance.disposed = true;
+        for (const sessionId of _blockingPermissionsBySession.keys()) abortV2BlockingPermissions(sessionId);
+        controller.abort();
+        dropV2IdentityRecovery();
+        const registration = instance.registration;
+        instance.registration = null;
+        return disposeRegistrationBounded(registration);
+      };
+
+      // Publish THIS instance's dispose BEFORE any await. A reload that starts
+      // while we are still setting up can then retire us, and the registration
+      // is disposed the moment it resolves instead of leaving a live hook.
+      const previousDispose = definition._dispose;
+      definition._dispose = disposeThisInstance;
+      if (previousDispose) {
+        try {
+          const pending = previousDispose();
+          // NEVER await the previous generation's registration dispose: a slow
+          // or hung host dispose must not delay this generation's subscription.
+          // Its own promise is already bounded and never rejects.
+          if (pending && typeof pending.catch === "function") pending.catch(() => {});
+        } catch {}
+      }
+      if (instance.disposed) {
+        return async () => {};
       }
 
+      // Event subscription FIRST — state reporting must never wait on the
+      // permission-hook registration (a host that never resolves hook() would
+      // otherwise leave Clawd blind to all v2 events).
       if (ctx && ctx.event && typeof ctx.event.subscribe === "function") {
         void (async () => {
           for await (const envelope of ctx.event.subscribe({ signal: controller.signal })) {
@@ -3673,15 +4013,57 @@ export function createOpencodeFamilyPluginV2(config) {
         debugLog("EVENT subscribe unavailable");
       }
 
-      definition._dispose = () => {
-        controller.abort();
-        dropV2IdentityRecovery();
-      };
-      return () => {
-        if (definition._dispose) {
-          try { definition._dispose(); } catch {}
-          definition._dispose = null;
+      // Hook registration is DETACHED: setup never blocks on it. opencode
+      // upstream v2.0.15 (packages/plugin/src/promise/registration.ts) returns
+      // Promise<Registration>; a synchronous function / { dispose() } object is
+      // tolerated too.
+      if (ctx && ctx.permission && typeof ctx.permission.hook === "function") {
+        let registrationPromise;
+        try {
+          registrationPromise = ctx.permission.hook("evaluate", (event) => {
+            // opencode upstream v2.0.15 (packages/core/src/plugin/hooks.ts)
+            // trigger() calls every still-registered callback in sequence with
+            // the SAME mutable event, and our own registration.dispose() is
+            // async — so during a reload window the retired generation's
+            // callback can still fire. It must do nothing: otherwise it would
+            // forward an ask the current generation then forwards again.
+            if (instance.disposed) return;
+            // Never throw into the host: a rejected evaluate callback must not
+            // wedge the permission pipeline.
+            return handleV2PermissionEvaluate(event).catch((err) => {
+              debugLog(`PERM hook error: ${err && err.message}`);
+            });
+          });
+        } catch (err) {
+          debugLog(`EVALUATE register-failed: ${err && err.message}`);
+          registrationPromise = null;
         }
+        if (registrationPromise) {
+          Promise.resolve(registrationPromise).then((registration) => {
+            if (instance.disposed) {
+              // Retired while the registration was in flight: dispose it now.
+              return disposeRegistrationBounded(registration);
+            }
+            instance.registration = registration || null;
+            debugLog("EVALUATE hook registered");
+            return undefined;
+          }, (err) => {
+            // A rejected registration must not fail setup or leak an unhandled
+            // rejection; event handling continues without a live hook.
+            debugLog(`EVALUATE register-failed: ${err && err.message}`);
+          });
+        }
+      } else {
+        debugLog("EVALUATE unavailable: no ctx.permission.hook");
+      }
+
+      return async () => {
+        // Only dispose if this cleanup's generation is still the active one. A
+        // cleanup that fires after a newer setup replaced it must leave the new
+        // subscription and identity-recovery state completely untouched.
+        if (definition._dispose !== disposeThisInstance) return;
+        definition._dispose = null;
+        try { await disposeThisInstance(); } catch {}
       };
     },
   };
@@ -3739,4 +4121,3 @@ export function createOpencodeFamilyPluginV2(config) {
 
   return definition;
 }
-

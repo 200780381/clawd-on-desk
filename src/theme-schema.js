@@ -64,6 +64,7 @@ const MINI_REQUIRED_STATES = [
   "mini-happy",
   "mini-sleep",
 ];
+const MINI_OPTIONAL_PEEK_STATES = ["mini-peek-hold", "mini-sleep-peek"];
 const VISUAL_FALLBACK_STATES = new Set([
   "error",
   "attention",
@@ -291,6 +292,13 @@ function validateTheme(cfg) {
         errors.push(`miniMode.supported=true requires miniMode.states.${stateName} to be a non-empty array`);
       }
     }
+    for (const stateName of MINI_OPTIONAL_PEEK_STATES) {
+      if (!Object.prototype.hasOwnProperty.call(cfg.miniMode.states || {}, stateName)) continue;
+      const files = cfg.miniMode.states[stateName];
+      if (!Array.isArray(files) || !files.length || files.some((file) => typeof file !== "string" || !file)) {
+        errors.push(`miniMode.states.${stateName} must be a non-empty array of files when declared`);
+      }
+    }
   }
 
   if (cfg.layout) {
@@ -309,6 +317,33 @@ function isPlainObject(v) {
 
 function hasNonEmptyArray(value) {
   return Array.isArray(value) && value.length > 0;
+}
+
+function normalizeIdleVisualOptions(value, warn = console.warn) {
+  if (!Array.isArray(value)) {
+    warn("[theme-loader] idleVisualOptions dropped: expected array");
+    return [];
+  }
+  const options = [];
+  value.forEach((entry, index) => {
+    const file = entry && entry.file;
+    if (!isPlainObject(entry) || typeof file !== "string"
+      || basenameOnly(file) !== file || !SAFE_THEME_ASSET_BASENAME.test(file)) {
+      warn(`[theme-loader] idleVisualOptions[${index}] dropped: file must be a safe basename`);
+      return;
+    }
+    options.push({ ...entry, file });
+  });
+  return options;
+}
+
+function filterIdleVisualOptionsByAsset(theme, assetExists, warn = console.warn) {
+  if (!Object.prototype.hasOwnProperty.call(theme, "idleVisualOptions")) return;
+  theme.idleVisualOptions = theme.idleVisualOptions.filter((entry) => {
+    if (assetExists(entry.file)) return true;
+    warn(`[theme-loader] idleVisualOptions entry dropped: missing asset ${entry.file}`);
+    return false;
+  });
 }
 
 function normalizeIdleEasterEggs(value) {
@@ -536,6 +571,7 @@ function projectThemeVisualUsages(cfg) {
     ["workingTiers", cfg && cfg.workingTiers],
     ["jugglingTiers", cfg && cfg.jugglingTiers],
     ["idleAnimations", cfg && cfg.idleAnimations],
+    ["idleVisualOptions", cfg && cfg.idleVisualOptions],
     ["idleEasterEggs", cfg && cfg.idleEasterEggs],
   ]) {
     for (const entry of Array.isArray(group) ? group : []) {
@@ -1291,6 +1327,29 @@ function normalizeViewBox(value) {
   return { x, y, width, height };
 }
 
+function normalizeMiniPeekMotion(value, key) {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) {
+    console.warn(`[theme-loader] miniMode.${key} dropped: expected object`);
+    return {};
+  }
+  const out = {};
+  for (const [field, min, max] of [
+    ["offsetRatio", 0, 0.5],
+    ["delayMs", 0, 5000],
+    ["durationMs", 16, 5000],
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(value, field)) continue;
+    const v = value[field];
+    if (typeof v === "number" && Number.isFinite(v) && v >= min && v <= max) {
+      out[field] = v;
+    } else {
+      console.warn(`[theme-loader] miniMode.${key}.${field} dropped: expected number in ${min}–${max}`);
+    }
+  }
+  return out;
+}
+
 function normalizeTrustedRuntime(value, isBuiltin, themeId) {
   const out = { scriptedSvgFiles: [] };
   if (!isBuiltin) {
@@ -1514,6 +1573,10 @@ function mergeDefaults(raw, themeId, isBuiltin) {
       supported: true,
       offsetRatio: 0.486,
       ...raw.miniMode,
+      ...(Object.prototype.hasOwnProperty.call(raw.miniMode, "peek")
+        ? { peek: normalizeMiniPeekMotion(raw.miniMode.peek, "peek") } : {}),
+      ...(Object.prototype.hasOwnProperty.call(raw.miniMode, "sleepPeek")
+        ? { sleepPeek: normalizeMiniPeekMotion(raw.miniMode.sleepPeek, "sleepPeek") } : {}),
       viewBox: normalizeViewBox(raw.miniMode.viewBox),
       timings: {
         minDisplay: {},
@@ -1560,6 +1623,9 @@ function mergeDefaults(raw, themeId, isBuiltin) {
 
   // idleAnimations
   theme.idleAnimations = raw.idleAnimations || [];
+  if (Object.prototype.hasOwnProperty.call(raw, "idleVisualOptions")) {
+    theme.idleVisualOptions = normalizeIdleVisualOptions(raw.idleVisualOptions);
+  }
   theme.idleEasterEggs = normalizeIdleEasterEggs(raw.idleEasterEggs).value;
 
   // updater-specific visual bindings
@@ -1639,12 +1705,15 @@ module.exports = {
   REQUIRED_STATES,
   FULL_SLEEP_REQUIRED_STATES,
   MINI_REQUIRED_STATES,
+  MINI_OPTIONAL_PEEK_STATES,
   VISUAL_FALLBACK_STATES,
   validateTheme,
   mergeDefaults,
   isPlainObject,
   hasNonEmptyArray,
   normalizeIdleEasterEggs,
+  normalizeIdleVisualOptions,
+  filterIdleVisualOptionsByAsset,
   getStateBindingEntry,
   getStateFiles,
   hasStateFiles,
