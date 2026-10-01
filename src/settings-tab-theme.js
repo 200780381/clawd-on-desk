@@ -129,6 +129,10 @@
       sectionEl.appendChild(grid);
       parent.appendChild(sectionEl);
     }
+
+    // Remember the exact list data this render was built from so a later
+    // progress patch can tell whether a full re-render is actually needed.
+    mountedThemeList.dataKey = officialListDataKey();
   }
 
   // The official section renders from the catalog list; the local theme list
@@ -877,6 +881,9 @@
   function getOfficialProgress(theme) {
     const operation = runtime.officialThemeOperation;
     if (operation && operation.id === theme.id) return operation;
+    // A per-card snapshot is only meaningful before the renderer has observed
+    // the operation end; after that it may be a stale live-download reading.
+    if (!ops.officialProgressSnapshotsTrusted()) return null;
     return theme.officialThemeProgress || null;
   }
 
@@ -884,6 +891,37 @@
     const value = t(key);
     if (typeof value === "function") return value(...args);
     return String(value);
+  }
+
+  // True while any official install is in flight. `officialThemePendingThemeId`
+  // only covers installs this renderer started; the operation mirror also sees a
+  // download that was already running when this Settings view was (re)opened.
+  // A list snapshot can establish the same before the next progress event, and
+  // the post-operation refresh keeps the buttons disabled until the fresh list
+  // lands. Other cards' download/retry buttons must stay disabled in every case.
+  function officialOperationBusy() {
+    if (runtime.officialThemePendingThemeId) return true;
+    const operation = runtime.officialThemeOperation;
+    if (operation
+      && (operation.phase === "downloading"
+        || operation.phase === "extracting"
+        || operation.phase === "installing")) {
+      return true;
+    }
+    if (runtime.officialThemeEndRefresh) return true;
+    if (ops.officialProgressSnapshotsTrusted()) {
+      const officialThemes = Array.isArray(runtime.officialThemeList) ? runtime.officialThemeList : [];
+      return officialThemes.some((theme) => {
+        const snapshot = theme && theme.officialThemeProgress;
+        return !!(
+          snapshot
+          && (snapshot.phase === "downloading"
+            || snapshot.phase === "extracting"
+            || snapshot.phase === "installing")
+        );
+      });
+    }
+    return false;
   }
 
   function buildOfficialThemeControls(theme) {
@@ -962,7 +1000,7 @@
         formatOfficialMessage("themeOfficialDownloadLabel", mib),
         "theme-official-download-btn",
         () => handleInstallOfficialTheme(theme),
-        { disabled: !!runtime.officialThemePendingThemeId, focusKey: `official-download:${theme.id}` }
+        { disabled: officialOperationBusy(), focusKey: `official-download:${theme.id}` }
       );
       return nodes;
     }
@@ -1012,26 +1050,43 @@
       pushText(formatOfficialMessage("themeOfficialError", theme.officialThemeError.message));
     }
     pushButton(t("themeOfficialRetry"), "theme-official-retry-btn", () => handleInstallOfficialTheme(theme), {
-      disabled: !!runtime.officialThemePendingThemeId,
+      disabled: officialOperationBusy(),
       focusKey: `official-retry:${theme.id}`,
     });
     return nodes;
   }
 
-  // Everything about an official card's row that changes its STRUCTURE. The
-  // download byte counters are deliberately excluded: those change many times
-  // per second and only move the progress bar, which is patched in place.
+  // Everything about an official row that can change while the LIST DATA stays
+  // the same: the progress phase (busy vs. cancelled/installed) and whether any
+  // install is in flight (which gates the download/retry buttons). Every other
+  // structural input — card state, version, error, bytes, selection, catalog
+  // status — is covered by officialListDataKey() below, so data changes force a
+  // full render instead of a row patch.
   function officialControlsSignature(theme, progress) {
     return JSON.stringify([
-      theme.officialThemeState || "available",
       progress ? progress.phase : null,
-      theme.officialThemeInstalledVersion || null,
-      theme.officialThemeVersion || null,
-      theme.officialThemeCanUninstall ? 1 : 0,
-      theme.officialThemeMinAppVersion || null,
-      theme.officialThemeShowcaseUrl || null,
-      (theme.officialThemeError && theme.officialThemeError.message) || null,
-      runtime.officialThemePendingThemeId === theme.id ? 1 : 0,
+      officialOperationBusy() ? 1 : 0,
+    ]);
+  }
+
+  // Fingerprint of everything the theme list render depends on EXCEPT the
+  // per-card official download progress snapshot (which changes many times per
+  // second and is patched in place). That covers both the official catalog
+  // (additions, byte changes, selection, offline notes) and the local list that
+  // drives the builtin / Codex Pet / user sections, which a row patch cannot
+  // create or update. When this differs from what the mounted list was built
+  // from, patchOfficialThemeProgress() bails so ui-core re-renders the content.
+  function officialListDataKey() {
+    const themes = getMergedOfficialThemes().map((theme) => {
+      if (!theme || typeof theme !== "object") return theme;
+      const { officialThemeProgress, ...rest } = theme;
+      return rest;
+    });
+    return JSON.stringify([
+      !!runtime.officialThemeListFetched,
+      runtime.officialThemeCatalogStatus,
+      themes,
+      runtime.themeList,
     ]);
   }
 
@@ -1043,9 +1098,24 @@
     const progress = getOfficialProgress(theme);
     const signature = officialControlsSignature(theme, progress);
     if (signature !== entry.signature) {
+      // Rebuilding this row detaches whatever had keyboard focus inside it; a
+      // full content render is what normally restores focus, so capture the key
+      // here and put it back on the equivalent new button. Focus outside the row
+      // (and a button that no longer exists, e.g. Cancel after installing) is
+      // left alone.
+      const active = document.activeElement;
+      let focusKey = "";
+      if (active
+        && active !== document.body
+        && typeof entry.container.contains === "function"
+        && entry.container.contains(active)
+        && typeof active.getAttribute === "function") {
+        focusKey = String(active.getAttribute("data-settings-focus-key") || "").trim();
+      }
       entry.container.textContent = "";
       for (const node of buildOfficialThemeControls(theme)) entry.container.appendChild(node);
       entry.signature = signature;
+      if (focusKey) ops.focusSettingsTarget(entry.container, focusKey, { onlyIfFocusLost: true });
       return;
     }
     if (!progress) return;
@@ -1080,8 +1150,9 @@
     const { importBtn, refreshBtn, importThemeBtn } = mountedThemeList.actions;
     const apply = (btn, available, pending) => {
       if (!btn) return;
-      btn.disabled = !available || !!pending;
-      btn.classList.toggle("pending", !!pending);
+      // Keep disabled/pending/aria-busy in one place so the button's ARIA state
+      // can never drift from its visual state after a pending round trip.
+      helpers.setButtonState(btn, { disabled: !available, pending: !!pending });
     };
     apply(importBtn, typeof api.importCodexPetZip === "function", !!runtime.codexPetZipImportPending);
     apply(refreshBtn, typeof api.refreshCodexPets === "function", !!runtime.codexPetsRefreshPending);
@@ -1094,7 +1165,12 @@
   // longer matches the data — e.g. a theme was added or removed — and the
   // caller must fall back to a full render.
   function patchOfficialThemeProgress() {
+    // The theme customization detail view has no official download content, so
+    // progress events must not tear it down and rebuild it many times per
+    // second. Nothing to patch, but the caller can safely skip the full render.
+    if (mountedCustomizationControls) return true;
     if (!mountedThemeList || mountedThemeList.officialControls.size === 0) return false;
+    if (mountedThemeList.dataKey !== officialListDataKey()) return false;
     const officialThemes = getMergedOfficialThemes();
     const byId = new Map(
       officialThemes.filter((theme) => theme && theme.id).map((theme) => [theme.id, theme])
@@ -1144,9 +1220,9 @@
       .finally(() => {
         runtime.officialThemePendingThemeId = null;
         runtime.officialThemeOperation = null;
-        ops.fetchThemes().then(() => {
-          if (state.activeTab === "theme") ops.requestRender({ content: true });
-        });
+        // The shared post-operation refresh waits out any read that started
+        // before the install finished, then fetches a fresh terminal list.
+        ops.refreshThemesAfterOfficialOperation();
       });
   }
 
