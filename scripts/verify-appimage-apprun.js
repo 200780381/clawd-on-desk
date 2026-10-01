@@ -234,9 +234,17 @@ function verifyArtifact(artifactPath) {
 
   const extracted = extractAppRun(resolvedArtifact);
   const exports = validateAppRunContent(extracted.content);
-  if (!extracted.content.includes('# Clawd AppImage lifetime guard (#1048).') ||
-      !extracted.content.includes('exec /bin/bash -c "$clawd_launcher" clawd-appimage-supervisor')) {
-    throw new Error("Final AppImage is missing the Clawd runtime lifetime guard");
+  // Loaded lazily: prepare-appimage-launcher.js requires this module at load
+  // time, so a top-level require here would create a cycle.
+  const { PREFIX } = require("./prepare-appimage-launcher");
+  const guardIndex = extracted.content.indexOf(PREFIX);
+  if (guardIndex === -1) {
+    throw new Error("Final AppImage is missing the reviewed Clawd runtime lifetime guard");
+  }
+  const guardLine = extracted.content.slice(0, guardIndex).split(/\r?\n/).length;
+  const firstExportLine = Math.min(...Object.values(exports).map((entry) => entry.line));
+  if (guardLine >= firstExportLine) {
+    throw new Error("Final AppImage runs the Clawd runtime lifetime guard after its reviewed path exports");
   }
   const launcher = extractAppRun(resolvedArtifact, "clawd-appimage-launcher.sh");
   const expectedLauncher = fs.readFileSync(path.join(__dirname, "../build/appimage-launcher.sh"), "utf8");
@@ -267,6 +275,16 @@ function main(argv) {
   process.stdout.write(output);
 }
 
+// Assigned before running main() so a lazy require from verifyArtifact() sees
+// the real exports instead of an empty object.
+module.exports = {
+  REVIEWED_PATH_EXPORTS,
+  evaluateReviewedRightHandSide,
+  parseTopLevelExports,
+  validateAppRunContent,
+  verifyArtifact,
+};
+
 if (require.main === module) {
   try {
     main(process.argv.slice(2));
@@ -275,11 +293,3 @@ if (require.main === module) {
     process.exitCode = 1;
   }
 }
-
-module.exports = {
-  REVIEWED_PATH_EXPORTS,
-  evaluateReviewedRightHandSide,
-  parseTopLevelExports,
-  validateAppRunContent,
-  verifyArtifact,
-};

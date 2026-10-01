@@ -4,11 +4,11 @@ This document holds the state machine, theme system, UI runtime, and platform ca
 
 ## Linux AppImage Runtime Lifetime
 
-AppImage 的 FUSE wrapper 被提前终止时，Electron 仍可能在退出清理中读取挂载内的代码页，触发 SIGBUS（#1048）。Linux `afterPack` 用 `scripts/prepare-appimage-launcher.js` 在生成的 AppRun 路径导出之前接入 `build/appimage-launcher.sh`：仅 FUSE 启动先复制到本次独占、权限 0700 的 `$TMPDIR/clawd-appimage.XXXXXXXX/app`（未设置 TMPDIR 时用 `/tmp`），再启动 Electron。每次启动都需要一份解包大小的可执行临时空间，tmpfs 上会占用内存；复制失败不会启动半成品。空间不足或临时目录挂载为 `noexec` 时，可把 TMPDIR 指向其他可写、可执行的非 FUSE 目录，或手动解包运行。
+AppImage 的 FUSE wrapper 被提前终止时，Electron 仍可能在退出清理中读取挂载内的代码页，触发 SIGBUS（#1048）。Linux `afterPack` 用 `scripts/prepare-appimage-launcher.js` 在生成的 AppRun 路径导出之前接入 `build/appimage-launcher.sh`：仅 FUSE 启动先复制到本次独占、权限 0700 的 `$TMPDIR/clawd-appimage.XXXXXXXX/app`（未设置 TMPDIR 时用 `/tmp`），再启动 Electron。每次启动都需要一份解包大小的可执行临时空间，tmpfs 上会占用内存；复制失败不会启动半成品。空间不足或临时目录挂载为 `noexec` 时，可把 TMPDIR 指向其他可写、可执行的非 FUSE 目录，或手动解包运行。FUSE 的识别比较 `stat -f -c %t` 的 statfs 编号 `65735546`，不比较类型名（coreutils 9.6 起把 `fuseblk` 改报为 `fuse`）；守卫与 TMPDIR 检查必须用同一种判断。
 
-监督进程使用系统 Bash 和内存中的脚本，保留原始 `APPIMAGE`、参数、HOME、cwd 和 TMPDIR，只把 APPDIR 切到普通文件目录。主进程和同组子进程退出后删除本次目录；尚有子进程时最多等待 5 秒，再保留文件供系统临时目录策略处理。强杀监督进程可能留下该目录。自动 XWayland 重启与并发启动各用自己的目录；手动解包运行不再复制，deb、源码、macOS 和 Windows 的启动路径不变。
+监督进程使用系统 Bash 和内存中的脚本，保留原始 `APPIMAGE`、参数、HOME、cwd 和 TMPDIR，只把 APPDIR 切到普通文件目录。主进程和同组子进程退出后删除本次目录；尚有子进程时最多等待 5 秒，再保留文件供系统临时目录策略处理。强杀监督进程可能留下该目录。自动 XWayland 重启与并发启动各用自己的目录；手动解包运行不再复制，deb、源码、macOS 和 Windows 的启动路径不变。监督进程关闭继承来的 errexit 和 job control（job control 会让 setsid fork，`$!` 不再指向应用），也不开启 nounset：SHELLOPTS 一旦处于导出状态，nounset 会传给 AppRun 模板，使其在没有默认值的变量处中止。shell 在 job control 关闭时后台启动 AppImage，且启动前没有重置 SIGINT 时，监督进程会继承「忽略 SIGINT」；这时发给启动/监督进程 PID 的 SIGINT 无法转发，请向该 PID 发 SIGTERM。
 
-打包产物检查同时验证 AppRun 的四个安全路径导出和监督脚本的精确内容；Wayland smoke 的 `appimage-wrapper-termination` 场景先终止本次 FUSE wrapper、确认挂载消失且状态服务仍正常，再验证主进程正常退出与临时文件回收。WSL/X11 的通过不能替代 Bazzite/Wayland 原问题的用户复测。
+打包产物检查同时验证 AppRun 的四个安全路径导出、守卫的精确内容及其位置早于路径导出，以及监督脚本的精确内容；Wayland smoke 的 `appimage-wrapper-termination` 场景先终止本次 FUSE wrapper、确认挂载消失且状态服务仍正常，再验证主进程正常退出与临时文件回收。WSL/X11 的通过不能替代 Bazzite/Wayland 原问题的用户复测。
 
 ## Dual-Window Model
 

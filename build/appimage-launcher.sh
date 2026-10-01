@@ -2,7 +2,13 @@
 # Executed by the system bash from an in-memory command string, before Electron
 # starts. None of this supervisor's code or libraries depend on the FUSE mount.
 # Arguments: source AppDir, original AppImage, then unchanged application argv.
-set -u
+# An exported SHELLOPTS or BASH_ENV may already have enabled errexit or job
+# control. Job control makes setsid fork, so $! is no longer the application;
+# errexit then aborts the wait loop and skips cleanup. Force both off for our
+# own tracking only; AppRun re-enables errexit itself. Do not enable nounset:
+# when SHELLOPTS is exported, nounset set here would reach the electron-builder
+# AppRun template, which reads some variables without defaults and would abort.
+set +o errexit +o monitor
 
 source_dir=$1
 image=$2
@@ -43,9 +49,10 @@ done
 temp_base=${TMPDIR:-/tmp}
 [[ "$temp_base" == /* ]] || fail 'TMPDIR must be absolute'
 run_dir=$(command -p mktemp -d -- "$temp_base/clawd-appimage.XXXXXXXX") || fail 'temporary directory creation failed'
-temp_fs=$(command -p stat -f -c %T -- "$run_dir") || fail 'cannot inspect temporary filesystem'
+temp_fs_magic=$(command -p stat -f -c %t -- "$run_dir") || fail 'cannot inspect temporary filesystem'
 # A FUSE-backed TMPDIR would re-enter this guard and still depend on a daemon.
-[[ "$temp_fs" != fuseblk ]] || fail 'TMPDIR must not be on a FUSE filesystem'
+# Compare the stable FUSE magic number; coreutils 9.6 renamed fuseblk to fuse.
+[[ "$temp_fs_magic" != 65735546 ]] || fail 'TMPDIR must not be on a FUSE filesystem'
 payload="$run_dir/app"
 if ! command -p cp -a --no-preserve=ownership -- "$source_dir" "$payload"; then
   fail 'copy failed (check free space and the AppImage mount)'

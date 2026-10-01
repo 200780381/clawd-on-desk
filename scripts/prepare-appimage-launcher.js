@@ -5,11 +5,14 @@ const path = require("node:path");
 const { generateAppRunScript } = require("app-builder-lib/out/targets/appimage/appImageUtil");
 const { validateAppRunContent } = require("./verify-appimage-apprun");
 
+// verify-appimage-apprun.js requires this value lazily inside verifyArtifact()
+// to avoid a load-time cycle; keep exporting it from here.
 const PREFIX = `# Clawd AppImage lifetime guard (#1048). Start Electron from regular files.
 # Manual AppDir/extract-and-run launches already have regular backing files.
 if [[ -n "\${APPIMAGE:-}" && -n "\${APPDIR:-}" ]]; then
-  clawd_fs_type=$(command -p stat -f -c %T -- "$APPDIR") || exit 1
-  if [[ "$clawd_fs_type" == fuseblk ]]; then
+  # Compare the stable FUSE magic number; coreutils 9.6 renamed fuseblk to fuse.
+  clawd_fs_magic=$(command -p stat -f -c %t -- "$APPDIR") || exit 1
+  if [[ "$clawd_fs_magic" == 65735546 ]]; then
     clawd_launcher=$(command -p cat -- "$APPDIR/clawd-appimage-launcher.sh") || exit 1
     exec /bin/bash -c "$clawd_launcher" clawd-appimage-supervisor "$APPDIR" "$APPIMAGE" "$@"
   fi
