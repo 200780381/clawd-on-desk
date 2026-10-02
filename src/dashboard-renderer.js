@@ -1746,6 +1746,10 @@ function appendSessionAutomationOrphans(fragment) {
 let sessionHistory = [];
 let sessionHistoryPending = false;
 let sessionHistoryReloadRequested = false;
+// Whether the collapsed "other sessions" group is expanded. Session-local on
+// purpose: the Dashboard reopening starts collapsed so the resumable list
+// leads, and no extra state needs to be persisted or synced.
+let sessionHistoryOtherExpanded = false;
 const sessionHistoryActionState = new Map();
 
 function historyKey(row) {
@@ -1902,14 +1906,41 @@ function appendSessionHistory(fragment, now) {
   const rows = sessionHistory.filter((row) => !activeIds.has(row.sessionId));
   for (const id of activeIds) sessionHistoryActionState.delete(`claude-code\u0000${id}`);
   if (!rows.length) return;
+  // Rows the loader could not confirm resumable (transcript missing or
+  // unknown, v1 profiles) collapse behind the confirmed list instead of
+  // crowding it — the probe stays a hint on each card, never a gate.
+  const confirmed = rows.filter((row) => row.group !== "other");
+  const other = rows.filter((row) => row.group === "other");
   const section = document.createElement("section");
   section.className = "group session-history";
   section.appendChild(createText("h2", "group-title", t("dashboardHistoryTitle")));
   section.appendChild(createText("p", "session-history-hint", t("dashboardHistoryHint")));
-  const cards = document.createElement("div");
-  cards.className = "cards";
-  for (const row of rows) cards.appendChild(createSessionHistoryCard(row, now));
-  section.appendChild(cards);
+  if (confirmed.length) {
+    const cards = document.createElement("div");
+    cards.className = "cards";
+    for (const row of confirmed) cards.appendChild(createSessionHistoryCard(row, now));
+    section.appendChild(cards);
+  }
+  if (other.length) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "session-history-toggle";
+    toggle.setAttribute("aria-expanded", sessionHistoryOtherExpanded ? "true" : "false");
+    toggle.textContent = sessionHistoryOtherExpanded
+      ? t("dashboardHistoryHideOther")
+      : t("dashboardHistoryShowOther").replace("{n}", other.length);
+    toggle.addEventListener("click", () => {
+      sessionHistoryOtherExpanded = !sessionHistoryOtherExpanded;
+      render();
+    });
+    section.appendChild(toggle);
+    if (sessionHistoryOtherExpanded) {
+      const otherCards = document.createElement("div");
+      otherCards.className = "cards";
+      for (const row of other) otherCards.appendChild(createSessionHistoryCard(row, now));
+      section.appendChild(otherCards);
+    }
+  }
   fragment.appendChild(section);
 }
 
