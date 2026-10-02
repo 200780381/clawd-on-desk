@@ -4483,6 +4483,39 @@ describe("CodexLogMonitor", () => {
       monitor.start();
     });
 
+    it("refreshes a late index title without rollout growth or lifecycle activity", () => {
+      const testFile = path.join(dateDir, TEST_FILENAME);
+      fs.writeFileSync(testFile, JSON.stringify({
+        type: "session_meta", payload: { cwd: "/projects/title-fixture" },
+      }) + "\n");
+      const events = [];
+      monitor = new CodexLogMonitor(makeConfig(tmpDir), (...args) => events.push(args), { codexDir: tmpDir });
+      monitor._poll();
+      const tracked = monitor._tracked.get(testFile);
+      const before = { state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset };
+      events.length = 0;
+      fs.writeFileSync(path.join(tmpDir, "session_index.jsonl"), JSON.stringify({
+        id: EXPECTED_SID.slice("codex:".length), thread_name: "Late thread title",
+      }) + "\n");
+      monitor._poll();
+      assert.deepStrictEqual(events, [[EXPECTED_SID, null, "session_index:title", { sessionTitle: "Late thread title" }]]);
+      assert.deepStrictEqual({ state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset }, before);
+      assert.strictEqual(tracked.sessionTitle, "Late thread title");
+      events.length = 0;
+      monitor._poll();
+      assert.strictEqual(events.length, 0, "unchanged title must not emit again");
+      fs.unlinkSync(path.join(tmpDir, "session_index.jsonl"));
+      monitor._poll();
+      assert.strictEqual(events.length, 0, "missing index must not erase a known title");
+      assert.strictEqual(tracked.sessionTitle, "Late thread title");
+      fs.writeFileSync(path.join(tmpDir, "session_index.jsonl"), JSON.stringify({
+        id: EXPECTED_SID.slice("codex:".length), thread_name: "Renamed title",
+      }) + "\n");
+      monitor._poll();
+      assert.strictEqual(events.length, 1);
+      assert.strictEqual(events[0][3].sessionTitle, "Renamed title");
+    });
+
     it("uses Codex /rename thread_name from session_index.jsonl", (_, done) => {
       const testFile = path.join(dateDir, TEST_FILENAME);
       fs.writeFileSync(testFile, [

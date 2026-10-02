@@ -34,6 +34,12 @@ Codex CLI 状态同步（official hooks primary + JSONL fallback）：
     → agents/codex-log-monitor.js（fallback：hook 未覆盖事件、hook 禁用/不可用、历史兼容）
     → src/agent-runtime-main.js 对 hook-active session 做事件级 suppression，避免重复状态/重复气泡；本地 JSONL 路径不经过 HTTP server
 
+本机 Codex 会话标题：现有 JSONL monitor 每轮为已观察到生命周期的会话合并读取一次
+`session_index.jsonl`（沿用 512 KiB tail 上限）。新标题/改名以 `session_index:title`
+送入 `updateSessionMetadata(expectedAgentId: "codex")`，即使 rollout 未增长也刷新
+HUD/Dashboard；不创建会话、不改变状态/活跃时间/完成提醒/小结，不清空已有标题。
+尚未生成原生标题时仍使用既有文件夹 fallback；用户别名继续优先。
+
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版
 `event_msg:item_completed`（`payload.item.type === "ContextCompaction"`）。本地与
 Remote SSH monitor 共用 `hooks/codex-log-event.js`，把后者归一化到旧事件键，沿用

@@ -18,7 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const CodexSubagentClassifier = require("./codex-subagent-classifier");
-const { readCodexThreadName } = require("../hooks/codex-session-index");
+const { bareCodexSessionId, readCodexThreadName, readCodexThreadNames } = require("../hooks/codex-session-index");
 const {
   clampAssistantOutputText,
   extractAssistantTextFromRecord,
@@ -344,6 +344,25 @@ class CodexLogMonitor {
       this._runReadyStartupRecovery(context);
     }
     this._pruneTrackedFilesIfNeeded();
+    this._refreshSessionTitles();
+  }
+
+  _refreshSessionTitles() {
+    // Unparsed/failed replay candidates have no observed lifecycle to label.
+    const sessions = Array.from(this._tracked.values()).filter(tracked => tracked.lastState);
+    const names = readCodexThreadNames(
+      sessions.map(tracked => tracked.sessionId),
+      { codexDir: this._codexDir }
+    );
+    for (const tracked of sessions) {
+      const title = names.get(bareCodexSessionId(tracked.sessionId));
+      if (!title || title === tracked.reportedIndexTitle) continue;
+      tracked.sessionTitle = title;
+      tracked.reportedIndexTitle = title;
+      // An index update is metadata, including after a completed turn. Do
+      // not use _emitStateChange: it also advances lifecycle/liveness clocks.
+      this._onStateChange(tracked.sessionId, null, "session_index:title", { sessionTitle: title });
+    }
   }
 
   _insertStartupRecoveryCandidate(candidate) {

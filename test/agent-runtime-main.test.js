@@ -371,6 +371,44 @@ describe("agent-runtime-main", () => {
     ]);
   });
 
+  it("refreshes an existing Codex title without changing lifecycle or telemetry", () => {
+    const instances = [];
+    const FakeMonitor = makeFakeMonitorClass(instances);
+    const harness = makeRealStateHarness();
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => FakeMonitor,
+      loadCodexAgent: () => ({ id: "codex" }),
+      isAgentEnabled: () => true,
+      getStateRuntime: () => harness.state,
+      updateSession: (...args) => harness.state.updateSession(...args),
+      clearCodexNotifyBubbles: () => assert.fail("a title cannot clear a bubble"),
+      codexSubagentClassifier: {},
+    });
+    try {
+      const monitor = runtime.startCodexLogMonitor();
+      const sid = localSessionKey("codex:title-refresh");
+      harness.state.updateSession(sid, "working", "UserPromptSubmit", {
+        agentId: "codex", rawSessionId: "codex:title-refresh", profileId: "local", cwd: "/projects/title-fixture",
+      });
+      const session = harness.state.sessions.get(sid);
+      const before = { at: session.updatedAt, state: session.state, metadataAt: session.metadataUpdatedAt,
+        events: JSON.stringify(session.recentEvents), soundCount: harness.sounds.length, stateCount: harness.stateChanges.length };
+      monitor.emit("codex:title-refresh", null, "session_index:title", { sessionTitle: "Arrived title" });
+      assert.strictEqual(session.sessionTitle, "Arrived title");
+      assert.strictEqual(harness.state.buildSessionSnapshot().sessions.find(s => s.id === sid).displayTitle, "Arrived title");
+      assert.deepStrictEqual({ at: session.updatedAt, state: session.state, metadataAt: session.metadataUpdatedAt,
+        events: JSON.stringify(session.recentEvents), soundCount: harness.sounds.length, stateCount: harness.stateChanges.length }, before);
+      monitor.emit("codex:absent-title", null, "session_index:title", { sessionTitle: "Absent" });
+      assert.strictEqual(harness.state.sessions.size, 1);
+      const foreign = localSessionKey("codex:foreign-agent");
+      harness.state.updateSession(foreign, "working", "Test", { agentId: "claude-code", sessionTitle: "Keep foreign" });
+      monitor.emit("codex:foreign-agent", null, "session_index:title", { sessionTitle: "Wrong owner" });
+      assert.strictEqual(harness.state.sessions.get(foreign).sessionTitle, "Keep foreign");
+    } finally {
+      runtime.cleanup();harness.state.cleanup();
+    }
+  });
+
   it("handles JSONL token_count as metadata without clearing bubbles or changing state", () => {
     const instances = [];
     const calls = [];
