@@ -1853,8 +1853,12 @@ function createSessionHistoryCard(row, now) {
     ));
   }
   const folder = sessionHistoryFolderLabel(row.cwd);
+  // The short id sits next to the folder so two similar-looking rows stay
+  // distinguishable and can be matched against `claude --resume` output.
+  const shortId = typeof row.sessionId === "string" ? row.sessionId.slice(0, 8) : "";
   const elapsed = formatElapsed(Math.max(0, now - row.lastEventAt));
-  meta.appendChild(document.createTextNode(folder ? `${folder} · ${elapsed}` : elapsed));
+  const parts = [folder, shortId].filter(Boolean);
+  meta.appendChild(document.createTextNode(parts.length ? `${parts.join(" · ")} · ${elapsed}` : elapsed));
   main.appendChild(meta);
   card.appendChild(main);
 

@@ -223,6 +223,7 @@ describe("dashboard session history section", () => {
     const meta = textOf(byClass(app.root, "session-history-meta")[0]);
     assert.ok(meta.includes(i18n.en.dashboardHistoryInterrupted), meta);
     assert.ok(meta.includes("thunderstone"), "the folder basename orients the user");
+    assert.ok(meta.includes("abc-123"), "the short session id keeps rows distinguishable");
     assert.ok(!meta.includes("/Users/me"), "the full path is not pasted into the row");
 
     const button = byClass(app.root, "session-history-resume")[0];

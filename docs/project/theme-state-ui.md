@@ -175,7 +175,7 @@ Mini 状态映射：
 
 ### Session History（本机 Claude 手动继续）
 
-- 普通 Dashboard 在 live cards 下方展示独立历史区，最多 25 条；历史不参与 quick-select 数字映射。显示标题 / session ID、目录 basename、最近时间与可选中断 / transcript 缺失提示，不展示完整路径或对话内容。有历史但无 live 会话时空状态改为紧凑布局，不能占满整屏把恢复按钮推到首屏之外。
+- 普通 Dashboard 在 live cards 下方展示独立历史区，最多 25 条；历史不参与 quick-select 数字映射。显示标题 / session ID（无标题时显示 session ID 前 8 位）、目录 basename、最近时间与可选中断 / transcript 缺失提示，不展示完整路径或完整对话内容；没有显式标题时按 live prompt 标题同一规则从已确认 transcript 的第一条用户输入生成标题，只用于显示、不写入历史记录。有历史但无 live 会话时空状态改为紧凑布局，不能占满整屏把恢复按钮推到首屏之外。
 - 恢复中禁点由 main 持有，页面缓存只负责显示；提交终端后继续等待真实 live snapshot，不立即移除卡片或声称成功。30 秒未观察到会话时提示先检查终端，并允许手动重试；已知启动失败立即显示错误且保留原卡。
 - 历史在初始加载和 live 集合变化时重读，1 秒 UI tick 不读磁盘。加载期间的新失效通知必须排队重读；渲染时再次过滤当前本机 live ID，避免迟到历史回包让已恢复的卡片复活。存储、隐私与运行时边界见 `agent-runtime-architecture.md` 的 Local Claude Session History。
 

@@ -13,6 +13,7 @@ const {
   probeTranscript,
   loadResumableSessionHistory,
   resolveResumeTarget,
+  clearTitleExtractionCache,
 } = require("../src/session-history-loader");
 const {
   LEGACY_HISTORY_VERSION,
@@ -31,6 +32,7 @@ describe("session history loader", () => {
   const BOOT_B = T0 + 600_000;
 
   beforeEach(() => {
+    clearTitleExtractionCache();
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-history-loader-"));
     historyDir = path.join(root, "history");
     claudeProjectsDir = path.join(root, "claude-projects");
@@ -62,6 +64,16 @@ describe("session history loader", () => {
     const dir = path.join(claudeProjectsDir, encodeClaudeProjectDir(cwd));
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), '{"type":"user"}\n');
+  }
+
+  // A transcript whose lines the test controls, for title extraction cases.
+  function writeTranscriptLines(sessionId, entries, cwd = projectCwd) {
+    const dir = path.join(claudeProjectsDir, encodeClaudeProjectDir(cwd));
+    fs.mkdirSync(dir, { recursive: true });
+    const body = entries
+      .map((entry) => (typeof entry === "string" ? entry : JSON.stringify(entry)))
+      .join("\n");
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body ? `${body}\n` : "");
   }
 
   function loadOpts(extra = {}) {
@@ -274,6 +286,158 @@ describe("session history loader", () => {
       record("s", T0, BOOT_A, { assistant_last_output: "secret", prompt: "secret" });
       const [row] = loadResumableSessionHistory(loadOpts());
       assert.ok(!JSON.stringify(row).includes("secret"));
+    });
+
+    it("names a session from its first prompt when no title was recorded", () => {
+      record("titled", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("titled", [
+        { type: "last-prompt", leafUuid: "leaf" },
+        { type: "attachment", attachment: { path: "notes.txt" } },
+        { type: "user", message: { role: "user", content: "Fix the theme loader crash" } },
+        { type: "assistant", message: { role: "assistant", content: "On it" } },
+      ]);
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "Fix the theme loader crash");
+    });
+
+    it("skips metadata rows and falls back to the slash command that started the session", () => {
+      record("cmd", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("cmd", [
+        { type: "user", isMeta: true, message: { role: "user", content: "meta noise" } },
+        { type: "user", message: { role: "user", content: "<command-message>specrune-init</command-message>" } },
+        { type: "user", message: { role: "user", content: [{ type: "tool_result", content: "x" }] } },
+      ]);
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "/specrune-init");
+    });
+
+    it("keeps reading when the transcript head is one huge record", () => {
+      record("big", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("big", [
+        JSON.stringify({ type: "attachment", data: "x".repeat(20 * 1024) }),
+        { type: "user", message: { role: "user", content: "After the big line" } },
+      ]);
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "After the big line");
+    });
+
+    it("never overrides a recorded title, nor names rows it cannot confirm", () => {
+      record("named", T0, BOOT_A, { session_title: "Recorded title" });
+      writeTranscriptLines("named", [
+        { type: "user", message: { role: "user", content: "From transcript" } },
+      ]);
+      // An empty transcript file probes as false — nothing to name.
+      record("gone", T0 + 1000, BOOT_A, { session_title: "" });
+      writeTranscriptLines("gone", []);
+
+      const rows = loadResumableSessionHistory(loadOpts());
+      const named = rows.find((row) => row.sessionId === "named");
+      const gone = rows.find((row) => row.sessionId === "gone");
+      assert.equal(named.title, "Recorded title");
+      assert.equal(gone.title, null);
+    });
+
+    it("gives no title when the opening prompt is secret-shaped, even if a later prompt is plain", () => {
+      record("secret", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("secret", [
+        { type: "user", message: { role: "user", content: "deploy with token ghp_abcdefghijklmnopqrstuvwxyz0123456789" } },
+        { type: "user", message: { role: "user", content: "a perfectly normal follow-up" } },
+      ]);
+      // The opening line decides; a secret in it means "no safe name", so the
+      // extraction must not fall through to the next prompt.
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, null);
+    });
+
+    it("titles a multi-line prompt from its first line even when a later line holds a key", () => {
+      record("multi", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("multi", [
+        { type: "user", message: { role: "user", content: "please deploy this\nAWS key AKIAABCDEFGHIJKLMNOP" } },
+      ]);
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "please deploy this");
+    });
+
+    it("survives null entries and null content parts without dropping any row", () => {
+      record("null-part", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("null-part", [
+        "null",
+        { type: "user", message: { role: "user", content: [null, { type: "text", text: "kept the list alive" }] } },
+      ]);
+      record("healthy", T0 + 1000, BOOT_A, { session_title: "" });
+      writeTranscriptLines("healthy", [
+        { type: "user", message: { role: "user", content: "second row intact" } },
+      ]);
+
+      const rows = loadResumableSessionHistory(loadOpts());
+      assert.equal(rows.length, 2);
+      assert.equal(rows.find((row) => row.sessionId === "null-part").title, "kept the list alive");
+      assert.equal(rows.find((row) => row.sessionId === "healthy").title, "second row intact");
+    });
+
+    it("names a prompt that merely mentions tool_result", () => {
+      record("asks", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("asks", [
+        { type: "user", message: { role: "user", content: "why does tool_result come back empty?" } },
+      ]);
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "why does tool_result come back empty?");
+    });
+
+    it("keeps the slash command found before a record that overruns the 1MiB cap", () => {
+      record("big-cmd", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("big-cmd", [
+        { type: "user", message: { role: "user", content: "<command-message>specrune-init</command-message>" } },
+        JSON.stringify({ type: "attachment", data: "x".repeat(1100 * 1024) }),
+      ]);
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "/specrune-init");
+    });
+
+    it("extracts once per unchanged transcript and again after it changes", (t) => {
+      record("cached", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("cached", [
+        { type: "user", message: { role: "user", content: "Original opening line" } },
+      ]);
+      record("unnamed", T0 + 1000, BOOT_A, { session_title: "" });
+      writeTranscriptLines("unnamed", [
+        { type: "user", message: { role: "user", content: [{ type: "tool_result", content: "x" }] } },
+      ]);
+      const transcriptPath = (id) => path.join(
+        claudeProjectsDir, encodeClaudeProjectDir(projectCwd), `${id}.jsonl`,
+      );
+      const first = loadResumableSessionHistory(loadOpts());
+      assert.equal(first.find((row) => row.sessionId === "cached").title, "Original opening line");
+      assert.equal(first.find((row) => row.sessionId === "unnamed").title, null);
+
+      // A second load over the same unchanged files — titled or not — must
+      // not open a single transcript again.
+      const realOpen = fs.openSync;
+      let opens = 0;
+      t.mock.method(fs, "openSync", (file, ...args) => {
+        if (String(file) === transcriptPath("cached") || String(file) === transcriptPath("unnamed")) {
+          opens += 1;
+        }
+        return realOpen(file, ...args);
+      });
+      const second = loadResumableSessionHistory(loadOpts());
+      assert.equal(second.find((row) => row.sessionId === "cached").title, "Original opening line");
+      assert.equal(second.find((row) => row.sessionId === "unnamed").title, null);
+      assert.equal(opens, 0);
+
+      // The file changed (content and mtime both) — extract again.
+      const later = new Date(Date.now() + 10_000);
+      fs.utimesSync(transcriptPath("cached"), later, later);
+      writeTranscriptLines("cached", [
+        { type: "user", message: { role: "user", content: "A different opening line" } },
+      ]);
+      fs.utimesSync(transcriptPath("cached"), later, later);
+      const third = loadResumableSessionHistory(loadOpts());
+      assert.equal(third.find((row) => row.sessionId === "cached").title, "A different opening line");
+      assert.ok(opens > 0);
     });
   });
 
