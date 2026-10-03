@@ -63,7 +63,7 @@ describe("durable session history", () => {
 
   // A write that happened at `eventAt`, during the boot that started at `boot`.
   function writeOpts(eventAt, boot = BOOT_A, extra = {}) {
-    return { historyDir, eventAt, uptime: () => (eventAt - boot) / 1000, ...extra };
+    return { historyDir, eventAt, uptime: () => (eventAt - boot) / 1000, env: {}, ...extra };
   }
 
   // A read taken at `now`, while running the boot that started at `boot`.
@@ -161,7 +161,7 @@ describe("durable session history", () => {
       `;
       const makeWorker = (pause) => new Worker(workerCode, { eval: true, workerData: {
         module: require.resolve("../hooks/session-history"), signal, pause,
-        opts: { historyDir, eventAt: T0 + (pause ? 1000 : 2000) },
+        opts: { historyDir, eventAt: T0 + (pause ? 1000 : 2000), env: {} },
         body: body(pause ? { state: "working" } : { event: "SessionEnd", state: "sleeping" }),
       } });
       const older = makeWorker(true);

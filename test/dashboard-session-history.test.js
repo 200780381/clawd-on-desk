@@ -235,6 +235,15 @@ describe("dashboard session history section", () => {
     assert.equal(button.disabled, false);
   });
 
+  it("shows only the first eight characters of the session id in the meta line", async () => {
+    const app = loadDashboard({ history: [historyRow({ sessionId: "0123456789abcdef" })] });
+    await flush();
+
+    const meta = textOf(byClass(app.root, "session-history-meta")[0]);
+    assert.ok(meta.includes("01234567"), meta);
+    assert.ok(!meta.includes("012345678"), "a ninth character must be truncated away");
+  });
+
   it("sends only the agent and opaque history key when resuming", async () => {
     const app = loadDashboard({ history: [historyRow()] });
     await flush();
