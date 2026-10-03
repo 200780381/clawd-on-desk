@@ -366,7 +366,14 @@ describe("project bookmark launcher", () => {
         cwd: calls[0].options.cwd, encoding: "utf8", windowsHide: true, timeout: 10000,
       });
       assert.equal(result.status, 0, result.stderr || String(result.error));
-      assert.deepEqual(result.stdout.trim().split(/\r?\n/), ["CLI-LITERAL-ONLY", `"${cwd}"`]);
+      const lines = result.stdout.trim().split(/\r?\n/);
+      assert.equal(lines.length, 2);
+      assert.equal(lines[0], "CLI-LITERAL-ONLY");
+      assert.match(lines[1], /^".+"$/);
+      // Windows temp paths may contain 8.3 aliases (e.g. RUNNER~1), while
+      // PowerShell/cmd expands them in %CD%. Verify the same real directory
+      // without weakening the literal quoting or exact-output checks.
+      assert.equal(fs.realpathSync.native(lines[1].slice(1, -1)), fs.realpathSync.native(cwd));
     } finally {
       if (fs.existsSync(cli)) fs.unlinkSync(cli);
       if (fs.existsSync(toolDir)) fs.rmdirSync(toolDir);
