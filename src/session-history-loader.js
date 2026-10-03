@@ -60,27 +60,41 @@ function getClaudeProjectsDir(profile, options = {}) {
  * Returns true (present), false (confidently missing), or null (unknown).
  */
 function probeTranscript(agentId, sessionId, cwd, profile, options = {}, projectEntriesCache = null) {
-  if (agentId !== "claude-code") return null;
+  return locateTranscript(agentId, sessionId, cwd, profile, options, projectEntriesCache).present;
+}
+
+// Same verdict as probeTranscript, plus the path of the transcript that earned
+// a "present" it: the file that passed the regular-file / not-a-symlink /
+// non-empty check, in whichever project directory the lookup found it. The
+// path is null unless present === true, so callers never read a file the probe
+// did not vouch for.
+function locateTranscript(agentId, sessionId, cwd, profile, options = {}, projectEntriesCache = null) {
+  const unknown = { present: null, path: null };
+  if (agentId !== "claude-code") return unknown;
   try {
-    if (!sessionId || normalizeClaudeSessionId(sessionId) !== sessionId) return null;
-  } catch { return null; }
+    if (!sessionId || normalizeClaudeSessionId(sessionId) !== sessionId) return unknown;
+  } catch { return unknown; }
   const dirName = encodeClaudeProjectDir(cwd);
-  if (!dirName) return null;
+  if (!dirName) return unknown;
   const projectsDir = getClaudeProjectsDir(profile, options);
-  if (!projectsDir) return null;
+  if (!projectsDir) return unknown;
   const projectDir = path.join(projectsDir, dirName);
   try {
     const stat = fs.lstatSync(projectDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return unknown;
   } catch {
-    return findTranscriptAcrossProjects(projectsDir, sessionId, projectEntriesCache) === true ? true : null;
+    const located = findTranscriptAcrossProjects(projectsDir, sessionId, projectEntriesCache);
+    return located.present === true ? located : unknown;
   }
   try {
     const transcript = path.join(projectDir, `${sessionId}.jsonl`);
     const stat = fs.lstatSync(transcript);
-    return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0;
+    if (stat.isFile() && !stat.isSymbolicLink() && stat.size > 0) {
+      return { present: true, path: transcript };
+    }
+    return { present: false, path: null };
   } catch (err) {
-    if (!err || err.code !== "ENOENT") return null;
+    if (!err || err.code !== "ENOENT") return unknown;
     return findTranscriptAcrossProjects(projectsDir, sessionId, projectEntriesCache);
   }
 }
@@ -92,10 +106,12 @@ function probeTranscript(agentId, sessionId, cwd, profile, options = {}, project
 // ~1 readdir per directory regardless of how many records miss.
 const TRANSCRIPT_INDEX_KEY = "\0transcript-index";
 
-// Returns true (present), false (scanned every project directory and the id
-// is nowhere), or null (cannot scan: the projects root, or one of its
-// subdirectories, is unreadable — absence cannot be claimed from a scan that
-// could not run or could not finish).
+// Returns { present: true, path } when a verified copy is found,
+// { present: false, path: null } when every project directory was scanned and
+// the id is nowhere, or { present: null, path: null } when the scan cannot
+// claim absence (the projects root, or one of its subdirectories, is
+// unreadable — absence cannot be claimed from a scan that could not run or
+// could not finish).
 function findTranscriptAcrossProjects(projectsDir, sessionId, projectEntriesCache) {
   const cache = projectEntriesCache || new Map();
   const indexKey = projectsDir + TRANSCRIPT_INDEX_KEY;
@@ -104,17 +120,20 @@ function findTranscriptAcrossProjects(projectsDir, sessionId, projectEntriesCach
     index = buildTranscriptIndex(projectsDir, cache);
     cache.set(indexKey, index);
   }
-  if (!index) return null;
+  if (!index) return { present: null, path: null };
   const dirs = index.files.get(`${sessionId}.jsonl`);
-  if (!dirs) return index.complete ? false : null;
+  if (!dirs) return { present: index.complete ? false : null, path: null };
   for (const dir of dirs) {
     // The name matches; verify it is a real transcript before claiming it.
+    const candidate = path.join(dir, `${sessionId}.jsonl`);
     try {
-      const stat = fs.lstatSync(path.join(dir, `${sessionId}.jsonl`));
-      if (stat.isFile() && !stat.isSymbolicLink() && stat.size > 0) return true;
+      const stat = fs.lstatSync(candidate);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size > 0) {
+        return { present: true, path: candidate };
+      }
     } catch { /* keep scanning the other project directories */ }
   }
-  return null; // named in the index, but no copy could be verified
+  return { present: null, path: null }; // named in the index, but no copy could be verified
 }
 
 // One pass over the projects root: every subdirectory's file names folded
@@ -190,27 +209,24 @@ function loadResumableSessionHistory(options = {}) {
 
   const confirmed = [];
   const other = [];
+  // The transcript a row's probe verified, kept out of the returned object:
+  // those rows travel over IPC to the Dashboard, and the path must not.
+  const locatedPaths = new Map();
   for (const record of records) {
     if (activeRawSessionIds.has(record.sessionId)) continue;
     const profileVerified = record.version >= 2 && !!normalizeClaudeProfile(record.profile);
-    const transcript = profileVerified
-      ? probeTranscript(
+    const located = profileVerified
+      ? locateTranscript(
         record.agentId, record.sessionId, record.cwd, record.profile, options, projectEntriesCache,
       )
-      : null;
-    let title = record.title || null;
-    if (!title && transcript === true) {
-      const transcriptPath = transcriptPathFor(
-        record.sessionId, record.cwd, record.profile, options,
-      );
-      if (transcriptPath) title = extractTitleFromTranscript(transcriptPath);
-    }
+      : { present: null, path: null };
+    const transcript = located.present;
     const row = {
       agentId: record.agentId,
       sessionId: record.sessionId,
       historyKey: record.historyKey,
       cwd: record.cwd,
-      title,
+      title: record.title || null,
       lastState: record.lastState,
       firstSeenAt: record.firstSeenAt,
       lastEventAt: record.lastEventAt,
@@ -228,9 +244,22 @@ function loadResumableSessionHistory(options = {}) {
         ? "confirmed"
         : "other",
     };
+    if (transcript === true) locatedPaths.set(row, located.path);
     (row.group === "confirmed" ? confirmed : other).push(row);
   }
-  return [...confirmed.slice(0, limit), ...other];
+  // Titles are read only for the rows that actually reach the Dashboard: the
+  // confirmed head is capped at `limit` first, so a transcript outside the
+  // visible list is never opened. "other" rows with a present transcript (the
+  // cwd is gone but the file survives) are shown folded and still named; the
+  // rest have no verified file to read.
+  const visible = [...confirmed.slice(0, limit), ...other];
+  for (const row of visible) {
+    if (row.title) continue;
+    if (row.transcriptPresent !== true) continue;
+    const transcriptPath = locatedPaths.get(row);
+    if (transcriptPath) row.title = extractTitleFromTranscript(transcriptPath);
+  }
+  return visible;
 }
 
 // resolveResumeTarget's folder check, shared with the confirmed grouping: a
@@ -290,14 +319,19 @@ function readTitleFromTranscript(transcriptPath, size) {
   for (const window of [16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024]) {
     const read = Math.min(window, size);
     let text;
+    let fd = null;
     try {
-      const fd = fs.openSync(transcriptPath, "r");
+      fd = fs.openSync(transcriptPath, "r");
       const buf = Buffer.alloc(read);
       fs.readSync(fd, buf, 0, read, 0);
-      fs.closeSync(fd);
       text = buf.toString("utf8");
     } catch {
       return null;
+    } finally {
+      // A read error must not leak the descriptor it was opened with.
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch { /* the read result decides */ }
+      }
     }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
@@ -333,12 +367,6 @@ function readTitleFromTranscript(transcriptPath, size) {
     if (read >= size) return command; // whole file scanned, no plain prompt
   }
   return command; // head capped short of the file end; keep the command found
-}
-
-function transcriptPathFor(sessionId, cwd, profile, options = {}) {
-  const dirName = encodeClaudeProjectDir(cwd);
-  const projectsDir = dirName && getClaudeProjectsDir(profile, options);
-  return projectsDir ? path.join(projectsDir, dirName, `${sessionId}.jsonl`) : null;
 }
 
 /**
