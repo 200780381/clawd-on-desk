@@ -58,9 +58,12 @@ const resolve = createPidResolver({
   readRuntimeIdentity: () => runtimeContext.identity,
 });
 
-// CodeBuddy PreToolUse gating — allow by default
-function stdoutForEvent(hookName) {
-  if (hookName === "PreToolUse") return JSON.stringify({ decision: "allow" });
+// This command hook only reports state: it answers `{}` for every event and
+// never makes a tool or permission decision. Approvals go through the separate
+// blocking PermissionRequest HTTP hook. This follows the no-decision policy the
+// WorkBuddy hook adopted in PR #618, where an explicit PreToolUse allow could
+// bypass the product's own permission UI.
+function stdoutForEvent() {
   return "{}";
 }
 
@@ -108,7 +111,7 @@ readStdinJson()
   .then((payload) => {
     const hookName = (payload && payload.hook_event_name) || "";
     const mapped = HOOK_MAP[hookName];
-    const outLine = stdoutForEvent(hookName);
+    const outLine = stdoutForEvent();
 
     if (!mapped) {
       finish(outLine);
@@ -117,11 +120,9 @@ readStdinJson()
 
     const { state, event } = mapped;
 
-    // Answer CodeBuddy before the process-tree walk: the walk is synchronous
-    // and can take ~1.5s on Windows, which would otherwise delay the
-    // PreToolUse gate decision on a cold cache. The POST below still runs to
-    // completion afterwards — writeStdoutOnce re-arms the exit backstop for
-    // exactly that — so no state is lost by answering early.
+    // Write stdout before the synchronous process-tree walk (which can take
+    // ~1.5s on Windows), then continue the POST. writeStdoutOnce re-arms the
+    // exit backstop for the POST, so answering early does not lose state.
     writeStdoutOnce(outLine);
 
     const remote = !!process.env.CLAWD_REMOTE;
