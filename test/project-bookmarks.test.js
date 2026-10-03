@@ -353,7 +353,7 @@ describe("project bookmark launcher", () => {
     // Agent, a user's CLI, or a detached terminal. Every file is owned here.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-bookmark-ps-"));
     const toolDir = path.join(root, "tools & $literal 'quote'");
-    const cwd = path.join(root, "project & $literal 'quote' %value%");
+    const cwd = path.join(root, "project & $literal 'quote' %value% 目录");
     const cli = path.join(toolDir, "codex.cmd");
     try {
       fs.mkdirSync(toolDir);
@@ -362,7 +362,9 @@ describe("project bookmark launcher", () => {
       const calls = [];
       const launcher = createProjectBookmarkLauncher({ findCodexCmd: async () => cli, tryLaunch: async (bin, args, options) => { calls.push({ bin, args, options }); return { ok: true }; } });
       assert.equal((await launcher.launch(bookmark("codex", cwd))).ok, true);
-      const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", calls[0].args.at(-1)], {
+      // Capture native CMD output as UTF-8, including non-ASCII temp paths.
+      const command = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); " + calls[0].args.at(-1);
+      const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
         cwd: calls[0].options.cwd, encoding: "utf8", windowsHide: true, timeout: 10000,
       });
       assert.equal(result.status, 0, result.stderr || String(result.error));
