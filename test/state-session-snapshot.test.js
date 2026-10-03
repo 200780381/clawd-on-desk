@@ -2,6 +2,9 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   INTERNAL_WORKSPACE_AGENTS,
@@ -855,6 +858,59 @@ describe("state-session-snapshot builder", () => {
       assert.strictEqual(entry.focusTarget, null, entry.id);
     }
     assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "hidden").hiddenFromHud, true);
+  });
+
+  it("issue #1103: batches local Codex titles per snapshot", () => {
+    const codexDir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-index-"));
+    const indexFile = path.join(codexDir, "session_index.jsonl");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const originalOpenSync = fs.openSync;
+    let indexOpens = 0;
+    const localSessions = ["one", "two", "three"].map((name, i) => [
+      i === 2 ? `codex:${name}` : makeSessionKey({ profileId: "local", rawSessionId: `codex:${name}` }),
+      session("working", {
+        agentId: "codex",
+        ...(i === 2 ? {} : { rawSessionId: `codex:${name}` }),
+        sessionTitle: `Stored ${name}`,
+      }),
+    ]);
+    const otherSessions = [
+      ["remote", session("working", {
+        agentId: "codex", rawSessionId: "codex:remote", host: "devbox", sessionTitle: "Remote title",
+      })],
+      ["claude", session("working", { rawSessionId: "codex:one", sessionTitle: "Claude title" })],
+    ];
+    try {
+      process.env.CODEX_HOME = codexDir;
+      fs.writeFileSync(indexFile, ["one", "two", "three", "remote"].map((name) =>
+        JSON.stringify({ id: name, thread_name: `Index ${name}` })
+      ).join("\n") + "\n");
+      fs.openSync = function(file, ...args) {
+        if (file === indexFile) indexOpens++;
+        return originalOpenSync.call(this, file, ...args);
+      };
+      const snapshot = buildSessionSnapshot(new Map([...localSessions, ...otherSessions]));
+      assert.strictEqual(indexOpens, 1);
+      for (const [i, [id]] of localSessions.entries()) {
+        const entry = snapshot.sessions.find((entry) => entry.id === id);
+        const title = `Index ${["one", "two", "three"][i]}`;
+        assert.strictEqual(entry.sessionTitle, title);
+        assert.strictEqual(entry.displayTitle, title);
+      }
+      for (const [id, stored] of otherSessions) {
+        const entry = snapshot.sessions.find((entry) => entry.id === id);
+        assert.strictEqual(entry.sessionTitle, stored.sessionTitle);
+        assert.strictEqual(entry.displayTitle, stored.sessionTitle);
+      }
+      indexOpens = 0;
+      buildSessionSnapshot(new Map(otherSessions));
+      assert.strictEqual(indexOpens, 0);
+    } finally {
+      fs.openSync = originalOpenSync;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(codexDir, { recursive: true, force: true });
+    }
   });
 
   it("applies aliases, Codex thread names, and Kiro cwd-scoped alias keys", () => {

@@ -554,6 +554,8 @@ function createAgentRuntimeMain(options = {}) {
           if (event === "session_index:title") {
             const stateRuntime = getStateRuntime();
             if (stateRuntime && typeof stateRuntime.updateSessionMetadata === "function") {
+              const existing = stateRuntime.sessions && stateRuntime.sessions.get(sessionId);
+              if (existing && (existing.host || existing.wslDistro)) return;
               stateRuntime.updateSessionMetadata(sessionId, {
                 expectedAgentId: "codex",
                 sessionTitle: sessionOptions.sessionTitle,

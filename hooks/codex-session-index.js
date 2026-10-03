@@ -68,7 +68,7 @@ function readCodexThreadNames(sessionIds, options = {}) {
 
 function readCodexThreadName(sessionId, options = {}) {
   const id = bareCodexSessionId(sessionId);
-  return id ? readCodexThreadNames([id], options).get(id) || null : null;
+  return id ? readCodexThreadNames([sessionId], options).get(id) || null : null;
 }
 
 module.exports = {

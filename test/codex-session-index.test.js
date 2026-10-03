@@ -35,4 +35,21 @@ describe("Codex session index titles", () => {
     fs.writeFileSync(path.join(dir, "session_index.jsonl"), "{broken");
     assert.strictEqual(readCodexThreadName("one", { codexDir: dir }), null);
   });
+
+  it("issue #1103: defaults both readers to a 512 KiB tail", () => {
+    const old = JSON.stringify({ id: "old", thread_name: "Outside default tail" }) + "\n";
+    const recent = JSON.stringify({ id: "recent", thread_name: "Inside default tail" }) + "\n";
+    fs.writeFileSync(path.join(dir, "session_index.jsonl"), old + "\n".repeat(600 * 1024) + recent);
+    const options = { codexDir: dir };
+    assert.deepStrictEqual(readCodexThreadNames(["old", "recent"], options), new Map([["recent", "Inside default tail"]]));
+    assert.strictEqual(readCodexThreadName("old", options), null);
+    assert.strictEqual(readCodexThreadName("recent", options), "Inside default tail");
+  });
+
+  it("issue #1103: strips a single prefix when the index id itself starts with codex", () => {
+    fs.writeFileSync(path.join(dir, "session_index.jsonl"), JSON.stringify({
+      id: "codex:edge", thread_name: "Prefixed index id",
+    }) + "\n");
+    assert.strictEqual(readCodexThreadName("codex:codex:edge", { codexDir: dir }), "Prefixed index id");
+  });
 });

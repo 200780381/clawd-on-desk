@@ -349,14 +349,15 @@ class CodexLogMonitor {
 
   _refreshSessionTitles() {
     // Unparsed/failed replay candidates have no observed lifecycle to label.
-    const sessions = Array.from(this._tracked.values()).filter(tracked => tracked.lastState);
+    const sessions = [...this._tracked.values(), ...this._retiredTracked.values()]
+      .filter(tracked => tracked.lastState);
     const names = readCodexThreadNames(
       sessions.map(tracked => tracked.sessionId),
       { codexDir: this._codexDir }
     );
     for (const tracked of sessions) {
       const title = names.get(bareCodexSessionId(tracked.sessionId));
-      if (!title || title === tracked.reportedIndexTitle) continue;
+      if (!title || (title === tracked.reportedIndexTitle && title === tracked.sessionTitle)) continue;
       tracked.sessionTitle = title;
       tracked.reportedIndexTitle = title;
       // An index update is metadata, including after a completed turn. Do
@@ -1230,6 +1231,7 @@ class CodexLogMonitor {
         fileIdentity,
         cwd: retired ? retired.cwd : "",
         sessionTitle: retired ? retired.sessionTitle : null,
+        reportedIndexTitle: retired ? retired.reportedIndexTitle || null : null,
         codexOriginator: retired ? retired.codexOriginator : null,
         codexSource: retired ? retired.codexSource : null,
         codexQuotaProviderHint: retired ? retired.codexQuotaProviderHint || null : null,
@@ -1934,9 +1936,11 @@ class CodexLogMonitor {
     if (!filePath || !tracked) return;
     this._retiredTracked.delete(filePath);
     this._retiredTracked.set(filePath, {
+      sessionId: tracked.sessionId,
       offset: Number.isFinite(tracked.offset) ? tracked.offset : 0,
       cwd: tracked.cwd || "",
       sessionTitle: tracked.sessionTitle || null,
+      reportedIndexTitle: tracked.reportedIndexTitle || null,
       codexOriginator: tracked.codexOriginator || null,
       codexSource: tracked.codexSource || null,
       codexQuotaProviderHint: tracked.codexQuotaProviderHint || null,

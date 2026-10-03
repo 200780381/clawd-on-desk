@@ -4483,7 +4483,7 @@ describe("CodexLogMonitor", () => {
       monitor.start();
     });
 
-    it("refreshes a late index title without rollout growth or lifecycle activity", () => {
+    it("issue #1103: re-sends a restored index title after another title source displaced it", () => {
       const testFile = path.join(dateDir, TEST_FILENAME);
       fs.writeFileSync(testFile, JSON.stringify({
         type: "session_meta", payload: { cwd: "/projects/title-fixture" },
@@ -4492,28 +4492,115 @@ describe("CodexLogMonitor", () => {
       monitor = new CodexLogMonitor(makeConfig(tmpDir), (...args) => events.push(args), { codexDir: tmpDir });
       monitor._poll();
       const tracked = monitor._tracked.get(testFile);
-      const before = { state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset };
+      let before = { state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset };
       events.length = 0;
       fs.writeFileSync(path.join(tmpDir, "session_index.jsonl"), JSON.stringify({
-        id: EXPECTED_SID.slice("codex:".length), thread_name: "Late thread title",
+        id: EXPECTED_SID.slice("codex:".length), thread_name: "A",
       }) + "\n");
       monitor._poll();
-      assert.deepStrictEqual(events, [[EXPECTED_SID, null, "session_index:title", { sessionTitle: "Late thread title" }]]);
+      assert.deepStrictEqual(events, [[EXPECTED_SID, null, "session_index:title", { sessionTitle: "A" }]]);
       assert.deepStrictEqual({ state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset }, before);
-      assert.strictEqual(tracked.sessionTitle, "Late thread title");
+      assert.strictEqual(tracked.sessionTitle, "A");
       events.length = 0;
       monitor._poll();
       assert.strictEqual(events.length, 0, "unchanged title must not emit again");
       fs.unlinkSync(path.join(tmpDir, "session_index.jsonl"));
       monitor._poll();
       assert.strictEqual(events.length, 0, "missing index must not erase a known title");
-      assert.strictEqual(tracked.sessionTitle, "Late thread title");
+      assert.strictEqual(tracked.sessionTitle, "A");
+      // _extractSessionTitle() displaces via summary; adjust if that source is removed.
+      fs.appendFileSync(testFile, [
+        { type: "turn_context", payload: { summary: "detailed" } },
+        { type: "event_msg", payload: { type: "task_started" } },
+      ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+      monitor._poll();
+      before = { state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset };
+      events.length = 0;
+      fs.writeFileSync(path.join(tmpDir, "session_index.jsonl"), JSON.stringify({
+        id: EXPECTED_SID.slice("codex:".length), thread_name: "A",
+      }) + "\n");
+      monitor._poll();
+      assert.deepStrictEqual(events, [[EXPECTED_SID, null, "session_index:title", { sessionTitle: "A" }]]);
+      assert.deepStrictEqual({ state: tracked.lastState, at: tracked.lastEventTime, offset: tracked.offset }, before);
+      events.length = 0;
+      monitor._poll();
+      assert.deepStrictEqual(events, []);
       fs.writeFileSync(path.join(tmpDir, "session_index.jsonl"), JSON.stringify({
         id: EXPECTED_SID.slice("codex:".length), thread_name: "Renamed title",
       }) + "\n");
       monitor._poll();
       assert.strictEqual(events.length, 1);
       assert.strictEqual(events[0][3].sessionTitle, "Renamed title");
+    });
+
+    it("issue #1103: does not repeat an index title after tracker retirement and reattachment", () => {
+      const testFile = path.join(dateDir, TEST_FILENAME);
+      fs.writeFileSync(testFile, JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/title-fixture" } }) + "\n");
+      fs.writeFileSync(path.join(tmpDir, "session_index.jsonl"), JSON.stringify({
+        id: EXPECTED_SID.slice("codex:".length), thread_name: "A",
+      }) + "\n");
+      const events = [];
+      monitor = new CodexLogMonitor(makeConfig(tmpDir), (...args) => events.push(args), { codexDir: tmpDir });
+      monitor._findCodexWriterPid = () => null;
+      monitor._poll();
+      assert.deepStrictEqual(events.filter((entry) => entry[2] === "session_index:title"), [
+        [EXPECTED_SID, null, "session_index:title", { sessionTitle: "A" }],
+      ]);
+      monitor._retireTrackedFile(testFile, monitor._tracked.get(testFile));
+      assert.strictEqual(monitor._tracked.has(testFile), false);
+      events.length = 0;
+      monitor._poll();
+      assert.strictEqual(monitor._tracked.has(testFile), true);
+      assert.deepStrictEqual(events, [], "an unchanged title must remain delivered after reattachment");
+    });
+
+    it("issue #1103: refreshes an observed retired tracker title without reattachment", () => {
+      const testFile = path.join(dateDir, TEST_FILENAME);
+      const indexFile = path.join(tmpDir, "session_index.jsonl");
+      const writeTitle = (title) => fs.writeFileSync(indexFile, JSON.stringify({
+        id: EXPECTED_SID.slice("codex:".length), thread_name: title,
+      }) + "\n");
+      fs.writeFileSync(testFile, JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/title-fixture" } }) + "\n");
+      writeTitle("A");
+      const events = [];
+      monitor = new CodexLogMonitor(makeConfig(tmpDir), (...args) => events.push(args), { codexDir: tmpDir });
+      monitor._findCodexWriterPid = () => null;
+      monitor._poll();
+      monitor._retireTrackedFile(testFile, monitor._tracked.get(testFile));
+      const retired = monitor._retiredTracked.get(testFile);
+      // Keep the real retired record outside the rollout discovery set.
+      fs.renameSync(testFile, `${testFile}.parked`);
+      events.length = 0;
+      writeTitle("B");
+      monitor._poll();
+      assert.strictEqual(monitor._tracked.has(testFile), false);
+      assert.deepStrictEqual(events, [[EXPECTED_SID, null, "session_index:title", { sessionTitle: "B" }]]);
+      assert.strictEqual(retired.sessionTitle, "B");
+      assert.strictEqual(retired.reportedIndexTitle, "B");
+      events.length = 0;
+      monitor._poll();
+      assert.deepStrictEqual(events, []);
+    });
+
+    it("issue #1103: separately delivers an index title read by a lifecycle event in the same poll", () => {
+      const testFile = path.join(dateDir, TEST_FILENAME);
+      const indexFile = path.join(tmpDir, "session_index.jsonl");
+      fs.writeFileSync(testFile, JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/title-fixture" } }) + "\n");
+      fs.writeFileSync(indexFile, JSON.stringify({ id: EXPECTED_SID.slice("codex:".length), thread_name: "A" }) + "\n");
+      const events = [];
+      monitor = new CodexLogMonitor(makeConfig(tmpDir), (...args) => events.push(args), { codexDir: tmpDir });
+      monitor._findCodexWriterPid = () => null;
+      monitor._poll();
+      events.length = 0;
+      fs.writeFileSync(indexFile, JSON.stringify({ id: EXPECTED_SID.slice("codex:".length), thread_name: "B" }) + "\n");
+      fs.appendFileSync(testFile, JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }) + "\n");
+      monitor._poll();
+      const lifecycle = events.filter((entry) => entry[2] === "event_msg:task_started");
+      assert.strictEqual(lifecycle.length, 1);
+      assert.strictEqual(lifecycle[0][3].sessionTitle, "B");
+      assert.deepStrictEqual(events.filter((entry) => entry[2] === "session_index:title"), [
+        [EXPECTED_SID, null, "session_index:title", { sessionTitle: "B" }],
+      ]);
     });
 
     it("uses Codex /rename thread_name from session_index.jsonl", (_, done) => {

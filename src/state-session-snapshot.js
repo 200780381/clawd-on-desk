@@ -8,7 +8,7 @@ const {
   buildLatestLocalCodexProcessIds,
   isSupersededLocalCodexProcessSession,
 } = require("./state-session-dedupe");
-const { readCodexThreadName } = require("../hooks/codex-session-index");
+const { bareCodexSessionId, readCodexThreadName, readCodexThreadNames } = require("../hooks/codex-session-index");
 const { isWslSourced } = require("./remote-process-metadata");
 
 // ── Session source derivation ────────────────────────────────────────
@@ -452,6 +452,17 @@ function normalizeSessionsIterable(sessions) {
 }
 
 function buildSessionSnapshot(sessions, options = {}) {
+  let readThreadName = options.readCodexThreadName;
+  if (typeof readThreadName !== "function") {
+    const localCodexSessionIds = [];
+    for (const [id, session] of normalizeSessionsIterable(sessions)) {
+      if (session && session.agentId === "codex" && !session.host) {
+        localCodexSessionIds.push(session.rawSessionId || id);
+      }
+    }
+    const threadNames = readCodexThreadNames(localCodexSessionIds);
+    readThreadName = (id) => threadNames.get(bareCodexSessionId(id)) || null;
+  }
   const entries = [];
   const sessionAliases = options.sessionAliases && typeof options.sessionAliases === "object"
     ? options.sessionAliases
@@ -472,6 +483,7 @@ function buildSessionSnapshot(sessions, options = {}) {
     if (automationRecord) matchedAutomationGrantIds.add(automationRecord.grantId);
     entries.push(buildSessionSnapshotEntry(id, session, sessionAliases, {
       ...options,
+      readCodexThreadName: readThreadName,
       latestLocalCodexProcessIds,
       sessionAutomationRecord: automationRecord,
     }));

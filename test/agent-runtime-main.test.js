@@ -54,6 +54,7 @@ function makeRealStateHarness() {
   theme.timings.autoReturn = {};
   const sounds = [];
   const stateChanges = [];
+  const snapshots = [];
   const noop = () => {};
   const state = require("../src/state")({
     lang: "en",
@@ -78,6 +79,7 @@ function makeRealStateHarness() {
     buildContextMenu: noop,
     buildTrayMenu: noop,
     pendingPermissions: [],
+    broadcastSessionSnapshot: (snapshot) => snapshots.push(snapshot),
     resolvePermissionEntry: noop,
     dismissPermissionsForDnd: noop,
     focusTerminalWindow: noop,
@@ -86,7 +88,7 @@ function makeRealStateHarness() {
     getCursorScreenPoint: () => ({ x: 100, y: 100 }),
     t: (key) => key,
   });
-  return { state, sounds, stateChanges };
+  return { state, sounds, stateChanges, snapshots };
 }
 
 describe("agent-runtime-main", () => {
@@ -371,7 +373,7 @@ describe("agent-runtime-main", () => {
     ]);
   });
 
-  it("refreshes an existing Codex title without changing lifecycle or telemetry", () => {
+  it("issue #1103: official hooks suppress lifecycle but allow title refresh", () => {
     const instances = [];
     const FakeMonitor = makeFakeMonitorClass(instances);
     const harness = makeRealStateHarness();
@@ -391,13 +393,24 @@ describe("agent-runtime-main", () => {
         agentId: "codex", rawSessionId: "codex:title-refresh", profileId: "local", cwd: "/projects/title-fixture",
       });
       const session = harness.state.sessions.get(sid);
-      const before = { at: session.updatedAt, state: session.state, metadataAt: session.metadataUpdatedAt,
-        events: JSON.stringify(session.recentEvents), soundCount: harness.sounds.length, stateCount: harness.stateChanges.length };
+      session.updatedAt = 1000; // Detect accidental lifecycle updates.
+      session.metadataUpdatedAt = 777;
+      const inspect = () => {
+        const current = harness.state.sessions.get(sid);
+        return { at: current.updatedAt, state: current.state, metadataAt: current.metadataUpdatedAt,
+          events: JSON.stringify(current.recentEvents), soundCount: harness.sounds.length, stateCount: harness.stateChanges.length };
+      };
+      const before = inspect();
+      const broadcastCount = harness.snapshots.length;
+      runtime.markCodexOfficialHookSession(sid);
+      monitor.emit("codex:title-refresh", "thinking", "event_msg:task_started", {});
+      assert.deepStrictEqual(inspect(), before);
+      assert.strictEqual(harness.snapshots.length, broadcastCount);
       monitor.emit("codex:title-refresh", null, "session_index:title", { sessionTitle: "Arrived title" });
-      assert.strictEqual(session.sessionTitle, "Arrived title");
-      assert.strictEqual(harness.state.buildSessionSnapshot().sessions.find(s => s.id === sid).displayTitle, "Arrived title");
-      assert.deepStrictEqual({ at: session.updatedAt, state: session.state, metadataAt: session.metadataUpdatedAt,
-        events: JSON.stringify(session.recentEvents), soundCount: harness.sounds.length, stateCount: harness.stateChanges.length }, before);
+      assert.strictEqual(harness.state.sessions.get(sid).sessionTitle, "Arrived title");
+      assert.ok(harness.snapshots.length > broadcastCount);
+      assert.strictEqual(harness.snapshots.at(-1).sessions.find(s => s.id === sid).displayTitle, "Arrived title");
+      assert.deepStrictEqual(inspect(), before);
       monitor.emit("codex:absent-title", null, "session_index:title", { sessionTitle: "Absent" });
       assert.strictEqual(harness.state.sessions.size, 1);
       const foreign = localSessionKey("codex:foreign-agent");
@@ -408,6 +421,38 @@ describe("agent-runtime-main", () => {
       runtime.cleanup();harness.state.cleanup();
     }
   });
+
+  for (const [label, foreignSource] of [
+    ["WSL host", { host: "wsl:Ubuntu", wslDistro: "Ubuntu" }],
+    ["WSL marker only", { wslDistro: "Ubuntu" }],
+    ["local-profile remote host", { host: "manual-remote" }],
+  ]) {
+    it(`issue #1103: ignores local index titles for a ${label} session`, () => {
+      const harness = makeRealStateHarness();
+      const runtime = createAgentRuntimeMain({
+        loadCodexLogMonitor: () => makeFakeMonitorClass([]),
+        loadCodexAgent: () => ({ id: "codex" }),
+        isAgentEnabled: () => true,
+        getStateRuntime: () => harness.state,
+        updateSession: (...args) => harness.state.updateSession(...args),
+        codexSubagentClassifier: {},
+      });
+      try {
+        const rawSessionId = "codex:foreign-title";
+        const sid = localSessionKey(rawSessionId);
+        harness.state.updateSession(sid, "working", "UserPromptSubmit", {
+          agentId: "codex", rawSessionId, profileId: "local", sessionTitle: "Keep foreign", ...foreignSource,
+        });
+        const broadcastCount = harness.snapshots.length;
+        runtime.startCodexLogMonitor().emit(rawSessionId, null, "session_index:title", { sessionTitle: "Local title" });
+        assert.strictEqual(harness.state.sessions.get(sid).sessionTitle, "Keep foreign");
+        assert.strictEqual(harness.snapshots.length, broadcastCount);
+      } finally {
+        runtime.cleanup();
+        harness.state.cleanup();
+      }
+    });
+  }
 
   it("handles JSONL token_count as metadata without clearing bubbles or changing state", () => {
     const instances = [];
