@@ -349,8 +349,10 @@ class CodexLogMonitor {
 
   _refreshSessionTitles() {
     // Unparsed/failed replay candidates have no observed lifecycle to label.
-    const sessions = [...this._tracked.values(), ...this._retiredTracked.values()]
-      .filter(tracked => tracked.lastState);
+    const sessions = Array.from(this._tracked.values()).filter(tracked => tracked.lastState);
+    for (const [filePath, tracked] of this._retiredTracked) {
+      if (!this._tracked.has(filePath) && tracked.lastState) sessions.push(tracked);
+    }
     const names = readCodexThreadNames(
       sessions.map(tracked => tracked.sessionId),
       { codexDir: this._codexDir }

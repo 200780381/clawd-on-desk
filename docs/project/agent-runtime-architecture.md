@@ -41,7 +41,8 @@ HUD/Dashboard；不创建会话、不改变状态/活跃时间/完成提醒/小�
 尚未生成原生标题时仍使用既有文件夹 fallback；用户别名继续优先。
 monitor 当前标题与索引不一致时也会重发，覆盖索引恢复场景。
 一次快照构建最多读一次本机索引；无本机 Codex 会话时不读。
-标题通道跳过带 host 或 WSL 标记的会话；被挤出工作集的已观察会话仍会刷新标题。
+标题通道跳过带 host 或 WSL 标记的会话；刷新覆盖仍在活动或退休记录中的会话
+（最多 50 个活动、100 个退休 rollout）。超出后与既有行为相同，标题等下一次快照广播或生命周期事件更新。
 
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版
 `event_msg:item_completed`（`payload.item.type === "ContextCompaction"`）。本地与

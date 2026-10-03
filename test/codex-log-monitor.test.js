@@ -4551,7 +4551,38 @@ describe("CodexLogMonitor", () => {
       events.length = 0;
       monitor._poll();
       assert.strictEqual(monitor._tracked.has(testFile), true);
+      assert.strictEqual(monitor._retiredTracked.has(testFile), false, "ordinary reattachment must consume the retired record");
       assert.deepStrictEqual(events, [], "an unchanged title must remain delivered after reattachment");
+    });
+
+    it("issue #1103: prefers the active tracker when startup recovery leaves a retired copy", () => {
+      const testFile = path.join(dateDir, TEST_FILENAME);
+      const indexFile = path.join(tmpDir, "session_index.jsonl");
+      const writeTitle = (title) => fs.writeFileSync(indexFile, JSON.stringify({
+        id: EXPECTED_SID.slice("codex:".length), thread_name: title,
+      }) + "\n");
+      fs.writeFileSync(testFile, JSON.stringify({ type: "session_meta", payload: { cwd: "/projects/title-fixture" } }) + "\n");
+      writeTitle("A");
+      const events = [];
+      monitor = new CodexLogMonitor(makeConfig(tmpDir), (...args) => events.push(args), { codexDir: tmpDir });
+      monitor._findCodexWriterPid = () => null;
+      monitor._poll();
+      const active = monitor._tracked.get(testFile);
+      // Startup recovery can leave an older retired copy beside the active tracker.
+      const retired = { ...active };
+      monitor._retiredTracked.set(testFile, retired);
+      events.length = 0;
+      writeTitle("B");
+      monitor._poll();
+      assert.deepStrictEqual(events, [[EXPECTED_SID, null, "session_index:title", { sessionTitle: "B" }]]);
+      assert.strictEqual(active.sessionTitle, "B");
+      assert.strictEqual(active.reportedIndexTitle, "B");
+      assert.strictEqual(retired.sessionTitle, "A");
+      assert.strictEqual(retired.reportedIndexTitle, "A");
+      events.length = 0;
+      monitor._poll();
+      assert.deepStrictEqual(events, []);
+      assert.strictEqual(monitor._retiredTracked.get(testFile), retired);
     });
 
     it("issue #1103: refreshes an observed retired tracker title without reattachment", () => {
