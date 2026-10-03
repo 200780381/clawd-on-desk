@@ -61,6 +61,7 @@ function createQuotaAlerts(options = {}) {
   const historyPath = typeof options.historyPath === "string" && options.historyPath ? options.historyPath : null;
   const startedAt = now();
   const records = new Map();
+  const pending = new Map();
   let dirty = false;
   let persistTimer = null;
   let disposed = false;
@@ -152,9 +153,26 @@ function createQuotaAlerts(options = {}) {
     if (typeof persistTimer.unref === "function") persistTimer.unref();
   }
 
-  function deliver(event, config) {
-    if (config.suppressed === true) return false;
-    try { return notify(event) === true; } catch (error) {
+  function deliver(event, config, record, acknowledge) {
+    if (config.suppressed === true || pending.has(record.key)) return false;
+    try {
+      const result = notify(event);
+      if (!result || typeof result.then !== "function") return result === true;
+      const token = {};
+      pending.set(record.key, token);
+      Promise.resolve(result).then((shown) => {
+        // Never apply an old window's acknowledgement to its replacement, or
+        // persist a late callback after shutdown. One in-flight send per key.
+        if (shown === true && !disposed && pending.get(record.key) === token
+          && records.get(record.key) === record) {
+          acknowledge();
+          dirty = true;
+          flush();
+        }
+      }, (error) => warn("Clawd: quota alert notification could not be shown", error))
+        .finally(() => { if (pending.get(record.key) === token) pending.delete(record.key); });
+      return false;
+    } catch (error) {
       warn("Clawd: quota alert notification could not be shown", error);
       return false;
     }
@@ -206,10 +224,13 @@ function createQuotaAlerts(options = {}) {
       const threshold = eligible.at(-1);
       if (threshold === undefined) return;
       const event = { type: "low", ...common, threshold };
-      if (!deliver(event, config)) return;
       // A jump straight to 9% emits only the most urgent 10% notification and
       // also consumes the less urgent 20% candidate for this window.
-      record.notified = [...new Set([...record.notified, ...thresholds.filter((value) => value >= threshold)])];
+      const acknowledge = () => {
+        record.notified = [...new Set([...record.notified, ...thresholds.filter((value) => value >= threshold)])];
+      };
+      if (!deliver(event, config, record, acknowledge)) return;
+      acknowledge();
       delivered.push(event);
       dirty = true;
       return;
@@ -217,9 +238,9 @@ function createQuotaAlerts(options = {}) {
     if (config.recoveryEnabled === true && record.recoveryPending && !record.recovered
       && observedAt > record.lowObservedAt) {
       const event = { type: "recovered", ...common };
-      if (!deliver(event, config)) return;
-      record.recoveryPending = false;
-      record.recovered = true;
+      const acknowledge = () => { record.recoveryPending = false; record.recovered = true; };
+      if (!deliver(event, config, record, acknowledge)) return;
+      acknowledge();
       delivered.push(event);
       dirty = true;
     }
@@ -259,6 +280,7 @@ function createQuotaAlerts(options = {}) {
     if (disposed) return;
     flush();
     disposed = true;
+    pending.clear();
   }
 
   load();

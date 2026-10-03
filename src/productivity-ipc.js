@@ -8,7 +8,7 @@ function registerProductivityIpc(options) {
   const { ipcMain, settingsController, getSettingsWindow, dialog, launcher } = options;
   const settingsUrl = pathToFileURL(path.join(__dirname, "settings.html")).href;
   const channels = [], busy = new Set();
-  let choosing = false, disposed = false;
+  let choosing = false, testing = false, disposed = false;
   function trusted(event) {
     const win = getSettingsWindow();
     const contents = win?.webContents, frame = event?.senderFrame;
@@ -20,6 +20,17 @@ function registerProductivityIpc(options) {
       : settingsController.hasReadFailure() ? { ok: false, status: "error", code: "SETTINGS_UNAVAILABLE" } : null;
   }
   function handle(channel, fn) { channels.push(channel); ipcMain.handle(channel, fn); }
+  handle("settings:productivity-test-notification", async (event) => {
+    const denial = blocked(event); if (denial) return denial;
+    if (testing) return { ok: false, code: "BUSY" };
+    testing = true;
+    try {
+      const shown = await options.testNotification?.();
+      const cancelled = blocked(event); if (cancelled) return cancelled;
+      return { ok: shown === true };
+    } catch { return { ok: false }; }
+    finally { testing = false; }
+  });
   handle("settings:productivity-apply-bulk", (event, patch) => {
     const denial = blocked(event); if (denial) return denial;
     if (!patch || typeof patch !== "object" || Array.isArray(patch)

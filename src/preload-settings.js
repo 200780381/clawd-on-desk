@@ -189,6 +189,7 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   // Atomic quota-alert preferences; the main owner restricts accepted keys.
   applyBulk: (patch) => ipcRenderer.invoke("settings:productivity-apply-bulk", patch),
   productivity: {
+    testNotification: () => ipcRenderer.invoke("settings:productivity-test-notification"),
     chooseProjectDirectory: () => ipcRenderer.invoke("settings:productivity-choose-project-directory"),
     launchProject: (id) => ipcRenderer.invoke("settings:productivity-launch-project", id),
   },

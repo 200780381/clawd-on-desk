@@ -28,6 +28,12 @@ Quiet hours suppress reminders without consuming them. Notifications are best
 effort and respect the app's mute setting; operating-system notification settings
 may also prevent display.
 
+Use **Test notification** to check the notification channel without changing quota
+data or reminder history. Native sends are recorded as delivered only after the
+system's show acknowledgement; failures/timeouts remain eligible for a later
+observation. Windows tray balloons are a best-effort fallback when native
+notifications are unavailable. The test is also suppressed during Do Not Disturb.
+
 Deduplication history lives in `quota-alert-history.json` in Electron's user-data
 directory. It stores hashed source/window keys and numeric alert metadata, with
 at most 256 records and 60 days of retention. It stores no credentials, prompts,

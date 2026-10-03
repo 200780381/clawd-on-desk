@@ -1,6 +1,6 @@
 "use strict";
 
-const { describe, it } = require("node:test");
+const { describe, it, test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -14,6 +14,47 @@ const START = 1_800_000_001_000;
 const MINUTE = 60_000;
 const RESET = START + 60 * MINUTE;
 const CONFIG = { enabled: true, thresholds: [20, 10], recoveryEnabled: true };
+function deferredNotificationHarness(options = {}) {
+  const sends = [];
+  const h = harness({ ...options, notify: event => new Promise((resolve, reject) => sends.push({ event, resolve, reject })) });
+  return { ...h, sends };
+}
+const settleNotifications = () => new Promise(resolve => setImmediate(resolve));
+test("async notification acknowledgements persist only after show and deduplicate while pending", async t => {
+  const historyPath = historyFixture(t), h = deferredNotificationHarness({ historyPath });
+  h.observe(9); h.observe(9);
+  assert.equal(h.sends.length, 1);
+  h.alerts.flush();
+  assert.deepEqual(JSON.parse(fs.readFileSync(historyPath, "utf8")).records[0].notified, []);
+  h.sends[0].resolve(true); await settleNotifications();
+  assert.deepEqual(JSON.parse(fs.readFileSync(historyPath, "utf8")).records[0].notified, [20, 10]);
+  h.observe(9); assert.equal(h.sends.length, 1); h.alerts.dispose();
+});
+test("failed or rejected async sends retry without consuming the threshold", async () => {
+  const h = deferredNotificationHarness();
+  h.observe(9); h.sends[0].resolve(false); await settleNotifications();
+  h.observe(9); h.sends[1].reject(new Error("native failure")); await settleNotifications();
+  h.observe(9); assert.equal(h.sends.length, 3);
+  h.sends[2].resolve(true); await settleNotifications();
+  h.observe(9); assert.equal(h.sends.length, 3); h.alerts.dispose();
+});
+test("old-window async acknowledgements cannot consume a new window or mutate shutdown history", async t => {
+  const historyPath = historyFixture(t), h = deferredNotificationHarness({ historyPath });
+  h.observe(9); h.observe(9, CONFIG, { resetAt: RESET + MINUTE });
+  h.sends[0].resolve(true); await settleNotifications();
+  h.observe(9, CONFIG, { resetAt: RESET + MINUTE }); assert.equal(h.sends.length, 2);
+  h.alerts.dispose(); const saved = fs.readFileSync(historyPath, "utf8");
+  h.sends[1].resolve(true); await settleNotifications(); assert.equal(fs.readFileSync(historyPath, "utf8"), saved);
+});
+test("recovery async sends retry and acknowledge once independently of low sends", async () => {
+  const h = deferredNotificationHarness();
+  h.observe(9); h.sends[0].resolve(true); await settleNotifications();
+  h.observe(50); h.observe(50); assert.equal(h.sends.length, 2);
+  assert.equal(h.sends[1].event.type, "recovered");
+  h.sends[1].resolve(false); await settleNotifications();
+  h.observe(50); h.sends[2].resolve(true); await settleNotifications();
+  h.observe(50); assert.equal(h.sends.length, 3); h.alerts.dispose();
+});
 
 function snapshot(remainingPercent, observedAt, overrides = {}) {
   const bucket = {

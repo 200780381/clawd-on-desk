@@ -76,6 +76,7 @@
   function syncControls() {
     syncDrafts();
     const r = view.refs;
+    if (r.testNotification) r.testNotification.disabled = view.pending.has("notification");
     if (r.quotaEnabled) {
       r.quotaEnabled.checked = view.quota.enabled;
       if (!view.quotaDirty) r.thresholds.value = view.quota.thresholds;
@@ -137,6 +138,17 @@
       view.quota = null;
     });
   }
+  async function testNotification() {
+    if (view.pending.has("notification")) return;
+    view.pending.add("notification");
+    const control = view.refs.testNotification;
+    control.disabled = true;
+    try {
+      const result = await window.settingsAPI?.productivity?.testNotification?.();
+      notify(result?.ok === true ? "notificationTestSent" : "notificationTestFailed", result?.ok !== true);
+    } catch { notify("notificationTestFailed", true); }
+    finally { view.pending.delete("notification"); syncControls(); }
+  }
   function saveQuiet() {
     const q = view.quiet;
     if (!q.days.length || !/^([01]\d|2[0-3]):[0-5]\d$/u.test(q.start)
@@ -162,9 +174,14 @@
     help.id = "productivity-threshold-help";
     panel.appendChild(help);
     panel.appendChild(recovery.label);
+    panel.appendChild(node("p", "row-desc", t("quotaCollectionHelp")));
     const save = button("save", saveQuota, "productivity-quota-save");
     panel.appendChild(save);
+    const test = button("notificationTest", testNotification, "productivity-notification-test");
+    test.disabled = view.pending.has("notification");
+    panel.appendChild(test);
     Object.assign(view.refs, { quotaEnabled: enabled.input, thresholds, recovery: recovery.input, quotaSave: save,
+      testNotification: test,
       quotaControls: [enabled.input, thresholds, recovery.input] });
     parent.appendChild(core.helpers.buildSection(t("quotaTitle"), [panel]));
   }

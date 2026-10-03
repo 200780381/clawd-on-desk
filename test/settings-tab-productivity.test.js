@@ -329,6 +329,21 @@ test("cancelled project launch quietly re-enables the button", async () => {
   assert.equal(h.calls.toasts.length, 0);
   assert.equal(h.core.state.snapshot.projectBookmarks.length, 1);
 });
+test("test notification is single-flight, leaves quota drafts/history alone, and recovers after failure", async () => {
+  const h = harness(), pending = deferred(); let calls = 0;
+  h.api.productivity.testNotification = () => { calls++; return pending.promise; };
+  await h.enter("productivity-quota-thresholds", "25, 5");
+  const first = h.el("productivity-notification-test").fire("click");
+  await h.el("productivity-notification-test").fire("click");
+  assert.equal(calls, 1); pending.resolve({ ok: false }); await first;
+  assert.equal(h.el("productivity-notification-test").disabled, false);
+  assert.equal(h.calls.toasts.at(-1).error, true);
+  assert.equal(h.el("productivity-quota-thresholds").value, "25, 5");
+  assert.deepEqual(h.calls.writes, []);
+  h.api.productivity.testNotification = async () => ({ ok: true });
+  await h.el("productivity-notification-test").fire("click");
+  assert.equal(h.calls.toasts.at(-1).error, false);
+});
 
 test("settings document loads strings before the tab and uses isolated responsive styles", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "src", "settings.html"), "utf8");

@@ -92,7 +92,7 @@ const { registerSettingsIpc } = require("./settings-ipc");
 const { registerProductivityIpc } = require("./productivity-ipc");
 const { createProductivityRuntime } = require("./productivity-runtime");
 const { createProjectBookmarkLauncher } = require("./project-bookmarks");
-const { getProductivityStrings } = require("./productivity-strings");
+const { createQuotaNotificationPresenter } = require("./quota-notifications");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
@@ -2531,31 +2531,7 @@ function disableDoNotDisturb() {
 }
 
 function showQuotaAlert(event) {
-  if (doNotDisturb || isQuitting || !app.isReady()) return false;
-  const strings = getProductivityStrings(lang);
-  const provider = ({ claudeQuota: "Claude Code", codexQuota: "Codex", codexSparkQuota: "Codex Spark",
-    kimiQuota: "Kimi", antigravityQuota: "Antigravity" })[event.providerKey] || event.providerKey;
-  const n = event.windowMinutes;
-  const windowLabel = n && n % 1440 === 0
-    ? strings.quotaWindowDays.replace("{n}", String(n / 1440))
-    : n && n % 60 === 0 ? strings.quotaWindowHours.replace("{n}", String(n / 60))
-      : n ? strings.quotaWindowMinutes.replace("{n}", String(n)) : "";
-  const recovered = event.type === "recovered";
-  const title = recovered ? strings.quotaRecoveredTitle : strings.quotaLowTitle;
-  const body = (recovered ? strings.quotaRecoveredBody : strings.quotaLowBody)
-    .replace("{provider}", provider + (event.host ? ` (${event.host})` : ""))
-    .replace("{window}", windowLabel).replace("{remaining}", String(Math.round(event.remainingPercent)));
-  const onClick = () => settingsWindowRuntime.open();
-  try {
-    if (Notification && Notification.isSupported()) {
-      const notification = new Notification({ title, body, silent: soundMuted });
-      notification.once("click", onClick); notification.show(); return true;
-    }
-    if (process.platform === "win32" && !soundMuted) {
-      return trayBalloonOwner.show(_menu.getTray(), { title, content: body, iconType: "info", onClick });
-    }
-  } catch { /* Retry on the next confirmed quota observation. */ }
-  return false;
+  return quotaNotifications.show(event);
 }
 
 async function showSessionAutomationWarning(entry) {
@@ -3567,7 +3543,6 @@ function settleDrainWithin(drain, timeoutMs) {
 
 function drainRemoteSshAndFeishuBeforeQuit() {
   const drains = [];
-  productivityIpcRuntime.dispose();
   try {
     settingsIpcRuntime.dispose();
   } catch (err) {
@@ -5029,9 +5004,15 @@ const settingsSizePreviewSession = createSettingsSizePreviewSession({
   },
 });
 
+const quotaNotifications = createQuotaNotificationPresenter({
+  Notification, platform: process.platform, trayBalloonOwner, getTray: () => _menu.getTray(),
+  isSuppressed: () => doNotDisturb || isQuitting || !app.isReady(),
+  isMuted: () => soundMuted, getLang: () => lang, openSettings: () => settingsWindowRuntime.open(),
+});
 const productivityIpcRuntime = registerProductivityIpc({
   ipcMain, settingsController: _settingsController, getSettingsWindow, dialog,
   launcher: createProjectBookmarkLauncher({ shell }),
+  testNotification: () => quotaNotifications.test(),
 });
 productivityRuntime = createProductivityRuntime({
   settingsController: _settingsController, state: _state, petWindowRuntime,
@@ -6040,6 +6021,7 @@ if (!gotTheLock) {
   });
 
   app.on("before-quit", (event) => {
+    productivityIpcRuntime.dispose();
     isQuitting = true;
     if (!appQuitDrainReady) {
       event.preventDefault();
@@ -6055,6 +6037,7 @@ if (!gotTheLock) {
     if (quitCleanupStarted) return;
     quitCleanupStarted = true;
     productivityRuntime?.dispose();
+    quotaNotifications.dispose();
     // Cancel any live official-theme download and drop this round's `.part`.
     if (officialThemeMain) {
       try { officialThemeMain.cancelInstall(); } catch {}

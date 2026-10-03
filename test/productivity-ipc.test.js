@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { registerProductivityIpc } = require("../src/productivity-ipc");
-function harness() {
+function harness(options = {}) {
   const handlers = new Map(), calls = [];
   const bookmark = { id: "project-a", name: "Example", cwd: process.cwd(), launchMode: "folder" };
   let destroyed = false, unreadable = false, records = [bookmark];
@@ -18,6 +18,7 @@ function harness() {
     ipcMain: { handle: (c, f) => handlers.set(c, f), removeHandler: (c) => handlers.delete(c) },
     getSettingsWindow: () => win, dialog: { showOpenDialog: (...args) => choose(...args) },
     launcher: { launch: (...args) => launch(...args) },
+    testNotification: options.testNotification,
     settingsController: { hasReadFailure: () => unreadable, get: () => records,
       applyBulk: (patch) => { calls.push(patch); return { status: "ok" }; } },
   });
@@ -31,11 +32,20 @@ test("rejects foreign contents, subframes and navigation without any effects", a
     h => { h.contents.mainFrame.url = "https://example.com"; return h.event; }]) {
     const h = harness(), bad = make(h);
     for (const [action, arg] of [["launch-project", "project-a"], ["choose-project-directory"],
-      ["apply-bulk", { quotaAlertsEnabled: true }]]) {
+      ["apply-bulk", { quotaAlertsEnabled: true }], ["test-notification"]]) {
       assert.equal((await h.run(action, arg, bad)).code, "UNTRUSTED_SENDER");
     }
     assert.deepEqual(h.calls, []); h.ipc.dispose();
   }
+});
+test("notification test is single-flight, owner-gated and does not write prefs", async () => {
+  let finish, sends = 0;
+  const h = harness({ testNotification: () => { sends++; return new Promise(r => { finish = r; }); } });
+  const pending = h.run("test-notification");
+  assert.equal((await h.run("test-notification")).code, "BUSY");
+  finish(true); assert.deepEqual(await pending, { ok: true }); assert.deepEqual(h.calls, []);
+  const second = h.run("test-notification"); h.destroy(); finish(true);
+  assert.equal((await second).code, "UNTRUSTED_SENDER"); assert.equal(sends, 2); h.ipc.dispose();
 });
 test("unreadable settings prevent native effects and bulk writes", async () => {
   const h = harness(); h.unreadable();
