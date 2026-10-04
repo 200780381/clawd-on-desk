@@ -396,7 +396,7 @@ DeepSeek Harness 权限气泡（approval waterfall，阻塞）：
     → allow / deny 分别映射为 allowed-once / rejected
     → 204、断连、DND、disabled 或所有审批通道无决定时 bridge 调 next()，交还 DSH 原生审批流程
   ask_user_question 不进入 Clawd；DSH 原生 provider 始终是唯一 question owner。
-  web profile 与桌面版共用同一条 adapter；macOS 已真机验证开着 DND 时桌面版弹自己的原生审批框并能作答，Windows 上桌面版的会话与审批尚未真机验证（见 dsh-setup.md）。
+  web profile 与桌面版共用同一条 adapter；macOS 已真机验证开着 DND 时桌面版弹自己的原生审批框并能作答；Windows 上桌面版的会话已真机验证（宿主开着也能加载新加的插件），审批尚未真机验证（见 dsh-setup.md）。
 
 远程 SSH 状态同步（反向端口转发）：
   远程服务器上的 Claude Code / Codex CLI

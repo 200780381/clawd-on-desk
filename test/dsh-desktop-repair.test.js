@@ -165,6 +165,7 @@ function makeCli(harness, options = {}) {
         .filter((name) => name !== BRIDGE_PACKAGE_NAME);
       writeJson(manifestPath, manifest);
       fs.rmSync(packageDir(harness.dshHome, profile), { recursive: true, force: true });
+      if (options.afterRemove) await options.afterRemove({ profile });
       return { code: 0 };
     }
     if (action === "add") {
@@ -190,6 +191,65 @@ function makeCli(harness, options = {}) {
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.cpSync(generationDir, target, { recursive: true });
       if (options.afterAdd) await options.afterAdd({ profile });
+      return { code: 0 };
+    }
+    return { code: 1, stderr: `unexpected args: ${args.join(" ")}` };
+  };
+  return { calls, runDshCommand };
+}
+
+// A profile whose package is a symlink to the generation, the layout a real
+// `dsh plugin add` produces (and `dsh plugin remove` leaves behind).
+function writeIncompleteLinkedProfile(harness, profile) {
+  const bundleHash = targetBundleHash();
+  const generationDir = path.join(managedRootOf(harness), "generations", bundleHash);
+  writeGeneration(generationDir, bundleHash);
+  const profileDir = path.join(harness.dshHome, "profiles", profile);
+  writeJson(path.join(profileDir, "package.json"), {
+    name: `dsh-profile-${profile}`,
+    private: true,
+    dependencies: { [BRIDGE_PACKAGE_NAME]: `link:${generationDir}` },
+    dsh: { profile: { bundles: ["@deepseek-ai/dsh-base"] } },
+  });
+  const local = packageDir(harness.dshHome, profile);
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.symlinkSync(generationDir, local, "dir");
+  return { generationDir, bundleHash, profileDir };
+}
+
+// A fake CLI matching the observed upstream behavior: remove deletes the
+// dependency and bundle row but leaves the node_modules link in place.
+function makeLinkingCli(harness) {
+  const calls = [];
+  const runDshCommand = async (args) => {
+    calls.push([...args]);
+    const profile = args[args.indexOf("--profile") + 1];
+    const action = args[3];
+    const manifestPath = path.join(harness.dshHome, "profiles", profile, "package.json");
+    const manifest = readJson(manifestPath);
+    if (action === "remove") {
+      delete manifest.dependencies[BRIDGE_PACKAGE_NAME];
+      manifest.dsh.profile.bundles = manifest.dsh.profile.bundles
+        .filter((name) => name !== BRIDGE_PACKAGE_NAME);
+      writeJson(manifestPath, manifest);
+      // Leave the link, like the real command does.
+      return { code: 0 };
+    }
+    if (action === "add") {
+      const generationDir = args[4];
+      manifest.dependencies ||= {};
+      manifest.dsh ||= { profile: { bundles: [] } };
+      manifest.dsh.profile ||= { bundles: [] };
+      manifest.dsh.profile.bundles ||= [];
+      manifest.dependencies[BRIDGE_PACKAGE_NAME] = `link:${generationDir}`;
+      if (!manifest.dsh.profile.bundles.includes(BRIDGE_PACKAGE_NAME)) {
+        manifest.dsh.profile.bundles.push(BRIDGE_PACKAGE_NAME);
+      }
+      writeJson(manifestPath, manifest);
+      const target = packageDir(harness.dshHome, profile);
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.symlinkSync(generationDir, target, "dir");
       return { code: 0 };
     }
     return { code: 1, stderr: `unexpected args: ${args.join(" ")}` };
@@ -279,6 +339,79 @@ for (const profile of ["web", "desktop"]) {
     }
   });
 }
+
+for (const profile of ["web", "desktop"]) {
+  test(`a disabled ${profile} plugin with an upstream-retained link is repaired`, async (t) => {
+    const harness = makeHarness(t);
+    const { generationDir } = writeIncompleteLinkedProfile(harness, profile);
+    const cli = makeLinkingCli(harness);
+    const options = profile === "web"
+      ? orchOptions(harness, cli, { operation: "explicit-repair" })
+      : desktopOptions(harness, cli, { operation: "explicit-repair" });
+    const result = await installDeepSeekHarnessBridge(options);
+    assert.strictEqual(result.status, "ok");
+    assert.deepStrictEqual(mutationOrder(cli), ["remove", "add"]);
+    assert.strictEqual(bundlePresent(harness, profile), true);
+    assert.strictEqual(dependencyPresent(harness, profile), true);
+    assert.strictEqual(fs.existsSync(recordPath(harness, profile)), false);
+    assert.strictEqual(fs.existsSync(generationDir), true);
+  });
+
+  test(`a disabled ${profile} plugin resumes when remove left the link behind`, async (t) => {
+    const harness = makeHarness(t);
+    const { generationDir } = writeIncompleteLinkedProfile(harness, profile);
+    writeRecord(harness, profile, recordFor(harness, profile, "remove-pending"));
+    const manifestPath = path.join(harness.dshHome, "profiles", profile, "package.json");
+    const manifest = readJson(manifestPath);
+    delete manifest.dependencies[BRIDGE_PACKAGE_NAME];
+    manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter((n) => n !== BRIDGE_PACKAGE_NAME);
+    writeJson(manifestPath, manifest);
+    assert.strictEqual(fs.lstatSync(packageDir(harness.dshHome, profile)).isSymbolicLink(), true);
+
+    const cli = makeLinkingCli(harness);
+    const options = profile === "web"
+      ? orchOptions(harness, cli, { operation: "explicit-repair" })
+      : desktopOptions(harness, cli, { operation: "explicit-repair" });
+    const result = await installDeepSeekHarnessBridge(options);
+    assert.strictEqual(result.status, "ok");
+    assert.deepStrictEqual(mutationOrder(cli), ["add"]);
+    assert.strictEqual(bundlePresent(harness, profile), true);
+    assert.strictEqual(fs.existsSync(recordPath(harness, profile)), false);
+    assert.strictEqual(fs.existsSync(generationDir), true);
+  });
+}
+
+test("a repair does not remove for a recorded target that fails verification", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  const alternate = writeAlternateGeneration(harness);
+  fs.appendFileSync(path.join(alternate.dir, "lib", "index.js"), "\n// tampered\n", "utf8");
+  writeRecord(harness, "web", recordFor(harness, "web", "remove-pending", {
+    targetBundleHash: alternate.hash,
+    targetGenerationDir: alternate.dir,
+  }));
+
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "repair-needs-inspection");
+  assert.deepStrictEqual(cli.calls, []);
+});
+
+test("a repair does not add when the target is corrupted after remove", async (t) => {
+  const harness = makeHarness(t);
+  const { generationDir } = writeIncompleteProfile(harness, "web");
+  const cli = makeCli(harness, {
+    afterRemove: () => {
+      fs.appendFileSync(path.join(generationDir, "lib", "index.js"), "\n// tampered after remove\n", "utf8");
+    },
+  });
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "repair-target-integrity-failed");
+  assert.deepStrictEqual(mutationOrder(cli), ["remove"]);
+  assert.strictEqual(dependencyPresent(harness, "web"), false);
+});
 
 test("the old generation is only cleaned after the repair converges", async (t) => {
   const harness = makeHarness(t);
@@ -485,6 +618,48 @@ function writeAlternateGeneration(harness) {
   });
   return { dir, hash };
 }
+
+// A generation written with an old-style exact contract, e.g. `=0.2.0-rc.2`,
+// whose files and marker are otherwise intact.
+function writeContractGeneration(harness, version) {
+  const contract = dshInstallTest.dshContractForVersion(version);
+  const bundleHash = dshInstallTest.hashBridgeDirectorySync(fs, SOURCE_DIR, contract);
+  const dir = path.join(managedRootOf(harness), "generations", bundleHash);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.cpSync(SOURCE_DIR, dir, { recursive: true });
+  writeJson(path.join(dir, "clawd-manifest.json"), {
+    owner: "clawd-on-desk",
+    schemaVersion: 1,
+    protocolVersion: 1,
+    packageName: BRIDGE_PACKAGE_NAME,
+    bundleHash,
+    sourceClawdVersion: "1.2.3",
+    supportedDshRange: contract.supportedDshRange,
+    installedDshVersion: version,
+    installedDshVersionAssumedAtStaging: false,
+    sourceAuditBaselineCommit: "47f943859bef60e4160492346772ded9b24f765a",
+    installedAt: "2026-01-01T00:00:00.000Z",
+  });
+  return { dir, hash: bundleHash, contract };
+}
+
+test("a repair target whose contract is not the current family's is not used", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  const historical = writeContractGeneration(harness, FAMILY_VERSION);
+  assert.notStrictEqual(historical.contract.supportedDshRange, FAMILY_RANGE);
+  writeRecord(harness, "web", recordFor(harness, "web", "remove-pending", {
+    targetBundleHash: historical.hash,
+    targetGenerationDir: historical.dir,
+  }));
+
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "repair-needs-inspection");
+  assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(fs.existsSync(recordPath(harness, "web")), true);
+});
 
 test("a healthy profile that is not the recorded target is repaired to the record's target", async (t) => {
   const harness = makeHarness(t);

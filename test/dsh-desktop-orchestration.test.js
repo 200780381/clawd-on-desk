@@ -548,6 +548,90 @@ test("unregisterDeepSeekHarness maps removed and skipped from the top level", as
 });
 
 // ---------------------------------------------------------------------------
+// Failed add: partial-mutation detection
+// ---------------------------------------------------------------------------
+
+function failingAddCli(onAdd) {
+  return {
+    runDshCommand: async (args) => {
+      if (args[3] === "add") return onAdd(args) || { code: 1, stderr: "add failed" };
+      return { code: 1, stderr: `unexpected args: ${args.join(" ")}` };
+    },
+  };
+}
+
+test("a failed add that rewrote only the lock file keeps the generation and writes a record", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const lockfile = path.join(harness.dshHome, "profiles", "web", "pnpm-lock.yaml");
+  let attempted = null;
+  const cli = failingAddCli((args) => {
+    attempted = args[4];
+    fs.writeFileSync(lockfile, `newTarget: ${attempted}\n`);
+    return { code: 1, stderr: "add failed after lock write" };
+  });
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.ok(attempted);
+  assert.strictEqual(fs.existsSync(attempted), true, "the candidate generation is kept");
+  assert.strictEqual(fs.existsSync(dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" })), true);
+});
+
+test("a failed add that rewrote only the manifest keeps the generation and writes a record", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const manifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
+  let attempted = null;
+  const cli = failingAddCli((args) => {
+    attempted = args[4];
+    const manifest = readJson(manifestPath);
+    manifest.partialMutation = true;
+    writeJson(manifestPath, manifest);
+    return { code: 1, stderr: "add failed after manifest write" };
+  });
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.strictEqual(fs.existsSync(attempted), true);
+  assert.strictEqual(fs.existsSync(dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" })), true);
+});
+
+test("a failed add that changed nothing discards the generation", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  let attempted = null;
+  const cli = failingAddCli((args) => { attempted = args[4]; return { code: 1, stderr: "add failed" }; });
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "plugin-add-failed");
+  assert.strictEqual(fs.existsSync(attempted), false);
+  assert.strictEqual(fs.existsSync(dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" })), false);
+});
+
+test("a failed add with an unreadable lock file is treated as a partial mutation", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const lockfile = path.join(harness.dshHome, "profiles", "web", "pnpm-lock.yaml");
+  fs.writeFileSync(lockfile, "old: 1\n", "utf8");
+  // Unreadable at both snapshots, so only the explicit unreadable check can
+  // prove the add's side effects are unknown.
+  fs.chmodSync(lockfile, 0o000);
+  t.after(() => { try { fs.chmodSync(lockfile, 0o600); } catch {} });
+
+  let attempted = null;
+  const cli = failingAddCli((args) => { attempted = args[4]; return { code: 1, stderr: "add failed" }; });
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.ok(attempted);
+  assert.strictEqual(fs.existsSync(attempted), true, "the candidate generation is kept");
+  assert.strictEqual(fs.existsSync(dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" })), true);
+});
+
+// ---------------------------------------------------------------------------
 // Two profiles sharing a generation
 // ---------------------------------------------------------------------------
 

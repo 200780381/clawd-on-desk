@@ -272,6 +272,19 @@ async function readJson(filePath) {
   }
 }
 
+// Content hash of a file that may legitimately be absent. "absent" and
+// "unreadable" stay distinct so a failed write can tell "the tool never touched
+// it" from "we cannot prove it did not".
+async function readFileStateHash(filePath) {
+  try {
+    const content = await fsp.readFile(filePath);
+    return crypto.createHash("sha256").update(content).digest("hex");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "absent";
+    return "unreadable";
+  }
+}
+
 function normalizeCommandResult(result) {
   if (!result || typeof result !== "object") return { code: 1, stdout: "", stderr: "" };
   return {
@@ -3745,6 +3758,32 @@ async function discardCreatedGenerationIfUnreferenced(generation, _health, optio
   return { paused: false, removed: true };
 }
 
+// A real `dsh plugin remove` deletes the dependency and bundle row but leaves
+// the profile-local link behind (a symlink on macOS, a junction on Windows). It
+// is Clawd's exact link, so clear it and let the caller re-inspect; anything
+// that is not our exact link stays as reportable state.
+async function clearRepairResidualLink(health, options = {}) {
+  if (!health || health.status !== "managed-residue") return false;
+  const cleanup = await unlinkManagedProfileResidue(health, options);
+  return cleanup.removed === true;
+}
+
+// Fully verify a managed generation before it is used as a repair target. The
+// operation record only points at a candidate; an unverified or corrupt one
+// must not authorize the destructive remove. Reuses the same marker/ownership/
+// hash checks as the generation-integrity classification.
+async function verifyRepairTargetGeneration(generationDir, bundleHash, contract, options = {}) {
+  if (!generationDir || !bundleHash || !contract) return false;
+  const record = await inspectResolvedPackage(path.join(generationDir, "package.json"), "repair-target");
+  if (!record || !record.clawdManifest) return false;
+  if (record.clawdManifest.owner !== MANAGED_OWNER) return false;
+  if (record.clawdManifest.bundleHash !== bundleHash) return false;
+  if (!isIntactManaged(record)) return false;
+  if (!isManagedGenerationRecord(record, resolveManagedRoot(options), options)) return false;
+  const markerContract = dshContractForMarker(record.clawdManifest);
+  return !!markerContract && markerContract.supportedDshRange === contract.supportedDshRange;
+}
+
 // Explicit two-step repair for a plugin DSH disabled (dependency present, bundle
 // entry missing). Upstream add never re-enables an existing dependency, so the
 // plugin must be removed first. All steps run under the caller's mutation lock.
@@ -3780,26 +3819,45 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
         supportedRange: supportedDshRangeLabel(),
       };
     }
-    // Keep the recorded target so "already healthy" checks the generation this
-    // repair was staged for, not just any healthy one.
-    if (await exists(path.join(record.targetGenerationDir, MANIFEST_FILE))) {
+    // The record's target is only a candidate. If its marker is still there, the
+    // record claims a real target and it must verify fully before it can
+    // authorize the destructive remove; a marker that is gone is a stale record,
+    // so fall through to the generation this run prepared from the current
+    // source.
+    const recordMarker = await readJson(path.join(record.targetGenerationDir, MANIFEST_FILE));
+    if (recordMarker && recordMarker.owner === MANAGED_OWNER) {
+      if (!(await verifyRepairTargetGeneration(record.targetGenerationDir, record.targetBundleHash, contract, options))) {
+        return repairNeedsInspectionResult(scoped, "repair-target-integrity-failed");
+      }
       targetBundleHash = record.targetBundleHash;
       targetGenerationDir = record.targetGenerationDir;
     }
   }
+  // Whatever we removed for must itself be intact; otherwise do not touch DSH.
+  if (!(await verifyRepairTargetGeneration(targetGenerationDir, targetBundleHash, contract, options))) {
+    return repairNeedsInspectionResult(scoped, "repair-target-integrity-failed");
+  }
   const carrierKind = commandInfo && commandInfo.kind === "desktop" ? "desktop" : "npm";
 
-  const depsGone = locked.status === "absent" || locked.status === "profile-missing";
+  // A previous remove (upstream or a prior attempt) can leave our exact profile
+  // link behind. It is ours, not damage: clear it and re-inspect so the repair
+  // can continue instead of stopping for a human.
+  let work = locked;
+  if (await clearRepairResidualLink(work, scoped)) {
+    work = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
+  }
+
+  const depsGone = work.status === "absent" || work.status === "profile-missing";
   // The profile-local copy still carries our marker even when the source
   // generation directory is gone; that is ours, not a foreign package.
-  const profileOwnedMarker = !!(locked.profileResolved && isIntactManaged(locked.profileResolved));
-  const ourRegistrationPresent = (locked.owned && !!locked.marker) || profileOwnedMarker;
-  const isIncomplete = ourRegistrationPresent && locked.status === "profile-entry-incomplete";
-  const foreignOrConflicting = locked.status === "profile-entry-foreign-or-conflicting" && !profileOwnedMarker;
-  const damagedOrUnclear = ourRegistrationPresent && !isIncomplete && locked.status !== "healthy"
-    && locked.status !== "profile-entry-foreign-or-conflicting";
-  const healthyTarget = locked.status === "healthy" && locked.owned && locked.marker
-    && locked.marker.bundleHash === targetBundleHash;
+  const profileOwnedMarker = !!(work.profileResolved && isIntactManaged(work.profileResolved));
+  const ourRegistrationPresent = (work.owned && !!work.marker) || profileOwnedMarker;
+  const isIncomplete = ourRegistrationPresent && work.status === "profile-entry-incomplete";
+  const foreignOrConflicting = work.status === "profile-entry-foreign-or-conflicting" && !profileOwnedMarker;
+  const damagedOrUnclear = ourRegistrationPresent && !isIncomplete && work.status !== "healthy"
+    && work.status !== "profile-entry-foreign-or-conflicting";
+  const healthyTarget = work.status === "healthy" && work.owned && work.marker
+    && work.marker.bundleHash === targetBundleHash;
 
   // "Already healthy and exactly the recorded target" converges without touching DSH.
   if (healthyTarget) {
@@ -3807,13 +3865,13 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
     const latch = await readInspectionLatch(scoped);
     if (latch) await clearInspectionLatch(scoped);
     await cleanUnreferencedGenerations(targetBundleHash, options);
-    return { status: "ok", updated: false, health: locked, message: dshSuccessMessage(profile) };
+    return { status: "ok", updated: false, health: work, message: dshSuccessMessage(profile) };
   }
 
   // Foreign, damaged or otherwise unclear state stops for a human. A record is
   // never authorization to overwrite a package we cannot prove is ours.
   if (foreignOrConflicting || (!depsGone && !ourRegistrationPresent) || damagedOrUnclear) {
-    return repairNeedsInspectionResult(scoped, locked.status);
+    return repairNeedsInspectionResult(scoped, work.status);
   }
 
   // Resume point. "remove-pending" with dependencies already gone means the
@@ -3858,7 +3916,12 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
     const result = await runDshCommand([
       "plugin", "--profile", profile, "remove", BRIDGE_PACKAGE_NAME,
     ], { ...options, commandInfo: pnpmRuntime.commandInfo });
-    const afterRemove = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
+    let afterRemove = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
+    // Upstream remove leaves our exact profile link behind; clear it before
+    // deciding the remove failed.
+    if (result.code === 0 && await clearRepairResidualLink(afterRemove, scoped)) {
+      afterRemove = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
+    }
     const targetMarker = await readJson(path.join(targetGenerationDir, MANIFEST_FILE));
     const targetIntact = !!(targetMarker && targetMarker.owner === MANAGED_OWNER
       && targetMarker.bundleHash === targetBundleHash);
@@ -3904,6 +3967,17 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
     await writeState("removed-add-pending");
   }
 
+  // Re-verify the final target right before the write: an interrupt between
+  // remove and add can leave a damaged generation behind.
+  if (!(await verifyRepairTargetGeneration(targetGenerationDir, targetBundleHash, contract, options))) {
+    await writeInspectionLatch("repair-target-integrity-failed", "repair target failed verification before add", scoped);
+    return {
+      status: "error",
+      reason: "repair-target-integrity-failed",
+      message: "The DeepSeek Harness repair target failed verification before add; manual inspection is required",
+      manualInspectionRequired: true,
+    };
+  }
   // Add the recorded target generation and verify it landed healthy.
   const addResult = await runDshCommand([
     "plugin", "--profile", profile, "add", targetGenerationDir,
@@ -4260,6 +4334,17 @@ async function syncDshProfile(options, target) {
         }
       }
       const generation = await promoteGeneration(bundle, { ...options, contract, dshVersion });
+      // Snapshot the two files a failed add can partially rewrite. The health
+      // fingerprint does not include pnpm-lock.yaml, so a lock-only rewrite
+      // would otherwise look like a clean failure. This only catches a write
+      // that already happened when add returned; a later write is found by the
+      // next startup sync / Doctor (e.g. as plugin-disabled-in-dsh).
+      const lockfilePath = path.join(profileDir, "pnpm-lock.yaml");
+      const manifestPath = path.join(profileDir, "package.json");
+      const beforeAdd = {
+        manifest: await readFileStateHash(manifestPath),
+        lockfile: await readFileStateHash(lockfilePath),
+      };
       const result = await runDshCommand([
         "plugin", "--profile", profile, "add", generation.generationDir,
       ], { ...options, commandInfo: pnpmRuntime.commandInfo });
@@ -4267,7 +4352,17 @@ async function syncDshProfile(options, target) {
         const failedHealth = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
         const unknown = isUnknownCommandResult(result);
         const changed = healthFingerprint(failedHealth) !== healthFingerprint(locked);
-        if (unknown || changed) {
+        const afterAdd = {
+          manifest: await readFileStateHash(manifestPath),
+          lockfile: await readFileStateHash(lockfilePath),
+        };
+        // A changed or unreadable manifest/lock is proof of a partial mutation
+        // even when the health fingerprint still matches.
+        const fileMutated = beforeAdd.manifest !== afterAdd.manifest
+          || beforeAdd.lockfile !== afterAdd.lockfile
+          || afterAdd.manifest === "unreadable"
+          || afterAdd.lockfile === "unreadable";
+        if (unknown || changed || fileMutated) {
           await writeInspectionLatch(
             unknown ? "plugin-add-unknown" : "plugin-add-partial-mutation",
             (result.stderr || result.stdout || "dsh plugin add failed").trim(),

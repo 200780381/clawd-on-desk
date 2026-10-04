@@ -272,8 +272,11 @@ but the dependency remains. DSH's `plugin add` does not re-enable an existing
 dependency. Clawd's explicit repair (Doctor's Fix, or Settings Install) removes
 the plugin first and then adds it, and records the pending step per profile in
 `repair-operation-<profile>.json`; if the repair is interrupted, the next
-explicit repair resumes it. Startup sync only reports `plugin-disabled-in-dsh`
-and does not change the profile.
+explicit repair resumes it. DSH's `plugin remove` only clears the dependency and
+bundle rows and updates the lock file, leaving the `node_modules` link behind
+(a symlink on macOS, a junction on Windows), so the repair removes Clawd's own
+leftover link before it adds the plugin again. Startup sync only reports
+`plugin-disabled-in-dsh` and does not change the profile.
 
 ## Uninstall and ownership safety
 
@@ -483,23 +486,32 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
   side by side; Doctor showed one row with both sides and a Fix button; uninstall
   removed the desktop side's dependency and bundle rows, cleaned the junction
   `dsh plugin remove` left behind, and deleted only the desktop generation while
-  keeping the one web still used. It did not cover a real desktop-app session or
-  approvals on Windows, the Electron UI (Settings notices, Doctor window, startup
-  preheat), or a packaged app.
+  keeping the one web still used.
+- On 2026-10-04, a **Windows real-Clawd (Electron) source run** followed in a
+  user session with normal permissions. An Electron-only bug first made Clawd
+  treat the desktop app as not installed, because Electron's `fs` reports
+  `app.asar` as a directory while the Windows install check required a file
+  (fixed in `d8190692`). After the fix, startup sync installed the plugin into a
+  desktop app that stayed open — its host process was never restarted — and
+  recorded "installed in desktop"; a new conversation delivered events from that
+  same host process, so **Windows also loads a newly added plugin while the app
+  is open, with no restart**. It did not cover approvals in the Windows desktop
+  app, the Electron UI (the Settings notice line and the Doctor window), or a
+  packaged app.
 
-  Limitation observed in this run: an **elevated administrator** process on
-  Windows 11 cannot traverse a junction created by a non-admin process
-  (PowerShell: "The path cannot be traversed because it contains an untrusted
-  mount point"; Node: `UNKNOWN`). The existing web-profile junction had been
-  created earlier without elevation, so in this session Clawd could not read
-  web's plugin and web's add failed; the desktop junction was created in the same
-  session and worked throughout. Clawd running normally is not affected. This
-  suggests — but was not reproduced with an actually elevated Clawd — that
-  running Clawd as administrator could read plugins installed without elevation
-  as missing.
+  Limitation observed in the earlier installer-code run: an **elevated
+  administrator** process on Windows 11 cannot traverse a junction created by a
+  non-admin process (PowerShell: "The path cannot be traversed because it
+  contains an untrusted mount point"; Node: `UNKNOWN`). The existing web-profile
+  junction had been created earlier without elevation, so in that session Clawd
+  could not read web's plugin and web's add failed; the desktop junction was
+  created in the same session and worked throughout. Clawd running normally is
+  not affected. This suggests — but was not reproduced with an actually elevated
+  Clawd — that running Clawd as administrator could read plugins installed
+  without elevation as missing.
 - Linux, WSL, remote SSH, macOS packaging, and ARM64 packaging remain
-  unverified; so do a real desktop-app session and approvals on Windows, the
-  Electron UI on Windows, and the HTTP 204/cancellation hand-back.
+  unverified; so do approvals in the Windows desktop app, the Electron UI on
+  Windows, and the HTTP 204/cancellation hand-back.
 - There is no terminal-focus action for either carrier: DSH web is a browser
   surface and the desktop app does not expose a focusable terminal.
 - Closing the local bubble does not deny the request. If a configured Telegram
