@@ -769,3 +769,20 @@ test("cleanup options forward the injected desktop discovery to the DSH cleaner"
   const plan = buildCleanupOptionsForHome("/tmp/clawd-cleanup-home", { dshDesktopDiscovery: marker });
   assert.strictEqual(plan.byAgent["deepseek-harness"].desktopDiscovery, marker);
 });
+
+test("a desktop success keeps web's manual command on the top-level ok result", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  writeProfileManifest(harness, "desktop");
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
+    commandInfo: null,
+    dshCommand: false,
+    env: { PATH: "" },
+    desktopDiscovery: desktopFound(),
+  }));
+  assert.strictEqual(result.status, "ok");
+  assert.ok(result.manualCommand);
+  assert.match(result.manualCommand, /plugin --profile web add|'plugin' '--profile' 'web' 'add'/);
+  assert.ok(result.warnings.some((line) => line.startsWith("web:")));
+});

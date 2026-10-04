@@ -105,6 +105,7 @@ const MUTATION_LOCK_STALE_MULTIPLIER = 2;
 const MAX_MUTATION_LOCK_OPERATION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MANUAL_GENERATION_REFERENCE_FILE = "manual-generation-reference.json";
 const MANUAL_GENERATION_REFERENCE_SCHEMA_VERSION = 1;
+const REPAIR_OPERATION_SCHEMA_VERSION = 1;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 const POSIX_DISCOVERABLE_COMMANDS = new Set(["dsh", "pnpm"]);
 const BRIDGE_SOURCE_FILES = Object.freeze([
@@ -2125,6 +2126,9 @@ function resolveDshRole({ profile, evidence, carrier, discovery, health, operati
   if (evidence.residue === "present") return dshDiagnose("removal-residue");
   if (evidence.latch === "unknown") return dshDiagnose("latch-unreadable");
   if (evidence.latch === "invalid") return dshDiagnose("latch-invalid");
+  // A broken two-step repair record fences the target before anything else.
+  if (evidence.operationRecord === "unknown") return dshDiagnose("repair-record-unreadable");
+  if (evidence.operationRecord === "invalid") return dshDiagnose("repair-record-invalid");
   if (profile === WEB_PROFILE_NAME && evidence.manualReference === "unknown") {
     return dshDiagnose("manual-reference-unreadable");
   }
@@ -2151,6 +2155,10 @@ function resolveDshRole({ profile, evidence, carrier, discovery, health, operati
   if (evidence.latch === "present" && operation === "startup-sync") {
     return dshDiagnose("inspection-required");
   }
+  // Startup sync only reports a pending two-step repair; it never resumes it.
+  if (evidence.operationRecord === "present" && operation === "startup-sync") {
+    return dshDiagnose("repair-pending");
+  }
   if (profile === WEB_PROFILE_NAME) return resolveWebDshRole({ evidence, carrier, operation });
   return resolveDesktopDshRole({ evidence, discovery });
 }
@@ -2165,6 +2173,7 @@ function inspectWebDshTargetSync(options, operation, fsImpl) {
   const residue = residueScan.unreadableError ? "unknown" : (residueScan.paths.length ? "present" : "none");
   const latch = inspectionLatchEvidenceSync(fsImpl, scoped);
   const manualReference = manualReferenceEvidence(readManualGenerationReferenceSync(fsImpl, scoped));
+  const operationRecord = repairOperationEvidenceSync(fsImpl, scoped);
   const commandCandidates = dshCommandPathsSync(scoped);
   const carrier = commandCandidates.length
     ? { status: "unverified", kind: "npm", path: commandCandidates[0] }
@@ -2175,6 +2184,7 @@ function inspectWebDshTargetSync(options, operation, fsImpl) {
     residue,
     latch,
     manualReference,
+    operationRecord,
   };
   const role = resolveDshRole({
     profile: WEB_PROFILE_NAME,
@@ -2214,6 +2224,7 @@ function inspectDesktopDshTargetSync(options, operation, fsImpl) {
   const residueScan = listManagedProfileRemovalResiduesSync(fsImpl, scoped);
   const residue = residueScan.unreadableError ? "unknown" : (residueScan.paths.length ? "present" : "none");
   const latch = inspectionLatchEvidenceSync(fsImpl, scoped);
+  const operationRecord = repairOperationEvidenceSync(fsImpl, scoped);
   const carrier = discovery && discovery.status === "found"
     ? { status: "unverified", kind: "desktop", path: discovery.launcherPath }
     : { status: "unavailable", kind: "desktop", path: null };
@@ -2223,6 +2234,7 @@ function inspectDesktopDshTargetSync(options, operation, fsImpl) {
     residue,
     latch,
     manualReference: null,
+    operationRecord,
   };
   const role = resolveDshRole({
     profile: DESKTOP_PROFILE_NAME,
@@ -2308,11 +2320,14 @@ async function resolveDshTargetCarrier(staticTarget, profile, options, operation
 // Rows 1-9 of the role table (residue, latch, foreign, ...) are diagnose and
 // keep their static decision; only the command/manifest row is re-decided.
 async function resolveDshWebTarget(staticTarget, options, operation) {
-  const rowTen = staticTarget.role === "mutable"
+  // Only the command/manifest row depends on whether a web command exists: a
+  // static "no command" verdict can be wrong on macOS, where the app PATH
+  // cannot see a login-shell dsh. Rows 1-9 are evidence-based and stay put.
+  const roleDependsOnWebCommand = staticTarget.role === "mutable"
     || staticTarget.reason === "web-profile-uninitialized"
     || staticTarget.reason === "cli-unavailable"
     || staticTarget.reason === "web-not-used";
-  if (!rowTen) return staticTarget;
+  if (!roleDependsOnWebCommand) return staticTarget;
   const commandInfo = await resolveDshCommand(options);
   const kind = commandInfo && commandInfo.kind === "desktop" ? "desktop" : "npm";
   const carrier = commandInfo
@@ -2733,6 +2748,138 @@ async function clearInspectionLatch(options = {}) {
   await fsp.rm(filePath, { force: false });
 }
 
+// Per-profile two-step repair operation record. Its shape and ownership checks
+// mirror the inspection latch and manual reference files.
+function repairOperationPath(options = {}) {
+  const profile = normalizeDshProfileName(options.profile);
+  return path.join(resolveManagedRoot(options), `repair-operation-${profile}.json`);
+}
+
+function isValidRepairOperation(record) {
+  return !!(
+    record
+    && record.owner === MANAGED_OWNER
+    && record.schemaVersion === REPAIR_OPERATION_SCHEMA_VERSION
+    && typeof record.profile === "string"
+    && (record.state === "remove-pending" || record.state === "removed-add-pending")
+    && typeof record.targetBundleHash === "string"
+    && /^[a-f0-9]{64}$/.test(record.targetBundleHash)
+    && typeof record.targetGenerationDir === "string"
+    && record.targetGenerationDir
+    && typeof record.hostVersion === "string"
+    && (record.carrierKind === "npm" || record.carrierKind === "desktop")
+    && typeof record.createdAt === "string"
+    && Number.isFinite(Date.parse(record.createdAt))
+    && typeof record.updatedAt === "string"
+    && Number.isFinite(Date.parse(record.updatedAt))
+  );
+}
+
+// Distinguishes "missing", "valid", "invalid", "unreadable" like the manual
+// reference reader, so the caller can fail closed on the last two.
+async function readRepairOperation(options = {}) {
+  const filePath = repairOperationPath(options);
+  let stat;
+  try {
+    stat = await fsp.lstat(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    return { invalid: true, reason: "repair-record-unreadable", repairPath: filePath };
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    return { invalid: true, reason: "repair-record-invalid", repairPath: filePath };
+  }
+  let raw;
+  try {
+    raw = await fsp.readFile(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    return { invalid: true, reason: "repair-record-unreadable", repairPath: filePath };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+  } catch {
+    return { invalid: true, reason: "repair-record-invalid", repairPath: filePath };
+  }
+  if (!isValidRepairOperation(parsed)) {
+    return { invalid: true, reason: "repair-record-invalid", repairPath: filePath };
+  }
+  return parsed;
+}
+
+function repairOperationEvidenceSync(fsImpl, options) {
+  const filePath = repairOperationPath(options);
+  let stat;
+  try {
+    stat = fsImpl.lstatSync(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "none";
+    return "unknown";
+  }
+  if (!stat.isFile() || (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink())) {
+    return "invalid";
+  }
+  let raw;
+  try {
+    raw = fsImpl.readFileSync(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "none";
+    return "unknown";
+  }
+  try {
+    const parsed = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+    return isValidRepairOperation(parsed) ? "present" : "invalid";
+  } catch {
+    return "invalid";
+  }
+}
+
+// Refuse to overwrite a record we cannot prove is ours.
+async function writeRepairOperation(record, options = {}) {
+  const filePath = repairOperationPath(options);
+  const current = await readRepairOperation(options);
+  if (current && current.invalid) {
+    throw new Error("DeepSeek Harness repair operation record ownership is invalid; manual inspection required");
+  }
+  if (
+    options.__testRepairOperationHooks
+    && typeof options.__testRepairOperationHooks.beforeWrite === "function"
+  ) {
+    await options.__testRepairOperationHooks.beforeWrite({ filePath, record });
+  }
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  await fsp.writeFile(filePath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function clearRepairOperation(options = {}) {
+  const filePath = repairOperationPath(options);
+  const current = await readRepairOperation(options);
+  if (!current) return false;
+  if (current.invalid) {
+    throw new Error("DeepSeek Harness repair operation record ownership is invalid; manual inspection required");
+  }
+  await fsp.rm(filePath, { force: false });
+  return true;
+}
+
+// A valid record keeps its target generation alive; an invalid or unreadable
+// record is treated conservatively, same as the manual reference anchor.
+async function repairRecordReferencesGeneration(generationDir, options = {}) {
+  const hash = path.basename(generationDir);
+  for (const profileName of DSH_PROFILE_NAMES) {
+    const record = await readRepairOperation({ ...options, profile: profileName });
+    if (record && record.invalid) return true;
+    if (
+      record
+      && isValidRepairOperation(record)
+      && record.targetBundleHash === hash
+      && sameResolvedPath(generationDir, record.targetGenerationDir, options.platform)
+    ) return true;
+  }
+  return false;
+}
+
 function manualGenerationReferencePath(options = {}) {
   return path.join(resolveManagedRoot(options), MANUAL_GENERATION_REFERENCE_FILE);
 }
@@ -3116,6 +3263,29 @@ function dshSuccessMessage(profile) {
   return profile === DESKTOP_PROFILE_NAME ? DSH_DESKTOP_RESTART_HINT : DSH_RESTART_HINT;
 }
 
+function repairRecordResult(record, scoped) {
+  return {
+    status: "error",
+    reason: record && record.reason === "repair-record-unreadable"
+      ? "repair-record-unreadable"
+      : "repair-record-invalid",
+    message: "The DeepSeek Harness repair operation record cannot be used; manual inspection is required",
+    repairPath: (record && record.repairPath) || repairOperationPath(scoped),
+    manualInspectionRequired: true,
+  };
+}
+
+function repairNeedsInspectionResult(scoped, detail) {
+  return {
+    status: "error",
+    reason: "repair-needs-inspection",
+    message: "DeepSeek Harness repair state is unclear or a foreign package is present; manual inspection is required",
+    detail: detail || null,
+    repairPath: repairOperationPath(scoped),
+    manualInspectionRequired: true,
+  };
+}
+
 function isUnknownCommandResult(result) {
   return !!(result && (result.timedOut || result.signal || result.outputLimited));
 }
@@ -3296,6 +3466,8 @@ async function cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch
   }
   await cleanUnreferencedGenerations(null, options);
   if (lockedLatch) await clearInspectionLatch(options);
+  // Registration is gone, so a pending repair record no longer protects anything.
+  try { await clearRepairOperation(options); } catch {}
   return { status: "ok", removed: true, updated: true };
 }
 
@@ -3372,6 +3544,8 @@ async function isGenerationReferenced(generationDir, options = {}) {
       options.platform
     )
   ) return true;
+  // A pending two-step repair keeps its target generation alive.
+  if (await repairRecordReferencesGeneration(generationDir, options)) return true;
   const dshHome = options.dshHome || resolveDshHome(options.env);
   const profilesDir = path.join(dshHome, "profiles");
   let profiles = [];
@@ -3428,6 +3602,220 @@ async function discardCreatedGenerationIfUnreferenced(generation, _health, optio
   await fsp.rm(candidate, { recursive: true, force: false });
 }
 
+// Explicit two-step repair for a plugin DSH disabled (dependency present, bundle
+// entry missing). Upstream add never re-enables an existing dependency, so the
+// plugin must be removed first. All steps run under the caller's mutation lock.
+async function repairDisabledDshProfile(options, scoped, locked, record, runtime) {
+  const profile = scoped.profile;
+  const { commandInfo, pnpmRuntime, silent, hostVersion } = runtime;
+
+  // Recompute the target contract from the current host version on every resume.
+  const family = dshFamilyForVersion(hostVersion);
+  if (!family) {
+    return {
+      status: "error",
+      reason: "version-unsupported",
+      message: `DeepSeek Harness ${hostVersion || "unknown"} is unsupported; this bridge supports ${supportedDshRangeLabel()}`,
+      detectedVersion: hostVersion,
+      supportedRange: supportedDshRangeLabel(),
+    };
+  }
+  const contract = dshTargetContract(family, hostVersion);
+  const bundle = await readSourceBundle({ ...scoped, contract });
+  const generation = await promoteGeneration(bundle, { ...options, contract, dshVersion: hostVersion });
+  let targetBundleHash = generation.bundleHash;
+  let targetGenerationDir = generation.generationDir;
+  if (record) {
+    const recordFamily = dshFamilyForVersion(record.hostVersion);
+    if (recordFamily && recordFamily.family !== family.family) {
+      return {
+        status: "error",
+        reason: "version-unsupported",
+        message: `The pending DeepSeek Harness repair targets ${record.hostVersion || "unknown"}; this host is ${hostVersion || "unknown"}`,
+        detectedVersion: hostVersion,
+        expectedVersion: record.hostVersion,
+        supportedRange: supportedDshRangeLabel(),
+      };
+    }
+    // Keep the recorded target so "already healthy" checks the generation this
+    // repair was staged for, not just any healthy one.
+    if (await exists(path.join(record.targetGenerationDir, MANIFEST_FILE))) {
+      targetBundleHash = record.targetBundleHash;
+      targetGenerationDir = record.targetGenerationDir;
+    }
+  }
+  const carrierKind = commandInfo && commandInfo.kind === "desktop" ? "desktop" : "npm";
+
+  const depsGone = locked.status === "absent" || locked.status === "profile-missing";
+  // The profile-local copy still carries our marker even when the source
+  // generation directory is gone; that is ours, not a foreign package.
+  const profileOwnedMarker = !!(locked.profileResolved && isIntactManaged(locked.profileResolved));
+  const ourRegistrationPresent = (locked.owned && !!locked.marker) || profileOwnedMarker;
+  const isIncomplete = ourRegistrationPresent && locked.status === "profile-entry-incomplete";
+  const foreignOrConflicting = locked.status === "profile-entry-foreign-or-conflicting" && !profileOwnedMarker;
+  const damagedOrUnclear = ourRegistrationPresent && !isIncomplete && locked.status !== "healthy"
+    && locked.status !== "profile-entry-foreign-or-conflicting";
+  const healthyTarget = locked.status === "healthy" && locked.owned && locked.marker
+    && locked.marker.bundleHash === targetBundleHash;
+
+  // "Already healthy and exactly the recorded target" converges without touching DSH.
+  if (healthyTarget) {
+    try { await clearRepairOperation(scoped); } catch {}
+    await cleanUnreferencedGenerations(targetBundleHash, options);
+    const latch = await readInspectionLatch(scoped);
+    if (latch) await clearInspectionLatch(scoped);
+    return { status: "ok", updated: false, health: locked, message: dshSuccessMessage(profile) };
+  }
+
+  // Foreign, damaged or otherwise unclear state stops for a human. A record is
+  // never authorization to overwrite a package we cannot prove is ours.
+  if (foreignOrConflicting || (!depsGone && !ourRegistrationPresent) || damagedOrUnclear) {
+    return repairNeedsInspectionResult(scoped, locked.status);
+  }
+
+  // Resume point. "remove-pending" with dependencies already gone means the
+  // remove happened before the record was updated.
+  let state = record ? record.state : "remove-pending";
+  if (state === "remove-pending" && depsGone) state = "removed-add-pending";
+  if (state === "removed-add-pending" && !depsGone) {
+    return repairNeedsInspectionResult(scoped, "remove-pending-record-with-dependencies");
+  }
+
+  const now = () => new Date().toISOString();
+  const baseRecord = {
+    owner: MANAGED_OWNER,
+    schemaVersion: REPAIR_OPERATION_SCHEMA_VERSION,
+    profile,
+    targetBundleHash,
+    targetGenerationDir,
+    hostVersion,
+    carrierKind,
+    createdAt: record && record.createdAt ? record.createdAt : now(),
+  };
+  const writeState = (stateValue) => writeRepairOperation(
+    { ...baseRecord, state: stateValue, updatedAt: now() },
+    scoped
+  );
+
+  if (state === "remove-pending") {
+    // Persist the intent before the first destructive command; if the record
+    // cannot be written, remove is never attempted.
+    try {
+      await writeState("remove-pending");
+    } catch (err) {
+      return {
+        status: "error",
+        reason: "repair-record-unwritable",
+        message: err && err.message ? err.message : String(err),
+        repairPath: repairOperationPath(scoped),
+        manualInspectionRequired: true,
+      };
+    }
+    // Remove, then confirm the dependency is gone and the target generation survived.
+    const result = await runDshCommand([
+      "plugin", "--profile", profile, "remove", BRIDGE_PACKAGE_NAME,
+    ], { ...options, commandInfo: pnpmRuntime.commandInfo });
+    const afterRemove = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
+    const targetMarker = await readJson(path.join(targetGenerationDir, MANIFEST_FILE));
+    const targetIntact = !!(targetMarker && targetMarker.owner === MANAGED_OWNER
+      && targetMarker.bundleHash === targetBundleHash);
+    if (result.code !== 0 || (afterRemove.status !== "absent" && afterRemove.status !== "profile-missing") || !targetIntact) {
+      await writeInspectionLatch(
+        "repair-remove-failed",
+        (result.stderr || result.stdout || `remove left state ${afterRemove.status}`).trim(),
+        scoped
+      );
+      return {
+        status: "error",
+        reason: "repair-remove-failed",
+        message: "dsh plugin remove did not cleanly remove the disabled plugin; repair can be retried",
+        healthReason: afterRemove.status,
+      };
+    }
+    // Re-verify the host version between the two writes.
+    const versionAfterRemove = await readDshVersion(commandInfo, options);
+    if (versionAfterRemove !== hostVersion) {
+      return {
+        status: "error",
+        reason: "version-changed",
+        message: `DeepSeek Harness changed from ${hostVersion} to ${versionAfterRemove} between remove and add; retry after the host version is stable`,
+        detectedVersion: versionAfterRemove,
+        expectedVersion: hostVersion,
+        supportedRange: supportedDshRangeLabel(),
+      };
+    }
+    await writeState("removed-add-pending");
+  } else {
+    // Resuming after remove: re-verify the version, then pin the record state.
+    const versionNow = await readDshVersion(commandInfo, options);
+    if (versionNow !== hostVersion) {
+      return {
+        status: "error",
+        reason: "version-changed",
+        message: `DeepSeek Harness changed from ${hostVersion} to ${versionNow}; retry after the host version is stable`,
+        detectedVersion: versionNow,
+        expectedVersion: hostVersion,
+        supportedRange: supportedDshRangeLabel(),
+      };
+    }
+    await writeState("removed-add-pending");
+  }
+
+  // Add the recorded target generation and verify it landed healthy.
+  const addResult = await runDshCommand([
+    "plugin", "--profile", profile, "add", targetGenerationDir,
+  ], { ...options, commandInfo: pnpmRuntime.commandInfo });
+  if (addResult.code !== 0) {
+    await writeInspectionLatch(
+      "repair-add-failed",
+      (addResult.stderr || addResult.stdout || "dsh plugin add failed during repair").trim(),
+      scoped
+    );
+    return {
+      status: "error",
+      reason: "repair-add-failed",
+      message: "dsh plugin add failed during repair; the operation record is kept for a retry",
+    };
+  }
+  const after = await inspectDeepSeekHarnessIntegration({
+    ...scoped,
+    commandInfo,
+    expectedHashes: { [contract.supportedDshRange]: targetBundleHash },
+  });
+  if (after.status !== "healthy" || !after.marker || after.marker.bundleHash !== targetBundleHash) {
+    await writeInspectionLatch("repair-add-verification-failed", after.status, scoped);
+    return {
+      status: "error",
+      reason: "repair-add-verification-failed",
+      healthReason: after.status,
+      message: "dsh plugin add completed but the repaired bridge did not verify healthy",
+      manualInspectionRequired: true,
+    };
+  }
+
+  // Converge: clear the record first, then the old generation can be collected.
+  try { await clearRepairOperation(scoped); } catch {}
+  if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
+  await cleanUnreferencedGenerations(targetBundleHash, options);
+  const latch = await readInspectionLatch(scoped);
+  if (latch) await clearInspectionLatch(scoped);
+  if (!silent) console.log(`Clawd: DeepSeek Harness ${profile} repair ready (${targetBundleHash.slice(0, 12)})`);
+  const success = {
+    status: "ok",
+    updated: true,
+    generation: targetGenerationDir,
+    health: after,
+    message: dshSuccessMessage(profile),
+  };
+  if (profile === DESKTOP_PROFILE_NAME) {
+    success.firstInstall = false;
+    // A repair replaces the profile link target, which the desktop app only
+    // observes on restart.
+    success.restartRequired = true;
+  }
+  return success;
+}
+
 async function syncDshProfile(options, target) {
   const profile = target.profile;
   const scoped = { ...options, profile };
@@ -3462,7 +3850,11 @@ async function syncDshProfile(options, target) {
     if (manualReference && manualReference.invalid) {
       return manualGenerationReferenceResult(manualReference, scoped);
     }
-    if (!hasMutableManagedState(before)) {
+    // A pending repair record bypasses the ordinary ownership/version fast
+    // paths so the repair resume logic runs under the lock.
+    const pendingRecord = operation !== "startup-sync" ? await readRepairOperation(scoped) : null;
+    if (pendingRecord && pendingRecord.invalid) return repairRecordResult(pendingRecord, scoped);
+    if (!pendingRecord && !hasMutableManagedState(before)) {
       return {
         status: "error",
         reason: before.status || "ownership-not-proven",
@@ -3574,19 +3966,36 @@ async function syncDshProfile(options, target) {
           });
           await writeManualGenerationReference(generation, options);
           await cleanUnreferencedGenerations(generation.bundleHash, options);
-          return {
-            status: "error",
-            reason: "cli-unavailable",
-            message: "DeepSeek Harness was detected, but a global dsh CLI is not available",
-            manualCommand: buildManualDshCommand([
+          // A disabled plugin needs remove-then-add; give both commands, pinned
+          // to the same artifact and DSH_HOME.
+          const commands = [];
+          if (before.status === "profile-entry-incomplete") {
+            commands.push(buildManualDshCommand([
               "npx",
               noCliContract.verifiedDshArtifact,
               "plugin",
               "--profile",
               profile,
-              "add",
-              generation.generationDir,
-            ], options),
+              "remove",
+              BRIDGE_PACKAGE_NAME,
+            ], options));
+          }
+          commands.push(buildManualDshCommand([
+            "npx",
+            noCliContract.verifiedDshArtifact,
+            "plugin",
+            "--profile",
+            profile,
+            "add",
+            generation.generationDir,
+          ], options));
+          return {
+            status: "error",
+            reason: "cli-unavailable",
+            message: before.status === "profile-entry-incomplete"
+              ? "DeepSeek Harness was detected, but a global dsh CLI is not available; remove then add the plugin manually"
+              : "DeepSeek Harness was detected, but a global dsh CLI is not available",
+            manualCommand: commands.join("\n"),
             manualGenerationReferenced: true,
           };
         } finally {
@@ -3609,14 +4018,15 @@ async function syncDshProfile(options, target) {
     const contract = dshTargetContract(family, dshVersion);
     const bundle = await readSourceBundle({ ...scoped, contract });
     if (
-      !latch
+      !pendingRecord
+      && !latch
       && !manualReference
       && before.status === "healthy"
       && before.marker.bundleHash === bundle.bundleHash
     ) {
       return { status: "ok", updated: false, health: before, message: dshSuccessMessage(profile) };
     }
-    if (before.owned && before.marker && before.marker.bundleHash !== bundle.bundleHash) {
+    if (!pendingRecord && before.owned && before.marker && before.marker.bundleHash !== bundle.bundleHash) {
       const order = compareVersions(before.marker.sourceClawdVersion, currentVersion);
       if (order === 1) {
         return { status: "skipped", reason: "newer-managed-generation", message: "A newer Clawd bridge generation is already installed" };
@@ -3648,6 +4058,27 @@ async function syncDshProfile(options, target) {
           expectedVersion: dshVersion,
           supportedRange: supportedDshRangeLabel(),
         };
+      }
+      // Explicit operations resume or start the two-step repair; startup sync
+      // never does (the role already reports repair-pending).
+      if (operation !== "startup-sync") {
+        const operationRecord = await readRepairOperation(scoped);
+        if (operationRecord && operationRecord.invalid) {
+          return repairRecordResult(operationRecord, scoped);
+        }
+        const ourIncomplete = locked.owned && locked.status === "profile-entry-incomplete";
+        if (operationRecord || ourIncomplete) {
+          const repairPnpm = await resolvePnpmRuntime(commandInfo, options);
+          if (!repairPnpm.available) {
+            return { status: "error", reason: "pnpm-unavailable", message: "pnpm is required by dsh plugin repair" };
+          }
+          return await repairDisabledDshProfile(options, scoped, locked, operationRecord, {
+            commandInfo,
+            pnpmRuntime: repairPnpm,
+            silent,
+            hostVersion: lockedVersion,
+          });
+        }
       }
       if (!hasMutableManagedState(locked)) {
         return {
@@ -3796,6 +4227,7 @@ async function uninstallDshProfile(options, target) {
           }
           if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
           await cleanUnreferencedGenerations(null, options);
+          try { await clearRepairOperation(scoped); } catch {}
           return { status: "skipped", reason: "bridge-not-installed" };
         } finally {
           await lock.release();
@@ -3839,6 +4271,7 @@ async function uninstallDshProfile(options, target) {
         if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
         await cleanUnreferencedGenerations(null, options);
         if (lockedLatch) await clearInspectionLatch(scoped);
+        try { await clearRepairOperation(scoped); } catch {}
         return { status: "skipped", reason: "bridge-not-installed" };
       } finally {
         await lock.release();
@@ -4046,6 +4479,7 @@ async function uninstallDshProfile(options, target) {
       if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
       await cleanUnreferencedGenerations(null, options);
       if (lockedLatch) await clearInspectionLatch(scoped);
+      try { await clearRepairOperation(scoped); } catch {}
       return { status: "ok", removed: true, updated: true };
     } finally {
       await lock.release();
@@ -4182,10 +4616,39 @@ async function dshDiagnoseResult(target, options, kind) {
       reason: "repair-required",
       message: `DeepSeek Harness ${profile} profile is missing; use Settings Repair to initialize it`,
     };
+  } else if (
+    (reason === "registration-unknown" || reason === "foreign-package" || reason === "integrity-failed")
+    && target.evidence
+    && target.evidence.operationRecord === "present"
+  ) {
+    // A repair was in progress; a foreign or unprovable package must not be
+    // "repaired" from the record alone, so report and keep the record.
+    result = {
+      status: "error",
+      reason: "repair-needs-inspection",
+      message: "A DeepSeek Harness repair is in progress but this profile is now owned by something else or cannot be confirmed; manual inspection is required",
+      repairPath: repairOperationPath(scoped),
+      manualInspectionRequired: true,
+    };
   } else if (reason === "foreign-package" || reason === "integrity-failed" || reason === "registration-unknown"
     || reason === "profile-corrupt" || reason === "profile-unreadable" || reason === "profile-symlink"
     || reason === "source-unavailable") {
     result = dshOwnershipFailureResult(target, profile, kind);
+  } else if (reason === "repair-record-invalid" || reason === "repair-record-unreadable") {
+    result = {
+      status: "error",
+      reason,
+      message: "The DeepSeek Harness repair operation record cannot be used; manual inspection is required",
+      repairPath: repairOperationPath(scoped),
+      manualInspectionRequired: true,
+    };
+  } else if (reason === "repair-pending") {
+    result = {
+      status: "error",
+      reason: "repair-pending",
+      message: "A DeepSeek Harness two-step repair is pending; use Settings Repair to resume it",
+      repairPath: repairOperationPath(scoped),
+    };
   } else {
     // desktop-only reasons plus carrier-failed / version-invalid keep the role code.
     result = { status: "error", reason, message: dshDiagnoseMessage(target) };
@@ -4483,6 +4946,10 @@ module.exports = {
     readDshVersion,
     resolveDshTargetCarrier,
     resolveDshWebTarget,
+    repairOperationPath,
+    readRepairOperation,
+    writeRepairOperation,
+    clearRepairOperation,
     DSH_WINDOWS_REGISTRY_SCRIPT,
     DSH_WRITE_TIMEOUT_MS,
     DSH_NPM_VERSION_TIMEOUT_MS,
