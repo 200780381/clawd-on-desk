@@ -3263,6 +3263,12 @@ function dshSuccessMessage(profile) {
   return profile === DESKTOP_PROFILE_NAME ? DSH_DESKTOP_RESTART_HINT : DSH_RESTART_HINT;
 }
 
+function dshCleanupPausedWarning(cleanup) {
+  return cleanup && cleanup.paused
+    ? `old plugin files were kept because the shared cleanup is paused (${cleanup.reason})`
+    : null;
+}
+
 function repairRecordResult(record, scoped) {
   return {
     status: "error",
@@ -3464,11 +3470,14 @@ async function cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch
   if ((options.profile || WEB_PROFILE_NAME) === WEB_PROFILE_NAME) {
     await clearManualGenerationReference(options);
   }
-  await cleanUnreferencedGenerations(null, options);
+  // Clear this side's resolved latch and record first, so they do not pause the
+  // shared cleanup they themselves just satisfied.
   if (lockedLatch) await clearInspectionLatch(options);
   // Registration is gone, so a pending repair record no longer protects anything.
   try { await clearRepairOperation(options); } catch {}
-  return { status: "ok", removed: true, updated: true };
+  const generationCleanup = await cleanUnreferencedGenerations(null, options);
+  const warning = dshCleanupPausedWarning(generationCleanup);
+  return { status: "ok", removed: true, updated: true, ...(warning ? { warnings: [warning] } : {}) };
 }
 
 function healthFingerprint(health) {
@@ -3500,16 +3509,80 @@ function compareVersions(left, right) {
   return 0;
 }
 
+// The generations/ tree is shared by both profiles, so any unresolved state on
+// either side pauses deletion of every generation. Returns a short reason code
+// or null. This never blocks that side's own install/verify work.
+async function dshGenerationCleanupBlocker(options = {}) {
+  const dshHome = options.dshHome || resolveDshHome(options.env);
+  const profilesDir = path.join(dshHome, "profiles");
+  // 1. profiles/ unreadable (missing is fine: there is nothing to protect).
+  try {
+    if (options.__testKeepaliveHooks && options.__testKeepaliveHooks.readdirProfilesError) {
+      throw options.__testKeepaliveHooks.readdirProfilesError;
+    }
+    await fsp.readdir(profilesDir, { withFileTypes: true });
+  } catch (err) {
+    if (!(err && err.code === "ENOENT")) return "profiles-unreadable";
+  }
+  for (const profileName of DSH_PROFILE_NAMES) {
+    const scoped = { ...options, profile: profileName };
+    const profileDir = resolveDshProfileDir(dshHome, profileName);
+    // 2. A symlinked profile directory cannot be trusted to identify its own package.
+    let stat;
+    try {
+      stat = await fsp.lstat(profileDir);
+    } catch (err) {
+      if (err && err.code === "ENOENT") stat = null;
+      else return `${profileName}:profile-unreadable`;
+    }
+    if (stat && stat.isSymbolicLink()) return `${profileName}:profile-symlink`;
+    // 3. A present but unreadable or unparseable manifest is unresolved state.
+    const manifestPath = path.join(profileDir, "package.json");
+    let raw = null;
+    try {
+      raw = await fsp.readFile(manifestPath, "utf8");
+    } catch (err) {
+      if (!(err && err.code === "ENOENT")) return `${profileName}:manifest-unreadable`;
+    }
+    if (raw !== null) {
+      try {
+        JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+      } catch {
+        return `${profileName}:manifest-invalid`;
+      }
+    }
+    // 4. Interrupted profile-link removal or an unreadable residue directory.
+    const residues = await listManagedProfileRemovalResidues(scoped);
+    if (residues.unreadableError) return `${profileName}:residue-unreadable`;
+    if (residues.paths.length) return `${profileName}:removal-residue`;
+    // 5. A single inspection record, valid or not, fences the shared cleanup
+    // until that side's target is re-verified and the record is cleared.
+    if (await readInspectionLatch(scoped)) return `${profileName}:inspection-latch`;
+    // 6. A broken repair record cannot be used to keep generations alive.
+    const record = await readRepairOperation(scoped);
+    if (record && record.invalid) return `${profileName}:${record.reason}`;
+  }
+  // 7. The web manual reference anchor is web-owned; unresolved means pause.
+  const manualReference = await readManualGenerationReference(options);
+  if (manualReference && manualReference.invalid) {
+    const unreadable = manualReference.reason === "reference-directory-unreadable"
+      || manualReference.reason === "reference-unreadable";
+    return `web:${unreadable ? "manual-reference-unreadable" : "manual-reference-invalid"}`;
+  }
+  return null;
+}
+
 async function cleanUnreferencedGenerations(activeHash, options = {}) {
-  const removalResidues = await listManagedProfileRemovalResidues(options);
-  if (removalResidues.unreadableError || removalResidues.paths.length) return;
+  const blocked = await dshGenerationCleanupBlocker(options);
+  if (blocked) return { paused: true, reason: blocked };
   const generationsDir = path.join(resolveManagedRoot(options), "generations");
   let entries;
   try {
     entries = await fsp.readdir(generationsDir, { withFileTypes: true });
   } catch {
-    return;
+    return { paused: false, removed: [] };
   }
+  const removed = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === activeHash || entry.name.startsWith(".staging-")) continue;
     const candidate = path.join(generationsDir, entry.name);
@@ -3517,7 +3590,9 @@ async function cleanUnreferencedGenerations(activeHash, options = {}) {
     if (!marker || marker.owner !== MANAGED_OWNER || marker.bundleHash !== entry.name) continue;
     if (await isGenerationReferenced(candidate, options)) continue;
     await fsp.rm(candidate, { recursive: true, force: false });
+    removed.push(entry.name);
   }
+  return { paused: false, removed };
 }
 
 function isPathWithin(candidate, parent) {
@@ -3528,8 +3603,6 @@ function isPathWithin(candidate, parent) {
 }
 
 async function isGenerationReferenced(generationDir, options = {}) {
-  const removalResidues = await listManagedProfileRemovalResidues(options);
-  if (removalResidues.unreadableError || removalResidues.paths.length) return true;
   const manualReference = await readManualGenerationReference(options);
   // An invalid anchor has lost the information needed to identify its one
   // protected generation. Conservatively retain every generation until the
@@ -3544,7 +3617,8 @@ async function isGenerationReferenced(generationDir, options = {}) {
       options.platform
     )
   ) return true;
-  // A pending two-step repair keeps its target generation alive.
+  // A pending two-step repair keeps its target generation alive; both profiles
+  // share the managed namespace.
   if (await repairRecordReferencesGeneration(generationDir, options)) return true;
   const dshHome = options.dshHome || resolveDshHome(options.env);
   const profilesDir = path.join(dshHome, "profiles");
@@ -3572,8 +3646,11 @@ async function isGenerationReferenced(generationDir, options = {}) {
   }
   // The shared profiles/node_modules tree is DSH's application dependency
   // closure, not a Clawd ownership anchor. A flat fallback must not retain a
-  // generation after the real profile reference is gone.
-  for (const root of [resolveDshProfileDir(dshHome)]) {
+  // generation after the real profile reference is gone. Check both profiles.
+  for (const root of [
+    resolveDshProfileDir(dshHome, WEB_PROFILE_NAME),
+    resolveDshProfileDir(dshHome, DESKTOP_PROFILE_NAME),
+  ]) {
     const manifestPath = packagePath(root, BRIDGE_PACKAGE_NAME);
     try {
       const realPackageDir = path.dirname(await fsp.realpath(manifestPath));
@@ -3589,17 +3666,20 @@ async function isGenerationReferenced(generationDir, options = {}) {
 }
 
 async function discardCreatedGenerationIfUnreferenced(generation, _health, options = {}) {
-  if (!generation || generation.created !== true) return;
+  if (!generation || generation.created !== true) return { paused: false };
+  const blocked = await dshGenerationCleanupBlocker(options);
+  if (blocked) return { paused: true, reason: blocked };
   const generationsDir = path.join(resolveManagedRoot(options), "generations");
   const candidate = path.resolve(generation.generationDir);
-  if (!candidate.startsWith(`${path.resolve(generationsDir)}${path.sep}`)) return;
+  if (!candidate.startsWith(`${path.resolve(generationsDir)}${path.sep}`)) return { paused: false };
   const marker = await readJson(path.join(candidate, MANIFEST_FILE));
-  if (!marker || marker.owner !== MANAGED_OWNER || marker.bundleHash !== generation.bundleHash) return;
+  if (!marker || marker.owner !== MANAGED_OWNER || marker.bundleHash !== generation.bundleHash) return { paused: false };
   // Inspect the exact generation rather than trusting a health record that may
   // describe the previous managed version. A manifest row referencing this
   // candidate counts even when pnpm did not materialize the package yet.
-  if (await isGenerationReferenced(candidate, options)) return;
+  if (await isGenerationReferenced(candidate, options)) return { paused: false };
   await fsp.rm(candidate, { recursive: true, force: false });
+  return { paused: false, removed: true };
 }
 
 // Explicit two-step repair for a plugin DSH disabled (dependency present, bundle
@@ -3661,9 +3741,9 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
   // "Already healthy and exactly the recorded target" converges without touching DSH.
   if (healthyTarget) {
     try { await clearRepairOperation(scoped); } catch {}
-    await cleanUnreferencedGenerations(targetBundleHash, options);
     const latch = await readInspectionLatch(scoped);
     if (latch) await clearInspectionLatch(scoped);
+    await cleanUnreferencedGenerations(targetBundleHash, options);
     return { status: "ok", updated: false, health: locked, message: dshSuccessMessage(profile) };
   }
 
@@ -3793,12 +3873,13 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
     };
   }
 
-  // Converge: clear the record first, then the old generation can be collected.
+  // Converge: clear the record and this side's latch first, then the old
+  // generation can be collected.
   try { await clearRepairOperation(scoped); } catch {}
   if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
-  await cleanUnreferencedGenerations(targetBundleHash, options);
   const latch = await readInspectionLatch(scoped);
   if (latch) await clearInspectionLatch(scoped);
+  await cleanUnreferencedGenerations(targetBundleHash, options);
   if (!silent) console.log(`Clawd: DeepSeek Harness ${profile} repair ready (${targetBundleHash.slice(0, 12)})`);
   const success = {
     status: "ok",
@@ -4093,11 +4174,12 @@ async function syncDshProfile(options, target) {
       }
       const lockedLatch = await readInspectionLatch(scoped);
       if (locked.status === "healthy" && locked.marker.bundleHash === bundle.bundleHash) {
+        // Clear this side's latch before cleanup so it does not pause it.
+        if (lockedLatch) await clearInspectionLatch(scoped);
         if (manualReference) {
           await clearManualGenerationReference(options);
           await cleanUnreferencedGenerations(locked.marker.bundleHash, options);
         }
-        if (lockedLatch) await clearInspectionLatch(scoped);
         return { status: "ok", updated: false, health: locked, message: dshSuccessMessage(profile) };
       }
       const pnpmRuntime = await resolvePnpmRuntime(commandInfo, options);
@@ -4163,8 +4245,9 @@ async function syncDshProfile(options, target) {
         };
       }
       if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
-      await cleanUnreferencedGenerations(generation.bundleHash, options);
+      // Clear this side's latch before cleanup so it does not pause it.
       if (lockedLatch) await clearInspectionLatch(scoped);
+      await cleanUnreferencedGenerations(generation.bundleHash, options);
       if (!silent) console.log(`Clawd: DeepSeek Harness ${profile} bridge ready (${generation.bundleHash.slice(0, 12)})`);
       const success = {
         status: "ok",
@@ -4226,9 +4309,10 @@ async function uninstallDshProfile(options, target) {
             };
           }
           if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
-          await cleanUnreferencedGenerations(null, options);
           try { await clearRepairOperation(scoped); } catch {}
-          return { status: "skipped", reason: "bridge-not-installed" };
+          const cleanup = await cleanUnreferencedGenerations(null, options);
+          const warning = dshCleanupPausedWarning(cleanup);
+          return { status: "skipped", reason: "bridge-not-installed", ...(warning ? { warnings: [warning] } : {}) };
         } finally {
           await lock.release();
         }
@@ -4269,10 +4353,11 @@ async function uninstallDshProfile(options, target) {
         }
         const lockedLatch = await readInspectionLatch(scoped);
         if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
-        await cleanUnreferencedGenerations(null, options);
         if (lockedLatch) await clearInspectionLatch(scoped);
         try { await clearRepairOperation(scoped); } catch {}
-        return { status: "skipped", reason: "bridge-not-installed" };
+        const cleanup = await cleanUnreferencedGenerations(null, options);
+        const warning = dshCleanupPausedWarning(cleanup);
+        return { status: "skipped", reason: "bridge-not-installed", ...(warning ? { warnings: [warning] } : {}) };
       } finally {
         await lock.release();
       }
@@ -4477,10 +4562,12 @@ async function uninstallDshProfile(options, target) {
         };
       }
       if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
-      await cleanUnreferencedGenerations(null, options);
+      // Clear this side's resolved latch and record before the shared cleanup.
       if (lockedLatch) await clearInspectionLatch(scoped);
       try { await clearRepairOperation(scoped); } catch {}
-      return { status: "ok", removed: true, updated: true };
+      const cleanup = await cleanUnreferencedGenerations(null, options);
+      const warning = dshCleanupPausedWarning(cleanup);
+      return { status: "ok", removed: true, updated: true, ...(warning ? { warnings: [warning] } : {}) };
     } finally {
       await lock.release();
     }
@@ -4749,6 +4836,10 @@ function summarizeDshUninstallResults(entries) {
   let firstUnconfirmed = null;
   const warnings = [];
   for (const entry of participants) {
+    // A successful/skipped target can still carry warnings (e.g. cleanup paused).
+    if (entry.result && Array.isArray(entry.result.warnings)) {
+      for (const line of entry.result.warnings) warnings.push(`${entry.profile}: ${line}`);
+    }
     const outcome = dshOutcome(entry.result);
     if (outcome === "success" || (entry.result && entry.result.status === "skipped")) continue;
     warnings.push(dshFailureWarning(entry));
