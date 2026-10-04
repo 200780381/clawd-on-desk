@@ -90,6 +90,13 @@ const VERIFIED_DSH_ARTIFACT = VERIFIED_DSH_ARTIFACTS[0].artifact;
 const VERIFIED_DSH_ARTIFACT_INTEGRITY = VERIFIED_DSH_ARTIFACTS[0].integrity;
 const SOURCE_AUDIT_BASELINE_COMMIT = "47f943859bef60e4160492346772ded9b24f765a";
 const DEFAULT_OPERATION_TIMEOUT_MS = 120000;
+// plugin add/remove must outlast the upstream write lock, whose wait ceiling is
+// 120s, so Clawd does not kill dsh while it is still queued for the lock.
+const DSH_WRITE_TIMEOUT_MS = 300000;
+const DSH_NPM_VERSION_TIMEOUT_MS = 5000;
+// Electron cold starts are slower than a plain Node CLI.
+const DSH_DESKTOP_VERSION_TIMEOUT_MS = 15000;
+const DSH_WINDOWS_POWERSHELL_TIMEOUT_MS = 10000;
 const MUTATION_LOCK_SCHEMA_VERSION = 2;
 const MUTATION_LOCK_STALE_MULTIPLIER = 2;
 const MAX_MUTATION_LOCK_OPERATION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -395,14 +402,17 @@ function buildPosixCommandEnv(options = {}, commandInfo = null, executables = []
 }
 
 function commandExecutionOptions(commandInfo, options = {}) {
-  if (!commandInfo || !commandInfo.env) return options;
-  return {
-    ...options,
-    env: {
+  if (!commandInfo || (!commandInfo.env && !commandInfo.cwd)) return options;
+  const next = { ...options };
+  if (commandInfo.env) {
+    next.env = {
       ...(options.env || process.env),
       ...commandInfo.env,
-    },
-  };
+    };
+  }
+  // A caller-provided cwd wins; otherwise use the command's own cwd.
+  if (options.cwd === undefined && commandInfo.cwd) next.cwd = commandInfo.cwd;
+  return next;
 }
 
 function expandShimCandidate(candidate, shim, platform) {
@@ -473,6 +483,23 @@ async function resolveDshCommand(options = {}) {
     let realBin = bin;
     try { realBin = await fsp.realpath(bin); } catch {}
     const normalized = realBin.replace(/\\/g, "/");
+    // On macOS "Manage dsh Command" symlinks /usr/local/bin/dsh to the app
+    // launcher; reuse the verified desktop carrier instead of the generic path.
+    const desktopAppRoot = desktopAppRootForLauncher(realBin);
+    if (desktopAppRoot) {
+      const bundle = readDesktopBundleSync(options.fs || fs, desktopAppRoot);
+      if (bundle.ok) {
+        const desktop = desktopCommandInfo({
+          status: "found",
+          appRoot: desktopAppRoot,
+          launcherPath: bundle.launcherPath,
+          staticVersion: bundle.staticVersion,
+          checkedPaths: [desktopAppRoot],
+          reason: null,
+        }, options);
+        if (desktop.commandInfo) return desktop.commandInfo;
+      }
+    }
     let binJs = normalized.endsWith("/lib/bin.js") ? realBin : null;
     if (!binJs) {
       const parsed = await readShimBinCandidates(bin, platform);
@@ -493,6 +520,13 @@ async function resolveDshCommand(options = {}) {
   }
   const shims = await whereCommands("dsh", options);
   if (shims.length === 0) return null;
+  // When the first PATH entry is the desktop dsh.cmd, web reuses that verified
+  // carrier. A later dsh.cmd is not trusted here; a first npm shim keeps the
+  // existing behavior below.
+  if (path.win32.basename(shims[0]).toLowerCase() === DSH_DESKTOP_CMD_NAME) {
+    const desktop = parseDesktopDshCmd(shims[0], options);
+    if (desktop.commandInfo) return desktop.commandInfo;
+  }
   const candidates = [];
   for (const shim of shims) {
     candidates.push(path.join(path.dirname(shim), "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js"));
@@ -509,6 +543,125 @@ async function resolveDshCommand(options = {}) {
   const executable = shims.find((shim) => /\.exe$/i.test(shim));
   if (executable) return { command: executable, prefixArgs: [], installRoot: null };
   return null;
+}
+
+const DSH_DESKTOP_CMD_NAME = "dsh.cmd";
+const DSH_DESKTOP_LAUNCHER_POSIX_SUFFIX = "/Contents/Resources/runtime/cli/bin/dsh";
+// Upstream's apps/desktop/cli/dsh.cmd, line for line. It is strict on purpose:
+// Clawd runs the exe directly instead of going through cmd.exe, where % ^ & "
+// in user-supplied arguments would be unsafe.
+const DSH_DESKTOP_CMD_TEMPLATE = Object.freeze([
+  "@echo off",
+  "setlocal DisableDelayedExpansion",
+  'set "ELECTRON_RUN_AS_NODE=1"',
+  '"%~dp0..\\..\\..\\..\\DeepSeek Harness.exe" --expose-internals "%~dp0..\\..\\..\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" %*',
+  "exit /b %errorlevel%",
+]);
+const DSH_DESKTOP_CMD_EXE_RELATIVE = "..\\..\\..\\..\\DeepSeek Harness.exe";
+const DSH_DESKTOP_CMD_CLI_RELATIVE = "..\\..\\..\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js";
+
+function desktopCommandCwd(options = {}) {
+  return typeof options.homeDir === "string" && options.homeDir.trim()
+    ? options.homeDir
+    : os.homedir();
+}
+
+// A desktop child is Electron run as Node. Inherited ELECTRON_* variables and
+// NODE_OPTIONS can change how it boots, so drop them and set the one flag the
+// bundled CLI needs. DSH_HOME is intentionally carried through unchanged.
+function buildDesktopCommandEnv(options = {}) {
+  const platform = options.platform || process.platform;
+  const source = options.env || process.env;
+  const env = {};
+  for (const key of Object.keys(source)) {
+    if (platform === "win32") {
+      const upper = key.toUpperCase();
+      if (upper.startsWith("ELECTRON_") || upper === "NODE_OPTIONS") continue;
+    } else if (key.startsWith("ELECTRON_") || key === "NODE_OPTIONS") {
+      continue;
+    }
+    env[key] = source[key];
+  }
+  env.ELECTRON_RUN_AS_NODE = "1";
+  return env;
+}
+
+function desktopLauncherCommandInfo(launcherPath, options = {}) {
+  return {
+    command: launcherPath,
+    prefixArgs: [],
+    installRoot: null,
+    env: buildDesktopCommandEnv(options),
+    cwd: desktopCommandCwd(options),
+    kind: "desktop",
+    bundledPackageManager: true,
+  };
+}
+
+function desktopAppRootForLauncher(launcherPath) {
+  const normalized = String(launcherPath || "").replace(/\\/g, "/");
+  if (!normalized.endsWith(DSH_DESKTOP_LAUNCHER_POSIX_SUFFIX)) return null;
+  const appRoot = normalized.slice(0, -DSH_DESKTOP_LAUNCHER_POSIX_SUFFIX.length);
+  return appRoot || null;
+}
+
+// Read the Windows launcher by comparing it to the one known template, then
+// compute the exe and cli.js paths. app.asar contents are invisible to a plain
+// Node process, so cli.js is never fs-checked; only the exe is.
+function parseDesktopDshCmd(cmdPath, options = {}) {
+  const fsImpl = options.fs || fs;
+  let raw;
+  try {
+    raw = fsImpl.readFileSync(cmdPath, "utf8");
+  } catch {
+    return { commandInfo: null, reason: "launcher-unrecognized" };
+  }
+  const lines = String(raw)
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""));
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length !== DSH_DESKTOP_CMD_TEMPLATE.length) {
+    return { commandInfo: null, reason: "launcher-unrecognized" };
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] !== DSH_DESKTOP_CMD_TEMPLATE[index]) {
+      return { commandInfo: null, reason: "launcher-unrecognized" };
+    }
+  }
+  const binDir = path.win32.dirname(cmdPath);
+  const command = path.win32.normalize(path.win32.join(binDir, DSH_DESKTOP_CMD_EXE_RELATIVE));
+  const cliJs = path.win32.normalize(path.win32.join(binDir, DSH_DESKTOP_CMD_CLI_RELATIVE));
+  let exeStat = null;
+  try { exeStat = fsImpl.statSync(command); } catch {}
+  if (!exeStat || !exeStat.isFile()) {
+    return { commandInfo: null, reason: "launcher-target-missing" };
+  }
+  return {
+    commandInfo: {
+      command,
+      prefixArgs: ["--expose-internals", cliJs],
+      installRoot: null,
+      env: buildDesktopCommandEnv(options),
+      cwd: desktopCommandCwd(options),
+      kind: "desktop",
+      bundledPackageManager: true,
+    },
+    reason: null,
+  };
+}
+
+// The desktop launcher is Clawd's verified desktop carrier. Success returns the
+// resolveDshCommand shape plus kind / bundledPackageManager; failure returns no
+// commandInfo and a launcher-* reason for the caller to report.
+function desktopCommandInfo(discovery, options = {}) {
+  if (!discovery || discovery.status !== "found") {
+    return { commandInfo: null, reason: "launcher-missing" };
+  }
+  if ((options.platform || process.platform) === "win32") {
+    return parseDesktopDshCmd(discovery.launcherPath, options);
+  }
+  return { commandInfo: desktopLauncherCommandInfo(discovery.launcherPath, options), reason: null };
 }
 
 // Pick the whole version token out of raw command output. Only a line that is
@@ -688,15 +841,51 @@ function dshTargetContract(family, installedVersion) {
   };
 }
 
+function dshVersionTimeoutMs(commandInfo) {
+  return commandInfo && commandInfo.kind === "desktop"
+    ? DSH_DESKTOP_VERSION_TIMEOUT_MS
+    : DSH_NPM_VERSION_TIMEOUT_MS;
+}
+
 async function readDshVersion(commandInfo, options = {}) {
   if (typeof options.dshVersion === "string") return parseDshVersion(options.dshVersion);
   if (!commandInfo) return null;
   const result = await runCommand(commandInfo.command, [...commandInfo.prefixArgs, "--version"], {
     ...commandExecutionOptions(commandInfo, options),
-    timeoutMs: 5000,
+    timeoutMs: dshVersionTimeoutMs(commandInfo),
   });
   if (result.code !== 0) return null;
   return parseDshVersion(`${result.stdout}\n${result.stderr}`);
+}
+
+// Operation-mode carrier probe. The three failure kinds stay separate so the
+// caller can report "could not run it", "the output was not a version" and
+// "the version is not admitted" as distinct reasons.
+async function probeDshCarrier(commandInfo, options = {}) {
+  if (!commandInfo) return { status: "failed", reason: "carrier-failed", detail: "no dsh command" };
+  const result = await runCommand(commandInfo.command, [...commandInfo.prefixArgs, "--version"], {
+    ...commandExecutionOptions(commandInfo, options),
+    timeoutMs: dshVersionTimeoutMs(commandInfo),
+  });
+  if (result.code !== 0 || result.timedOut || result.signal) {
+    return {
+      status: "failed",
+      reason: "carrier-failed",
+      detail: (result.stderr || result.stdout || "dsh --version failed").trim(),
+    };
+  }
+  const version = parseDshVersion(`${result.stdout}\n${result.stderr}`);
+  if (!version) {
+    return {
+      status: "failed",
+      reason: "version-invalid",
+      detail: (result.stdout || result.stderr || "").trim(),
+    };
+  }
+  if (!isSupportedDshVersion(version)) {
+    return { status: "failed", reason: "version-unsupported", version };
+  }
+  return { status: "available", version };
 }
 
 async function hasDshCommand(options = {}) {
@@ -705,12 +894,16 @@ async function hasDshCommand(options = {}) {
   if (!command) return false;
   const result = await runCommand(command.command, [...command.prefixArgs, "--version"], {
     ...commandExecutionOptions(command, options),
-    timeoutMs: 5000,
+    timeoutMs: dshVersionTimeoutMs(command),
   });
   return result.code === 0;
 }
 
 async function resolvePnpmRuntime(commandInfo, options = {}) {
+  // The desktop CLI bundles its own package manager, so no global pnpm needed.
+  if (commandInfo && commandInfo.bundledPackageManager) {
+    return { available: true, commandInfo };
+  }
   if (typeof options.pnpmAvailable === "boolean") {
     return { available: options.pnpmAvailable, commandInfo };
   }
@@ -754,10 +947,11 @@ async function runDshCommand(args, options = {}) {
     }
     const command = await resolveDshCommand(options);
     if (!command) return { code: 127, stdout: "", stderr: "dsh command is not available" };
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DSH_WRITE_TIMEOUT_MS;
     return runCommand(
       command.command,
       [...command.prefixArgs, ...args],
-      commandExecutionOptions(command, options),
+      { ...commandExecutionOptions(command, options), timeoutMs },
     );
   } catch (err) {
     return {
@@ -1408,9 +1602,248 @@ async function inspectDeepSeekHarnessIntegration(options = {}) {
 const DSH_DESKTOP_BUNDLE_ID = "com.deepseek.dsh";
 const DSH_DESKTOP_APP_NAME = "DeepSeek Harness.app";
 const DSH_DESKTOP_LAUNCHER_RELATIVE = "Contents/Resources/runtime/cli/bin/dsh";
-const DESKTOP_DISCOVERY_WINDOWS_REASON = "windows-discovery-not-implemented";
+const DSH_DESKTOP_EXE_NAME = "DeepSeek Harness.exe";
 const DESKTOP_DISCOVERY_UNSUPPORTED_REASON = "unsupported-platform";
 const DESKTOP_DISCOVERY_UNCONFIRMED_REASON = "app-bundle-unconfirmed";
+const DESKTOP_DISCOVERY_REGISTRY_REASON = "registry-unreadable";
+const DESKTOP_DISCOVERY_AMBIGUOUS_REASON = "multiple-desktop-installs";
+
+// Read HKCU with PowerShell instead of reg.exe: reg.exe's output encoding
+// follows the console code page, so non-ASCII install paths come back garbled,
+// while PowerShell can emit UTF-8 JSON and expands REG_EXPAND_SZ for free.
+// Any read error exits non-zero and the caller reports unknown, so a partial
+// registry view is never mistaken for "no desktop install".
+const DSH_WINDOWS_REGISTRY_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "try {",
+  "  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+  "  $uninstallRoot = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall'",
+  "  $entries = @()",
+  "  if (Test-Path -LiteralPath $uninstallRoot) {",
+  "    foreach ($key in Get-ChildItem -LiteralPath $uninstallRoot) {",
+  "      $props = Get-ItemProperty -LiteralPath $key.PSPath",
+  "      if ($props.DisplayName -is [string] -and $props.DisplayName.StartsWith('DeepSeek Harness ')) {",
+  "        $guid = $key.PSChildName",
+  "        $guidInstall = $null",
+  "        $guidPath = 'HKCU:\\Software\\' + $guid",
+  "        if (Test-Path -LiteralPath $guidPath) { $guidInstall = (Get-ItemProperty -LiteralPath $guidPath).InstallLocation }",
+  "        $entries += [pscustomobject]@{ guid = $guid; displayName = $props.DisplayName; displayVersion = $props.DisplayVersion; installLocation = $props.InstallLocation; guidInstallLocation = $guidInstall }",
+  "      }",
+  "    }",
+  "  }",
+  "  $commandDirectory = $null",
+  "  $commandPath = 'HKCU:\\Software\\DeepSeekHarness\\Command'",
+  "  if (Test-Path -LiteralPath $commandPath) { $commandDirectory = (Get-ItemProperty -LiteralPath $commandPath).Directory }",
+  "  [pscustomobject]@{ uninstall = @($entries); commandDirectory = $commandDirectory } | ConvertTo-Json -Depth 6 -Compress",
+  "  exit 0",
+  "} catch {",
+  "  exit 1",
+  "}",
+].join("\n");
+
+// Only the async entry point fills this. Static discovery just reads it, so a
+// synchronous Doctor / detector call can never spawn PowerShell.
+let windowsRegistryCache = { key: null, snapshot: null };
+
+function windowsSystemRoot(options = {}) {
+  const env = options.env || process.env;
+  return String(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows");
+}
+
+function windowsRegistryCacheKey(options = {}) {
+  const env = options.env || process.env;
+  const localAppData = env.LOCALAPPDATA || env.LocalAppData || "";
+  return `${windowsSystemRoot(options)}\0${localAppData}`;
+}
+
+function buildWindowsRegistryCommand(options = {}) {
+  const powershell = path.win32.join(
+    windowsSystemRoot(options),
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const encoded = Buffer.from(DSH_WINDOWS_REGISTRY_SCRIPT, "utf16le").toString("base64");
+  return {
+    command: powershell,
+    args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+  };
+}
+
+function parseWindowsRegistryOutput(stdout) {
+  let parsed;
+  try { parsed = JSON.parse(String(stdout || "")); } catch { return null; }
+  return parsed && typeof parsed === "object" ? parsed : null;
+}
+
+function windowsRegistryUnknownResult() {
+  return {
+    status: "unknown",
+    appRoot: null,
+    launcherPath: null,
+    staticVersion: null,
+    checkedPaths: [],
+    reason: DESKTOP_DISCOVERY_REGISTRY_REASON,
+  };
+}
+
+function windowsDiscoveryPendingResult() {
+  return {
+    status: "unknown",
+    appRoot: null,
+    launcherPath: null,
+    staticVersion: null,
+    checkedPaths: [],
+    reason: "windows-discovery-pending",
+  };
+}
+
+async function readWindowsRegistry(options = {}) {
+  if (options.windowsRegistrySnapshot !== undefined) {
+    if (options.windowsRegistrySnapshot instanceof Error) throw options.windowsRegistrySnapshot;
+    return options.windowsRegistrySnapshot;
+  }
+  const { command, args } = buildWindowsRegistryCommand(options);
+  const result = await runCommand(command, args, { ...options, timeoutMs: DSH_WINDOWS_POWERSHELL_TIMEOUT_MS });
+  if (result.code !== 0 || result.timedOut || result.signal) {
+    throw new Error("DeepSeek Harness registry is unreadable");
+  }
+  const parsed = parseWindowsRegistryOutput(result.stdout);
+  if (!parsed) throw new Error("DeepSeek Harness registry output is not JSON");
+  return parsed;
+}
+
+function cachedWindowsRegistrySnapshot(options = {}) {
+  const key = windowsRegistryCacheKey(options);
+  if (!windowsRegistryCache.snapshot || windowsRegistryCache.key !== key) return null;
+  return windowsRegistryCache.snapshot;
+}
+
+function resetWindowsRegistryCache() {
+  windowsRegistryCache = { key: null, snapshot: null };
+}
+
+function windowsRootKey(root) {
+  const resolved = path.win32.resolve(String(root));
+  const stripped = resolved.length > 3 ? resolved.replace(/[\\/]+$/, "") : resolved;
+  return stripped.toLowerCase();
+}
+
+function verifyWindowsDesktopRoot(root, options = {}) {
+  const fsImpl = options.fs || fs;
+  const required = [
+    path.win32.join(root, DSH_DESKTOP_EXE_NAME),
+    path.win32.join(root, "resources", "runtime", "cli", "bin", DSH_DESKTOP_CMD_NAME),
+    path.win32.join(root, "resources", "app.asar"),
+  ];
+  for (const filePath of required) {
+    let stat = null;
+    try { stat = fsImpl.statSync(filePath); } catch {}
+    if (!stat || !stat.isFile()) return false;
+  }
+  return true;
+}
+
+function windowsDesktopCandidates(registry, options = {}) {
+  const candidates = [];
+  const add = (value) => {
+    if (typeof value === "string" && value.trim()) candidates.push(value.trim());
+  };
+  const uninstall = registry && Array.isArray(registry.uninstall) ? registry.uninstall : [];
+  for (const entry of uninstall) if (entry) add(entry.installLocation);
+  for (const entry of uninstall) if (entry) add(entry.guidInstallLocation);
+  if (registry && typeof registry.commandDirectory === "string" && registry.commandDirectory.trim()) {
+    add(path.win32.resolve(registry.commandDirectory.trim(), "..", "..", "..", ".."));
+  }
+  const env = options.env || process.env;
+  const localAppData = env.LOCALAPPDATA || env.LocalAppData;
+  if (typeof localAppData === "string" && localAppData.trim()) {
+    add(path.win32.join(localAppData, "Programs", "DeepSeek Harness"));
+  }
+  return candidates;
+}
+
+function discoverDshDesktopWindows(options = {}, registry = null) {
+  const valid = new Map();
+  const checkedPaths = [];
+  const uninstall = registry && Array.isArray(registry.uninstall) ? registry.uninstall : [];
+  for (const candidate of windowsDesktopCandidates(registry, options)) {
+    const root = path.win32.resolve(candidate);
+    checkedPaths.push(root);
+    if (!verifyWindowsDesktopRoot(root, options)) continue;
+    const key = windowsRootKey(root);
+    if (valid.has(key)) continue;
+    const launcherPath = path.win32.join(root, "resources", "runtime", "cli", "bin", DSH_DESKTOP_CMD_NAME);
+    const match = uninstall.find((entry) => entry
+      && typeof entry.installLocation === "string"
+      && windowsRootKey(entry.installLocation) === key);
+    const staticVersion = match && typeof match.displayVersion === "string"
+      ? parseDshVersion(match.displayVersion)
+      : null;
+    valid.set(key, { appRoot: root, launcherPath, staticVersion });
+  }
+  const results = [...valid.values()];
+  if (results.length === 0) {
+    return { status: "not-found", appRoot: null, launcherPath: null, staticVersion: null, checkedPaths, reason: null };
+  }
+  if (results.length > 1) {
+    return {
+      status: "ambiguous",
+      appRoot: null,
+      launcherPath: null,
+      staticVersion: null,
+      checkedPaths,
+      candidates: results,
+      reason: DESKTOP_DISCOVERY_AMBIGUOUS_REASON,
+    };
+  }
+  return {
+    status: "found",
+    appRoot: results[0].appRoot,
+    launcherPath: results[0].launcherPath,
+    staticVersion: results[0].staticVersion,
+    checkedPaths,
+    reason: null,
+  };
+}
+
+// Static mode never spawns anything: it re-verifies whatever snapshot the
+// async entry point last stored, or reports "pending" until one exists.
+function discoverDshDesktopWindowsSync(options = {}) {
+  const snapshot = cachedWindowsRegistrySnapshot(options);
+  if (!snapshot) return windowsDiscoveryPendingResult();
+  return discoverDshDesktopWindows(options, snapshot);
+}
+
+// The async entry point always re-reads the registry and refreshes the cache.
+// refreshDshDesktopDiscovery is the same work under an explicit name, for the
+// later startup / Doctor preheat paths.
+async function refreshDshDesktopDiscovery(options = {}) {
+  const platform = options.platform || process.platform;
+  if (platform !== "win32") return discoverDshDesktopSync(options);
+  if (options.desktopDiscovery) return options.desktopDiscovery;
+  if (options.windowsRegistrySnapshot !== undefined) {
+    if (options.windowsRegistrySnapshot instanceof Error) return windowsRegistryUnknownResult();
+    return discoverDshDesktopWindows(options, options.windowsRegistrySnapshot);
+  }
+  let snapshot;
+  try {
+    snapshot = await readWindowsRegistry(options);
+  } catch {
+    return windowsRegistryUnknownResult();
+  }
+  windowsRegistryCache = { key: windowsRegistryCacheKey(options), snapshot };
+  return discoverDshDesktopWindows(options, snapshot);
+}
+
+async function discoverDshDesktop(options = {}) {
+  if (options.desktopDiscovery) return options.desktopDiscovery;
+  const platform = options.platform || process.platform;
+  if (platform !== "win32") return discoverDshDesktopSync(options);
+  return refreshDshDesktopDiscovery(options);
+}
+
 
 function isXmlPlistText(raw) {
   const head = String(raw || "").slice(0, 1024);
@@ -1454,15 +1887,19 @@ function readDesktopBundleSync(fsImpl, appRoot) {
   };
 }
 
-// File-only discovery of the macOS desktop app. It never launches the app or
-// its bundled command; Windows discovery is a later step, so win32 reports
-// unknown instead of a false not-found.
+// File-only discovery of the desktop app. macOS reads the bundle; Windows uses
+// the last async registry snapshot (never a process) and re-verifies candidate
+// roots against disk. It never launches the app or its bundled command.
 function discoverDshDesktopSync(options = {}) {
   if (options.desktopDiscovery) return options.desktopDiscovery;
   const platform = options.platform || process.platform;
   const empty = { appRoot: null, launcherPath: null, staticVersion: null };
   if (platform === "win32") {
-    return { status: "unknown", ...empty, checkedPaths: [], reason: DESKTOP_DISCOVERY_WINDOWS_REASON };
+    if (options.windowsRegistrySnapshot !== undefined) {
+      if (options.windowsRegistrySnapshot instanceof Error) return windowsRegistryUnknownResult();
+      return discoverDshDesktopWindows(options, options.windowsRegistrySnapshot);
+    }
+    return discoverDshDesktopWindowsSync(options);
   }
   if (platform !== "darwin") {
     return { status: "not-found", ...empty, checkedPaths: [], reason: DESKTOP_DISCOVERY_UNSUPPORTED_REASON };
@@ -1650,10 +2087,12 @@ function resolveDesktopDshRole({ evidence, discovery }) {
       ? dshDiagnose("carrier-unavailable")
       : { role: "not-applicable", reason: "desktop-not-installed" };
   }
-  if (discovery.status === "unknown") {
+  if (discovery.status === "unknown" || discovery.status === "ambiguous") {
     // "Could not find it" is not "it is gone": any surviving manifest counts.
+    // An ambiguous registry answer is treated like unknown, just with a reason
+    // that says more than one install was found.
     return ourEvidence || evidence.manifest === "present"
-      ? dshDiagnose("desktop-unverifiable")
+      ? dshDiagnose(discovery.status === "ambiguous" ? "multiple-desktop-installs" : "desktop-unverifiable")
       : { role: "not-applicable", reason: "desktop-not-installed" };
   }
   if (evidence.manifest === "absent") {
@@ -1681,7 +2120,7 @@ function resolveDshRole({ profile, evidence, carrier, discovery, health, operati
   if (evidence.registration === "unknown") return dshDiagnose("registration-unknown");
   if (evidence.registration === "foreign") return dshDiagnose("foreign-package");
   if (evidence.registration === "damaged") return dshDiagnose("integrity-failed");
-  // The source/unavailable status only exists on the pre-latch status, so read
+  // The source-unavailable status only exists on the pre-latch status, so read
   // it through statusBeforeLatch when a latch has replaced the status.
   const statusBeforeLatch = health && health.status === "inspection-required" && health.statusBeforeLatch
     ? health.statusBeforeLatch
@@ -1815,6 +2254,82 @@ function inspectDshTargetsSync(options = {}, { operation } = {}) {
   return {
     web: inspectWebDshTargetSync(options, resolvedOperation, fsImpl),
     desktop: inspectDesktopDshTargetSync(options, resolvedOperation, fsImpl),
+  };
+}
+
+function dshCarrierUnavailable(kind) {
+  return { status: "unavailable", kind, path: null };
+}
+
+// Operation-mode refinement of one static target: only a mutable target is
+// actually probed. The probe's version is kept so the caller can re-check it
+// under the mutation lock.
+async function resolveDshTargetCarrier(staticTarget, profile, options, operation, desktopDiscovery) {
+  if (staticTarget.role !== "mutable") return staticTarget;
+  let commandInfo = null;
+  let noCommandReason = null;
+  if (profile === WEB_PROFILE_NAME) {
+    commandInfo = await resolveDshCommand(options);
+  } else {
+    const desktop = desktopCommandInfo(desktopDiscovery, options);
+    commandInfo = desktop.commandInfo;
+    noCommandReason = desktop.reason;
+  }
+  if (!commandInfo) {
+    if (profile === DESKTOP_PROFILE_NAME) {
+      return {
+        ...staticTarget,
+        role: "diagnose",
+        reason: noCommandReason || "launcher-unrecognized",
+        carrier: dshCarrierUnavailable("desktop"),
+      };
+    }
+    // web: fall back to the static "no command candidate" decision.
+    const fallback = resolveWebDshRole({
+      evidence: staticTarget.evidence,
+      carrier: dshCarrierUnavailable("npm"),
+      operation,
+    });
+    return {
+      ...staticTarget,
+      role: fallback.role,
+      reason: fallback.reason,
+      manualFallback: fallback.manualFallback === true,
+      initializesProfile: fallback.initializesProfile === true,
+      carrier: dshCarrierUnavailable("npm"),
+    };
+  }
+  const kind = commandInfo.kind === "desktop" ? "desktop" : "npm";
+  const probe = await probeDshCarrier(commandInfo, options);
+  if (probe.status === "available") {
+    return {
+      ...staticTarget,
+      role: "mutable",
+      reason: null,
+      carrier: { status: "available", kind, version: probe.version, commandInfo },
+    };
+  }
+  return {
+    ...staticTarget,
+    role: "diagnose",
+    reason: probe.reason,
+    carrier: dshCarrierUnavailable(kind),
+  };
+}
+
+// Operation-mode target resolution for the later orchestration: re-discover the
+// desktop app asynchronously, take the static records, then probe only the
+// mutable carriers. diagnose / not-applicable targets are returned untouched.
+async function resolveDshTargets(options = {}, { operation } = {}) {
+  const resolvedOperation = normalizeDshTargetOperation(operation);
+  const desktopDiscovery = await discoverDshDesktop(options);
+  const staticTargets = inspectDshTargetsSync(
+    { ...options, desktopDiscovery },
+    { operation: resolvedOperation }
+  );
+  return {
+    web: await resolveDshTargetCarrier(staticTargets.web, WEB_PROFILE_NAME, options, resolvedOperation, desktopDiscovery),
+    desktop: await resolveDshTargetCarrier(staticTargets.desktop, DESKTOP_PROFILE_NAME, options, resolvedOperation, desktopDiscovery),
   };
 }
 
@@ -3497,12 +4012,17 @@ module.exports = {
   supportedDshRangeLabel,
   dshCommandPathsSync,
   discoverDshDesktopSync,
+  discoverDshDesktop,
+  refreshDshDesktopDiscovery,
+  desktopCommandInfo,
+  probeDshCarrier,
   hasDshCommand,
   hasPnpm,
   installDeepSeekHarnessBridge,
   inspectDeepSeekHarnessDiskSync,
   inspectDeepSeekHarnessIntegration,
   inspectDshTargetsSync,
+  resolveDshTargets,
   isBridgeInstalled,
   isDshInstalled,
   registerDeepSeekHarness,
@@ -3530,7 +4050,23 @@ module.exports = {
     readManualGenerationReference,
     readManualGenerationReferenceSync,
     discoverDshDesktopSync,
+    discoverDshDesktop,
+    refreshDshDesktopDiscovery,
+    desktopCommandInfo,
+    probeDshCarrier,
+    parseDesktopDshCmd,
+    buildDesktopCommandEnv,
+    buildWindowsRegistryCommand,
+    resetWindowsRegistryCache,
+    resolvePnpmRuntime,
+    readDshVersion,
+    resolveDshTargetCarrier,
+    DSH_WINDOWS_REGISTRY_SCRIPT,
+    DSH_WRITE_TIMEOUT_MS,
+    DSH_NPM_VERSION_TIMEOUT_MS,
+    DSH_DESKTOP_VERSION_TIMEOUT_MS,
     inspectDshTargetsSync,
+    resolveDshTargets,
     buildManualDshCommand,
     computeExpectedSourceHashesSync,
     digestBridgeFiles,

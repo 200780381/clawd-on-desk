@@ -419,10 +419,13 @@ test("a user Applications path under homeDir is discovered on macOS", (t) => {
   assert.strictEqual(result.appRoot, appRoot);
 });
 
-test("Windows desktop discovery is not implemented yet", () => {
-  const result = discoverDshDesktopSync({ platform: "win32" });
+test("an unreadable Windows registry is unknown, not a false not-found", () => {
+  const result = discoverDshDesktopSync({
+    platform: "win32",
+    windowsRegistrySnapshot: new Error("registry unavailable"),
+  });
   assert.strictEqual(result.status, "unknown");
-  assert.strictEqual(result.reason, "windows-discovery-not-implemented");
+  assert.strictEqual(result.reason, "registry-unreadable");
 });
 
 test("Linux desktop discovery is unsupported", () => {
@@ -620,7 +623,7 @@ test("an unverifiable desktop app with a surviving manifest is diagnosed", (t) =
     dsh: { profile: { bundles: [] } },
   });
   const target = inspectDesktop(env, "doctor", {
-    desktopDiscovery: { ...NO_DESKTOP, status: "unknown", reason: "windows-discovery-not-implemented" },
+    desktopDiscovery: { ...NO_DESKTOP, status: "unknown", reason: "registry-unreadable" },
   });
   assert.strictEqual(target.role, "diagnose");
   assert.strictEqual(target.reason, "desktop-unverifiable");
@@ -629,7 +632,7 @@ test("an unverifiable desktop app with a surviving manifest is diagnosed", (t) =
 test("an unverifiable desktop app with no evidence is not applicable", (t) => {
   const env = makeHome(t);
   const target = inspectDesktop(env, "doctor", {
-    desktopDiscovery: { ...NO_DESKTOP, status: "unknown", reason: "windows-discovery-not-implemented" },
+    desktopDiscovery: { ...NO_DESKTOP, status: "unknown", reason: "registry-unreadable" },
   });
   assert.strictEqual(target.role, "not-applicable");
   assert.strictEqual(target.reason, "desktop-not-installed");
