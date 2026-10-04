@@ -15,6 +15,7 @@ const {
   registerDeepSeekHarness,
   uninstallDeepSeekHarnessBridge,
   unregisterDeepSeekHarness,
+  readDeepSeekHarnessNotices,
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
 const { buildCleanupOptionsForHome } = require("../hooks/cleanup-integrations");
@@ -629,6 +630,227 @@ test("a failed add with an unreadable lock file is treated as a partial mutation
   assert.ok(attempted);
   assert.strictEqual(fs.existsSync(attempted), true, "the candidate generation is kept");
   assert.strictEqual(fs.existsSync(dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" })), true);
+});
+
+// ---------------------------------------------------------------------------
+// Uninstall conclusion: one final read after both flows
+// ---------------------------------------------------------------------------
+
+test("uninstall reports error when a formerly not-applicable side gains a registration", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const cli = makeCli(harness);
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  // At resolution time desktop has an empty manifest and no Clawd registration.
+  writeProfileManifest(harness, "desktop");
+  const desktopManifestPath = path.join(harness.dshHome, "profiles", "desktop", "package.json");
+  const desktopLocal = packageDir(harness.dshHome, "desktop");
+  let appeared = false;
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness), {
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (appeared) return;
+        appeared = true;
+        const manifest = readJson(desktopManifestPath);
+        manifest.dependencies[BRIDGE_PACKAGE_NAME] = `link:${installed.generation}`;
+        manifest.dsh.profile.bundles = ["@deepseek-ai/dsh-base", BRIDGE_PACKAGE_NAME];
+        writeJson(desktopManifestPath, manifest);
+        fs.mkdirSync(path.dirname(desktopLocal), { recursive: true });
+        fs.symlinkSync(installed.generation, desktopLocal, "dir");
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.registrationRemoved, false);
+  assert.strictEqual(result.reason, "uninstall-unconfirmed");
+  assert.strictEqual(result.targets.desktop.registrationAfter, "present");
+});
+
+test("uninstall re-reads web after the desktop flow finishes", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  writeProfileManifest(harness, "desktop");
+  const cli = makeCli(harness);
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  const webManifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
+  const savedWeb = readJson(webManifestPath);
+  const webLocal = packageDir(harness.dshHome, "web");
+  let locks = 0;
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness), {
+    desktopDiscovery: desktopFound(),
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        locks += 1;
+        if (locks !== 2) return; // desktop's lock, after web already ran
+        writeJson(webManifestPath, savedWeb);
+        fs.mkdirSync(path.dirname(webLocal), { recursive: true });
+        fs.symlinkSync(installed.generation, webLocal, "dir");
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.registrationRemoved, false);
+  assert.strictEqual(result.targets.web.registrationAfter, "present");
+});
+
+test("a skipped side that reappears is reported as uninstall-unconfirmed", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  writeProfileManifest(harness, "desktop");
+  const cli = makeCli(harness);
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  // web unregisters as skipped (empty profile); desktop still runs.
+  const webManifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
+  const savedWeb = readJson(webManifestPath);
+  const emptyWeb = readJson(webManifestPath);
+  emptyWeb.dependencies = {};
+  emptyWeb.dsh.profile.bundles = [];
+  writeJson(webManifestPath, emptyWeb);
+  fs.rmSync(packageDir(harness.dshHome, "web"), { recursive: true, force: true });
+
+  let locks = 0;
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness), {
+    desktopDiscovery: desktopFound(),
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        locks += 1;
+        if (locks !== 2) return; // desktop's lock, after web already ran
+        writeJson(webManifestPath, savedWeb);
+        fs.mkdirSync(path.dirname(packageDir(harness.dshHome, "web")), { recursive: true });
+        fs.symlinkSync(installed.generation, packageDir(harness.dshHome, "web"), "dir");
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.registrationRemoved, false);
+  assert.strictEqual(result.reason, "uninstall-unconfirmed");
+  assert.match(result.message, /web/);
+
+  const state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot });
+  const failed = state.web.find((notice) => notice.kind === "failed-target");
+  assert.ok(failed);
+  assert.strictEqual(failed.payload.reason, "uninstall-unconfirmed");
+});
+
+// ---------------------------------------------------------------------------
+// Inspect records read inside the lock
+// ---------------------------------------------------------------------------
+
+test("an invalid inspection record stops an explicit repair before any command", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const cli = makeCli(harness);
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  const latch = dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" });
+  writeJson(latch, { owner: "clawd-on-desk", schemaVersion: 1, reason: "previous-add-unknown" });
+  const external = path.join(harness.root, "external-inspection-record");
+  writeJson(external, { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+
+  // The record is valid until the lock; the lock-time re-read must catch the
+  // symlink and stop before any command, without touching the link target.
+  let replaced = false;
+  const repairCli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, repairCli, {
+    operation: "explicit-repair",
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (replaced) return;
+        replaced = true;
+        fs.unlinkSync(latch);
+        fs.symlinkSync(external, latch);
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.deepStrictEqual(repairCli.calls, []);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+  assert.deepStrictEqual(readJson(external), { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+});
+
+test("an invalid inspection record stops an uninstall before remove", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const cli = makeCli(harness);
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  const latch = dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" });
+
+  // The record appears only after the pre-lock read; the lock-time check must
+  // catch it before remove.
+  let injected = false;
+  const removeCli = makeCli(harness);
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, removeCli, {
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (injected) return;
+        injected = true;
+        fs.mkdirSync(path.dirname(latch), { recursive: true });
+        fs.symlinkSync(path.join(harness.root, "missing-inspection-record"), latch);
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.deepStrictEqual(removeCli.calls, []);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+  assert.strictEqual(dependencyPath(harness, "web") !== null, true);
+});
+
+test("an invalid inspection record stops an install that would add", async (t) => {
+  const harness = makeHarness(t);
+  // No dependency yet: this run would need to add the bridge, not skip it.
+  writeProfileManifest(harness, "web");
+  const latch = dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" });
+  writeJson(latch, { owner: "clawd-on-desk", schemaVersion: 1, reason: "previous-add-unknown" });
+  const external = path.join(harness.root, "external-inspection-record");
+  writeJson(external, { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+
+  let replaced = false;
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
+    operation: "explicit-repair",
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (replaced) return;
+        replaced = true;
+        fs.unlinkSync(latch);
+        fs.symlinkSync(external, latch);
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(dependencyPath(harness, "web"), null);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+  assert.deepStrictEqual(readJson(external), { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+});
+
+test("an invalid inspection record stops confirming a previous removal", async (t) => {
+  const harness = makeHarness(t);
+  // No dependency, but a valid record: uninstall takes the confirm-removal path.
+  writeProfileManifest(harness, "web");
+  const latch = dshInstallTest.inspectionLatchPath({ managedRoot: harness.managedRoot, profile: "web" });
+  writeJson(latch, { owner: "clawd-on-desk", schemaVersion: 1, reason: "previous-remove-unknown" });
+  const external = path.join(harness.root, "external-inspection-record");
+  writeJson(external, { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+
+  let replaced = false;
+  const cli = makeCli(harness);
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, cli, {
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (replaced) return;
+        replaced = true;
+        fs.unlinkSync(latch);
+        fs.symlinkSync(external, latch);
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
 });
 
 // ---------------------------------------------------------------------------

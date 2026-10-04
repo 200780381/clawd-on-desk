@@ -1186,14 +1186,41 @@ function readJsonSync(fsImpl, filePath) {
   }
 }
 
-function readInspectionLatchSync(fsImpl, options = {}) {
-  const filePath = inspectionLatchPath(options);
+// One strict interpretation of a latch file body, shared by the sync/async
+// readers and the evidence classifier so they cannot drift. Returns the parsed
+// record only when it is a valid Clawd-owned latch, else null.
+function parseInspectionLatch(raw) {
+  let text = raw;
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  let parsed;
   try {
-    if (!fsImpl.statSync(filePath).isFile()) return null;
+    parsed = JSON.parse(text);
   } catch {
     return null;
   }
-  return readJsonSync(fsImpl, filePath) || { invalid: true, reason: "inspection-latch-invalid" };
+  return parsed && parsed.owner === MANAGED_OWNER && parsed.schemaVersion === 1 ? parsed : null;
+}
+
+function readInspectionLatchSync(fsImpl, options = {}) {
+  const filePath = inspectionLatchPath(options);
+  let stat;
+  try {
+    stat = fsImpl.lstatSync(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    return { invalid: true, reason: "inspection-latch-unreadable" };
+  }
+  if (!stat.isFile() || (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink())) {
+    return { invalid: true, reason: "inspection-latch-invalid" };
+  }
+  let raw;
+  try {
+    raw = fsImpl.readFileSync(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    return { invalid: true, reason: "inspection-latch-unreadable" };
+  }
+  return parseInspectionLatch(raw) || { invalid: true, reason: "inspection-latch-invalid" };
 }
 
 function inspectResolvedPackageSync(fsImpl, packageManifestPath, anchor) {
@@ -2061,14 +2088,7 @@ function inspectionLatchEvidenceSync(fsImpl, options) {
     if (err && err.code === "ENOENT") return "none";
     return "unknown";
   }
-  let parsed;
-  try {
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-    parsed = JSON.parse(raw);
-  } catch {
-    return "invalid";
-  }
-  return parsed && parsed.owner === MANAGED_OWNER && parsed.schemaVersion === 1 ? "present" : "invalid";
+  return parseInspectionLatch(raw) ? "present" : "invalid";
 }
 
 function manualReferenceEvidence(reference) {
@@ -2785,17 +2805,7 @@ async function readInspectionLatch(options = {}) {
     if (err && err.code === "ENOENT") return null;
     return { invalid: true, reason: "inspection-latch-unreadable" };
   }
-  let parsed;
-  try {
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-    parsed = JSON.parse(raw);
-  } catch {
-    return { invalid: true, reason: "inspection-latch-invalid" };
-  }
-  if (!parsed || parsed.owner !== MANAGED_OWNER || parsed.schemaVersion !== 1) {
-    return { invalid: true, reason: "inspection-latch-invalid" };
-  }
-  return parsed;
+  return parseInspectionLatch(raw) || { invalid: true, reason: "inspection-latch-invalid" };
 }
 
 async function writeInspectionLatch(reason, detail, options = {}) {
@@ -2814,11 +2824,14 @@ async function writeInspectionLatch(reason, detail, options = {}) {
   }, null, 2)}\n`, { mode: 0o600 });
 }
 
+// Only a valid record may be removed. A non-file/symlink/unreadable/invalid
+// latch is evidence we cannot prove is ours, and the cleanup blocker is already
+// paused on it; deleting the node would lift that pause.
 async function clearInspectionLatch(options = {}) {
   const filePath = inspectionLatchPath(options);
-  const current = await readJson(filePath);
+  const current = await readInspectionLatch(options);
   if (!current) return;
-  if (current.owner !== MANAGED_OWNER || current.schemaVersion !== 1) {
+  if (current.invalid) {
     throw new Error("DeepSeek Harness inspection latch ownership is invalid; manual inspection required");
   }
   await fsp.rm(filePath, { force: false });
@@ -3518,6 +3531,9 @@ async function restoreIsolatedProfileSymlink(isolatedPath, linkDir, options = {}
 }
 
 async function cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch, options = {}) {
+  // An invalid/unreadable record is itself pausing shared cleanup; stop before
+  // unlinking anything, or the cleanup would lift its own pause.
+  if (lockedLatch && lockedLatch.invalid) return inspectionLatchResult(lockedLatch);
   const cleanup = await unlinkManagedProfileResidue(locked, options);
   if (!cleanup.removed) {
     await writeInspectionLatch("plugin-remove-residue-cleanup-failed", cleanup.reason, options);
@@ -3768,6 +3784,36 @@ async function clearRepairResidualLink(health, options = {}) {
   return cleanup.removed === true;
 }
 
+// Classify the record target's marker with lstat, not a following read: only a
+// marker node that truly does not exist means the record is stale. Anything
+// else (bad JSON, foreign owner, unreadable, symlink/non-file) is an anomaly a
+// fresh generation must not silently decide for.
+async function inspectRepairTargetMarker(generationDir) {
+  const markerPath = path.join(generationDir, MANIFEST_FILE);
+  let stat;
+  try {
+    stat = await fsp.lstat(markerPath);
+  } catch (err) {
+    return err && err.code === "ENOENT" ? "missing" : "unreadable";
+  }
+  if (!stat.isFile() || (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink())) {
+    return "invalid";
+  }
+  let raw;
+  try {
+    raw = await fsp.readFile(markerPath, "utf8");
+  } catch (err) {
+    return err && err.code === "ENOENT" ? "missing" : "unreadable";
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+  } catch {
+    return "invalid";
+  }
+  return parsed && parsed.owner === MANAGED_OWNER ? "present" : "invalid";
+}
+
 // Fully verify a managed generation before it is used as a repair target. The
 // operation record only points at a candidate; an unverified or corrupt one
 // must not authorize the destructive remove. Reuses the same marker/ownership/
@@ -3790,6 +3836,13 @@ async function verifyRepairTargetGeneration(generationDir, bundleHash, contract,
 async function repairDisabledDshProfile(options, scoped, locked, record, runtime) {
   const profile = scoped.profile;
   const { commandInfo, pnpmRuntime, silent, hostVersion } = runtime;
+
+  // The per-target latch is only checked by the ordinary sync path after this
+  // repair is dispatched. Read it here so an invalid/unreadable record stops
+  // before the first command, staging, or cleanup. It is already pausing shared
+  // cleanup, and we cannot prove a broken node is ours.
+  const lockedLatch = await readInspectionLatch(scoped);
+  if (lockedLatch && lockedLatch.invalid) return inspectionLatchResult(lockedLatch);
 
   // Recompute the target contract from the current host version on every resume.
   const family = dshFamilyForVersion(hostVersion);
@@ -3819,13 +3872,17 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
         supportedRange: supportedDshRangeLabel(),
       };
     }
-    // The record's target is only a candidate. If its marker is still there, the
-    // record claims a real target and it must verify fully before it can
-    // authorize the destructive remove; a marker that is gone is a stale record,
-    // so fall through to the generation this run prepared from the current
-    // source.
-    const recordMarker = await readJson(path.join(record.targetGenerationDir, MANIFEST_FILE));
-    if (recordMarker && recordMarker.owner === MANAGED_OWNER) {
+    // The record's target is only a candidate. Only a marker node that truly
+    // does not exist makes the record stale (then fall through to the
+    // generation this run prepared from the current source). A marker that
+    // exists but is corrupt, foreign, unreadable or otherwise not our valid
+    // record means the recorded target is in an unclear state; a fresh
+    // generation must not decide for it, so stop before any command.
+    const markerState = await inspectRepairTargetMarker(record.targetGenerationDir);
+    if (markerState === "invalid" || markerState === "unreadable") {
+      return repairNeedsInspectionResult(scoped, `repair-target-marker-${markerState}`);
+    }
+    if (markerState === "present") {
       if (!(await verifyRepairTargetGeneration(record.targetGenerationDir, record.targetBundleHash, contract, options))) {
         return repairNeedsInspectionResult(scoped, "repair-target-integrity-failed");
       }
@@ -3861,8 +3918,9 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
 
   // "Already healthy and exactly the recorded target" converges without touching DSH.
   if (healthyTarget) {
-    try { await clearRepairOperation(scoped); } catch {}
     const latch = await readInspectionLatch(scoped);
+    if (latch && latch.invalid) return inspectionLatchResult(latch);
+    try { await clearRepairOperation(scoped); } catch {}
     if (latch) await clearInspectionLatch(scoped);
     await cleanUnreferencedGenerations(targetBundleHash, options);
     return { status: "ok", updated: false, health: work, message: dshSuccessMessage(profile) };
@@ -4012,9 +4070,12 @@ async function repairDisabledDshProfile(options, scoped, locked, record, runtime
 
   // Converge: clear the record and this side's latch first, then the old
   // generation can be collected.
+  // A lock-time invalid record must stop before clearing anything (the record
+  // or the manual reference), and before the shared cleanup it pauses.
+  const latch = await readInspectionLatch(scoped);
+  if (latch && latch.invalid) return inspectionLatchResult(latch);
   try { await clearRepairOperation(scoped); } catch {}
   if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
-  const latch = await readInspectionLatch(scoped);
   if (latch) await clearInspectionLatch(scoped);
   await cleanUnreferencedGenerations(targetBundleHash, options);
   if (!silent) console.log(`Clawd: DeepSeek Harness ${profile} repair ready (${targetBundleHash.slice(0, 12)})`);
@@ -4311,6 +4372,10 @@ async function syncDshProfile(options, target) {
         return pluginDisabledInDshResult(locked);
       }
       const lockedLatch = await readInspectionLatch(scoped);
+      // A lock-time re-read can see a record the pre-lock scan did not. If it
+      // is invalid or unreadable, stop before any write or cleanup: the record
+      // is what pauses shared cleanup, and we cannot prove it is ours.
+      if (lockedLatch && lockedLatch.invalid) return inspectionLatchResult(lockedLatch);
       if (locked.status === "healthy" && locked.marker.bundleHash === bundle.bundleHash) {
         // Clear this side's latch before cleanup so it does not pause it.
         if (lockedLatch) await clearInspectionLatch(scoped);
@@ -4452,6 +4517,9 @@ async function uninstallDshProfile(options, target) {
     );
     if (removalResidueHealth) return managedProfileRemovalResidueResult(removalResidueHealth);
     const latch = await readInspectionLatch(scoped);
+    // An invalid/unreadable record stops the uninstall before any command: it
+    // is pausing shared cleanup and cannot be proven ours.
+    if (latch && latch.invalid) return inspectionLatchResult(latch);
     // manual reference is web-owned; desktop must never clear or rewrite it.
     const manualReference = profile === WEB_PROFILE_NAME
       ? await readManualGenerationReference(options)
@@ -4517,6 +4585,7 @@ async function uninstallDshProfile(options, target) {
           };
         }
         const lockedLatch = await readInspectionLatch(scoped);
+        if (lockedLatch && lockedLatch.invalid) return inspectionLatchResult(lockedLatch);
         if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
         if (lockedLatch) await clearInspectionLatch(scoped);
         try { await clearRepairOperation(scoped); } catch {}
@@ -4668,6 +4737,7 @@ async function uninstallDshProfile(options, target) {
         return { status: "error", reason: "ownership-changed", message: "DSH plugin ownership changed before removal" };
       }
       const lockedLatch = await readInspectionLatch(scoped);
+      if (lockedLatch && lockedLatch.invalid) return inspectionLatchResult(lockedLatch);
       if (locked.status === "managed-residue") {
         return await cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch, scoped);
       }
@@ -4800,6 +4870,7 @@ function dshTargetsMap(entries) {
       role: entry.role,
       reason: entry.reason === undefined ? null : entry.reason,
       result: entry.result || null,
+      ...(entry.registrationAfter ? { registrationAfter: entry.registrationAfter } : {}),
     };
   }
   return map;
@@ -4938,22 +5009,12 @@ async function runDshTarget(options, operation, target, kind) {
   // Whether the profile flow actually ran (mutable or web manual fallback). The
   // notices use this to tell a finished flow from a report-only diagnose.
   entry.ranFlow = runsFlow;
-  if (kind === "uninstall") {
-    // The lock recheck or another Clawd instance can change a profile while the
-    // operation runs, so the uninstall conclusion must come from the disk as it
-    // is now, not from the pre-operation target role.
-    const registrationAfter = dshRegistrationAfter(options, target.profile);
-    entry.registrationAfter = registrationAfter;
-    if (entry.result) entry.result.registrationAfter = registrationAfter;
-  }
   return entry;
 }
 
-// A disk-only registration conclusion for one profile after an uninstall attempt.
-// Reuses the role table's evidence so it stays consistent with Doctor/roles.
-function dshRegistrationAfter(options, profile) {
-  const targets = inspectDshTargetsSync(options, { operation: "uninstall" });
-  const target = targets[profile];
+// A disk-only registration conclusion for one profile. Reuses the role table's
+// evidence so it stays consistent with Doctor/roles.
+function dshRegistrationAfterFromTarget(target) {
   if (!target || target.role === "not-applicable") return "removed";
   const evidence = target.evidence || {};
   const registration = evidence.registration || "unknown";
@@ -4962,6 +5023,19 @@ function dshRegistrationAfter(options, profile) {
   if (registration === "owned") return "present";
   if (registration === "none" && residue === "none" && latch === "none") return "removed";
   return "unknown";
+}
+
+// The single place an uninstall conclusion is read. Per-side reads are not
+// enough: the desktop flow can be long, so web's conclusion can already be
+// stale by the time the whole operation returns. This only corrects staleness
+// inside this operation's window; writes after this read are out of scope.
+function attachDshRegistrationAfter(options, entries) {
+  const targets = inspectDshTargetsSync(options, { operation: "uninstall" });
+  for (const entry of entries) {
+    const registrationAfter = dshRegistrationAfterFromTarget(targets[entry.profile]);
+    entry.registrationAfter = registrationAfter;
+    if (entry.result) entry.result.registrationAfter = registrationAfter;
+  }
 }
 
 async function runDshTargets(options, operation, targets, kind) {
@@ -5019,52 +5093,63 @@ function summarizeDshInstallResults(entries) {
   return { status: "skipped", reason: "no-applicable-target", message, targets };
 }
 
+// The error fields for a side whose post-operation conclusion is present or
+// unknown. Only a side whose flow actually failed can contribute its own error
+// fields; an ok/skipped result or no result at all must not turn into a bogus
+// "bridge-not-installed" failure, so it gets the "still registered / could not
+// confirm" text instead. The uninstall notice branch uses this same function.
+function dshUninstallConclusionFields(entry) {
+  const failed = entry.result && dshOutcome(entry.result) === "failed";
+  const fields = failed ? dshErrorFields(entry.result, entry) : {};
+  if (fields.reason) return fields;
+  return {
+    ...fields,
+    reason: "uninstall-unconfirmed",
+    message: fields.message
+      || `DeepSeek Harness ${entry.profile} still has a Clawd registration, or it could not be confirmed, after uninstall`,
+  };
+}
+
 function summarizeDshUninstallResults(entries) {
   const targets = dshTargetsMap(entries);
-  const participants = entries.filter((entry) => entry.role !== "not-applicable");
-  if (participants.length === 0) {
-    return { status: "skipped", reason: "bridge-not-installed", registrationRemoved: true, targets };
-  }
-  let anyUnremoved = false;
-  let anyUnconfirmed = false;
-  let firstUnremoved = null;
-  let firstUnconfirmed = null;
+  // Every profile participates in the conclusion: the pre-operation role only
+  // decides whether a flow ran and whether its warnings are collected, not
+  // whether its final disk state counts.
   const warnings = [];
-  for (const entry of participants) {
-    // A successful/skipped target can still carry warnings (e.g. cleanup paused).
-    if (entry.result && Array.isArray(entry.result.warnings)) {
-      for (const line of entry.result.warnings) warnings.push(`${entry.profile}: ${line}`);
+  let unremoved = null;
+  let unconfirmed = null;
+  for (const entry of entries) {
+    if (entry.role !== "not-applicable" && entry.result) {
+      if (Array.isArray(entry.result.warnings)) {
+        for (const line of entry.result.warnings) warnings.push(`${entry.profile}: ${line}`);
+      }
+      if (dshOutcome(entry.result) === "failed") warnings.push(dshFailureWarning(entry));
     }
-    if (dshOutcome(entry.result) === "failed") warnings.push(dshFailureWarning(entry));
-    // The pre-operation role is not the truth here: the profile could have
-    // changed under the lock. Read the conclusion the operation left on disk.
-    const after = entry.registrationAfter;
-    if (after === "present") {
-      anyUnremoved = true;
-      if (!firstUnremoved) firstUnremoved = entry;
-    } else if (after !== "removed") {
-      anyUnconfirmed = true;
-      if (!firstUnconfirmed) firstUnconfirmed = entry;
+    if (entry.registrationAfter === "present") {
+      if (!unremoved) unremoved = entry;
+    } else if (entry.registrationAfter !== "removed") {
+      if (!unconfirmed) unconfirmed = entry;
     }
   }
-  if (anyUnremoved) {
+  if (unremoved) {
     return {
       status: "error",
       registrationRemoved: false,
-      ...dshErrorFields(firstUnremoved.result, firstUnremoved),
+      ...dshUninstallConclusionFields(unremoved),
       ...(warnings.length ? { warnings } : {}),
       targets,
     };
   }
-  if (anyUnconfirmed) {
+  if (unconfirmed) {
     return {
       status: "error",
       registrationRemoved: null,
-      ...dshErrorFields(firstUnconfirmed.result, firstUnconfirmed),
+      ...dshUninstallConclusionFields(unconfirmed),
       ...(warnings.length ? { warnings } : {}),
       targets,
     };
   }
+  const participants = entries.filter((entry) => entry.role !== "not-applicable");
   const anyFailed = participants.some((entry) => dshOutcome(entry.result) === "failed");
   const removedSomething = participants.some((entry) => entry.result && entry.result.status === "ok");
   if (removedSomething) {
@@ -5126,12 +5211,13 @@ function dshNoticeOutcome(operation, entry) {
 
   if (operation === "uninstall") {
     // The post-operation disk read is the truth: confirmed gone clears this
-    // side's notices; anything else is reported as a failure.
+    // side's notices; anything else is reported as a failure, using the same
+    // reason/message the summary chose.
     if (entry.registrationAfter === "removed") {
       return { operation, notApplicable: true, removedOk: true };
     }
-    const reason = (result && result.reason) || "uninstall-unconfirmed";
-    return asFailure(reason, result ? result.message : null);
+    const fields = dshUninstallConclusionFields(entry);
+    return asFailure(fields.reason, fields.message);
   }
 
   if (entry.ranFlow !== true) {
@@ -5200,6 +5286,8 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
       const targets = await resolveDshTargets(frozen, { operation: "uninstall" });
       const run = await runDshTargets(frozen, "uninstall", targets, "uninstall");
       const entries = [run.web, run.desktop];
+      // One final read after both flows, so neither side's conclusion is stale.
+      attachDshRegistrationAfter(frozen, entries);
       const result = summarizeDshUninstallResults(entries);
       return await applyDshNotices(frozen, "uninstall", entries, result);
     });
@@ -5315,6 +5403,9 @@ module.exports = {
     hashBridgeDirectorySync,
     healthFingerprint,
     inspectionLatchPath,
+    clearInspectionLatch,
+    readInspectionLatch,
+    readInspectionLatchSync,
     isGenerationReferenced,
     unlinkManagedProfileResidue,
     manualGenerationReferencePath,

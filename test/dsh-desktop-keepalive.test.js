@@ -12,6 +12,7 @@ const {
   installDeepSeekHarnessBridge,
   uninstallDeepSeekHarnessBridge,
   resolveManagedRoot,
+  inspectDeepSeekHarnessDiskSync,
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
 
@@ -475,4 +476,92 @@ test("cleanup still removes unreferenced generations when nothing is pending", a
   const result = await installWeb(harness);
   assert.strictEqual(result.status, "ok");
   assert.strictEqual(fs.existsSync(stray), false);
+});
+
+// ---------------------------------------------------------------------------
+// Strict inspection-record clearing
+// ---------------------------------------------------------------------------
+
+test("clearInspectionLatch deletes a valid record and ignores a missing one", async (t) => {
+  const harness = makeHarness(t);
+  const options = { managedRoot: harness.managedRoot, profile: "web" };
+  await dshInstallTest.clearInspectionLatch(options);
+  const latch = writeLatch(harness, "web");
+  await dshInstallTest.clearInspectionLatch(options);
+  assert.strictEqual(fs.existsSync(latch), false);
+});
+
+test("clearInspectionLatch refuses a symlinked record and leaves the target intact", async (t) => {
+  const harness = makeHarness(t);
+  const latch = latchPath(harness, "web");
+  const target = path.join(harness.root, "external-inspection-record");
+  writeJson(target, { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+  fs.mkdirSync(path.dirname(latch), { recursive: true });
+  fs.symlinkSync(target, latch);
+
+  await assert.rejects(
+    () => dshInstallTest.clearInspectionLatch({ managedRoot: harness.managedRoot, profile: "web" }),
+    /ownership is invalid/
+  );
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+  assert.deepStrictEqual(readJson(target), { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+});
+
+test("clearInspectionLatch refuses a dangling record", async (t) => {
+  const harness = makeHarness(t);
+  const latch = latchPath(harness, "web");
+  fs.mkdirSync(path.dirname(latch), { recursive: true });
+  fs.symlinkSync(path.join(harness.root, "missing-inspection-record"), latch);
+
+  await assert.rejects(
+    () => dshInstallTest.clearInspectionLatch({ managedRoot: harness.managedRoot, profile: "web" }),
+    /ownership is invalid/
+  );
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+});
+
+test("an inspection-record lstat error makes disk health inspection-required", async (t) => {
+  const harness = makeHarness(t);
+  writeProfile(harness, "web");
+  const latch = latchPath(harness, "web");
+  const fakeFs = Object.create(fs);
+  fakeFs.lstatSync = (filePath, ...args) => {
+    if (path.resolve(filePath) === path.resolve(latch)) {
+      const error = new Error("EACCES: permission denied");
+      error.code = "EACCES";
+      throw error;
+    }
+    return fs.lstatSync(filePath, ...args);
+  };
+
+  const health = inspectDeepSeekHarnessDiskSync({
+    fs: fakeFs,
+    dshHome: harness.dshHome,
+    managedRoot: harness.managedRoot,
+    profile: "web",
+    dshInstallRoot: null,
+    platform: "darwin",
+  });
+  assert.strictEqual(health.status, "inspection-required");
+  assert.strictEqual(health.inspectionLatch.reason, "inspection-latch-unreadable");
+});
+
+test("a symlinked inspection record makes disk health inspection-required", async (t) => {
+  const harness = makeHarness(t);
+  writeProfile(harness, "web");
+  const latch = latchPath(harness, "web");
+  const target = path.join(harness.root, "external-inspection-record");
+  writeJson(target, { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+  fs.mkdirSync(path.dirname(latch), { recursive: true });
+  fs.symlinkSync(target, latch);
+
+  const health = inspectDeepSeekHarnessDiskSync({
+    dshHome: harness.dshHome,
+    managedRoot: harness.managedRoot,
+    profile: "web",
+    dshInstallRoot: null,
+    platform: "darwin",
+  });
+  assert.strictEqual(health.status, "inspection-required");
+  assert.strictEqual(health.inspectionLatch.invalid, true);
 });

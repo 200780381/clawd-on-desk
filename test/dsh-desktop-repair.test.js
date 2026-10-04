@@ -853,3 +853,104 @@ test("an invalid repair record also keeps generations alive", async (t) => {
   });
   assert.strictEqual(fs.existsSync(generationDir), true);
 });
+
+// ---------------------------------------------------------------------------
+// The record target's marker must only be treated as stale when it is missing
+// ---------------------------------------------------------------------------
+
+for (const kind of ["corrupt-json", "foreign-owner", "unreadable"]) {
+  test(`an existing ${kind} record-target marker stops the repair`, {
+    skip: kind === "unreadable" && process.platform === "win32",
+  }, async (t) => {
+    const harness = makeHarness(t);
+    writeIncompleteProfile(harness, "web");
+    const alternate = writeAlternateGeneration(harness);
+    const marker = path.join(alternate.dir, "clawd-manifest.json");
+    if (kind === "corrupt-json") {
+      fs.writeFileSync(marker, "{ broken marker", "utf8");
+    } else if (kind === "foreign-owner") {
+      const value = readJson(marker);
+      value.owner = "other-app";
+      writeJson(marker, value);
+    } else {
+      fs.chmodSync(marker, 0o000);
+      t.after(() => { try { fs.chmodSync(marker, 0o600); } catch {} });
+    }
+    writeRecord(harness, "web", recordFor(harness, "web", "remove-pending", {
+      targetBundleHash: alternate.hash,
+      targetGenerationDir: alternate.dir,
+    }));
+
+    const cli = makeCli(harness);
+    const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+    assert.strictEqual(result.status, "error");
+    assert.strictEqual(result.reason, "repair-needs-inspection");
+    assert.deepStrictEqual(cli.calls, []);
+    assert.strictEqual(fs.existsSync(recordPath(harness, "web")), true);
+    assert.strictEqual(fs.existsSync(alternate.dir), true);
+  });
+}
+
+test("an invalid inspection record stops a two-step repair before any command", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  writeRecord(harness, "web", recordFor(harness, "web", "remove-pending"));
+  const latch = path.join(managedRootOf(harness), "inspection-required.json");
+  writeJson(latch, { owner: "clawd-on-desk", schemaVersion: 1, reason: "previous-add-unknown" });
+  const external = path.join(harness.root, "external-inspection-record");
+  writeJson(external, { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+
+  let replaced = false;
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
+    operation: "explicit-repair",
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (replaced) return;
+        replaced = true;
+        fs.unlinkSync(latch);
+        fs.symlinkSync(external, latch);
+      },
+    },
+  }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+  assert.deepStrictEqual(readJson(external), { owner: "clawd-on-desk", schemaVersion: 1, reason: "still-valid" });
+});
+
+test("an inspection record invalidated after add keeps the record during convergence", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  const latch = path.join(managedRootOf(harness), "inspection-required.json");
+  const cli = makeCli(harness, {
+    afterAdd: () => {
+      fs.mkdirSync(path.dirname(latch), { recursive: true });
+      fs.symlinkSync(path.join(harness.root, "missing-inspection-record"), latch);
+    },
+  });
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "inspection-required");
+  assert.deepStrictEqual(mutationOrder(cli), ["remove", "add"]);
+  assert.strictEqual(fs.existsSync(recordPath(harness, "web")), true);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+});
+
+test("a record target path that cannot hold a marker stops the repair", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  const bogus = path.join(harness.root, "record-target-file");
+  fs.writeFileSync(bogus, "not a directory", "utf8");
+  writeRecord(harness, "web", recordFor(harness, "web", "remove-pending", {
+    targetGenerationDir: bogus,
+  }));
+
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "repair-needs-inspection");
+  assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(fs.existsSync(recordPath(harness, "web")), true);
+});
