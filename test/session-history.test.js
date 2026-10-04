@@ -111,8 +111,13 @@ describe("durable session history", () => {
         assert.equal(recordSessionHistoryFromStateBody(body({ session_id }), writeOpts(T0)).written, false);
       }
       assert.equal(fs.readdirSync(historyDir).length, 0);
-      recordSessionHistoryFromStateBody(body({ session_title: "secret prompt", _sessionTitleFromPrompt: true }), writeOpts(T0));
+      recordSessionHistoryFromStateBody(body({ session_title: "secret prompt", session_title_from_prompt: true }), writeOpts(T0));
       assert.equal(readOne().title, null);
+    });
+
+    it("persists an unmarked formal title such as an AI title (#1125)", () => {
+      recordSessionHistoryFromStateBody(body({ session_title: "Generated Title" }), writeOpts(T0));
+      assert.equal(readOne().title, "Generated Title");
     });
 
     it("makes a terminal event win same-millisecond late active traffic", () => {

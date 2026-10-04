@@ -13,6 +13,10 @@ Claude Code 状态同步（command hook，非阻塞）：
     → IPC state-change 事件
     → src/renderer.js（<object> SVG 预加载 + 淡入切换 + 眼球追踪）
 
+Claude Code 会话标题来源顺序：hook 输入的 `session_title`（手动改名）→ transcript 里的手动标题（`custom-title` / `agent-name`，两者之间取最后一条有效的，且不按会话过滤）→ AI 标题（`ai-title`，取本会话最新一条有效的）→ 仅 `UserPromptSubmit` 且以上都没有时用消息首行兜底。
+
+消息首行兜底会沿 body 上报 `session_title_from_prompt: true`；服务端不让它覆盖已有的正式标题（手动改名、AI 标题、metadata-only 写入的、重启恢复的），metadata-only 请求里的标题一律算正式标题、忽略该标记；消息首行派生的标题不写入会话历史和恢复记录。
+
 Copilot CLI 状态同步（command hook，非阻塞）：
   Copilot 触发事件
     → hooks/copilot-hook.js（camelCase 事件名 → agents/copilot-cli.js 映射 → HTTP POST）
