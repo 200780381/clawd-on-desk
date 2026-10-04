@@ -92,6 +92,33 @@ function makeRealStateHarness() {
 }
 
 describe("agent-runtime-main", () => {
+  it("shows sweeping for official PreCompact and keeps the Codex turn open", ({ mock }) => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const harness = makeRealStateHarness();
+    const runtime = createAgentRuntimeMain({
+      codexSubagentClassifier: {}, getStateRuntime: () => harness.state,
+      updateSession: (...args) => harness.state.updateSession(...args),
+    });
+    const sessionId = localSessionKey("codex:compact-start");
+    const opts = { agentId: "codex", hookSource: "codex-official", turnId: "compact-turn",
+      sourcePid: 42, profileId: "local", rawSessionId: "codex:compact-start" };
+    try {
+      runtime.updateSessionFromServer(sessionId, "thinking", "UserPromptSubmit", opts);
+      runtime.updateSessionFromServer(sessionId, "working", "PreToolUse", opts);
+      const before = harness.sounds.filter(name => name === "complete").length;
+      runtime.updateSessionFromServer(sessionId, "sweeping", "PreCompact", opts);
+      mock.timers.tick(1000);
+      assert.strictEqual(harness.state.getCurrentState(), "sweeping");
+      assert.ok(harness.stateChanges.includes("sweeping"));
+      assert.strictEqual(harness.sounds.filter(name => name === "complete").length, before);
+      runtime.updateSessionFromServer(sessionId, "working", "PostToolUse", opts);
+      assert.strictEqual(harness.state.sessions.get(sessionId).state, "working");
+    } finally {
+      runtime.cleanup();
+      harness.state.cleanup();
+    }
+  });
+
   it("keeps Codex monitor ownership and agent deferred wrappers out of main", () => {
     const mainSource = fs.readFileSync(path.join(SRC_DIR, "main.js"), "utf8");
 

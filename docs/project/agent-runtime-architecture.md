@@ -28,7 +28,7 @@ Cursor Agent 状态同步（command hook，stdin JSON，非阻塞）：
     → 同上状态机（agent_id: cursor-agent）
 
 Codex CLI 状态同步（official hooks primary + JSONL fallback）：
-  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop
+  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / Stop
     → hooks/codex-hook.js（stdin JSON，session_id 优先与 transcript_path 的 rollout UUID 对齐）
     → HTTP POST 127.0.0.1:23333/state { state, session_id, event, turn_id, hook_source }
     → 同上状态机（agent_id: codex）
@@ -48,6 +48,10 @@ monitor 当前标题与索引不一致时也会重发，覆盖索引恢复场景
 标题通道跳过带 host 或 WSL 标记的会话；刷新覆盖仍在活动或退休记录中的会话
 （最多 50 个活动、100 个退休 rollout）。超出后与既有行为相同，标题等下一次快照广播或生命周期事件更新。
 
+Codex 压缩开始通过 official `PreCompact` hook 触发既有 `sweeping` 一次性动画，
+同时覆盖 `manual` / `auto` trigger。它不结束回合、不产生控制决定，动画沿用现有
+最小显示时长与自动回退；不承诺整段压缩期间持续清扫。已有安装在下次集成同步时
+增量注册该事件，保留用户 hook；新增命令仍须遵守 Codex 原生 hook review。
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版
 `event_msg:item_completed`（`payload.item.type === "ContextCompaction"`）。本地与
 Remote SSH monitor 共用 `hooks/codex-log-event.js`，把后者归一化到旧事件键，沿用

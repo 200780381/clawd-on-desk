@@ -35,6 +35,7 @@ const CODEX_HOOK_EVENTS = [
   "PreToolUse",
   "PermissionRequest",
   "PostToolUse",
+  "PreCompact",
   "Stop",
 ];
 const CODEX_HOOKS_FEATURE_KEY = "hooks";
