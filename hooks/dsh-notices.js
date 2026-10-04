@@ -123,9 +123,8 @@ function putManualNotice(notices, profile, outcome) {
   });
 }
 
-// `{ notices, sequence, present, error }`. A bad/unreadable file yields an
-// empty list plus an error so the caller can report it instead of silently
-// overwriting.
+// `{ notices, sequence, error }`. A bad/unreadable file yields an empty list
+// plus an error so the caller can report it instead of silently overwriting.
 async function readDshNotices(managedRoot, profile, deps = {}) {
   const readFile = deps.readFile || fsp.readFile.bind(fsp);
   const filePath = noticesPath(managedRoot, profile);
@@ -133,22 +132,21 @@ async function readDshNotices(managedRoot, profile, deps = {}) {
   try {
     raw = await readFile(filePath, "utf8");
   } catch (err) {
-    if (err && err.code === "ENOENT") return { notices: [], sequence: 0, present: false, error: null };
-    return { notices: [], sequence: 0, present: false, error: `notices-unreadable:${filePath}` };
+    if (err && err.code === "ENOENT") return { notices: [], sequence: 0, error: null };
+    return { notices: [], sequence: 0, error: `notices-unreadable:${filePath}` };
   }
   let parsed;
   try {
     parsed = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
   } catch {
-    return { notices: [], sequence: 0, present: true, error: `notices-invalid:${filePath}` };
+    return { notices: [], sequence: 0, error: `notices-invalid:${filePath}` };
   }
   if (!isValidNoticeFile(parsed)) {
-    return { notices: [], sequence: 0, present: true, error: `notices-invalid:${filePath}` };
+    return { notices: [], sequence: 0, error: `notices-invalid:${filePath}` };
   }
   return {
     notices: sortNotices(parsed.notices),
     sequence: Number.isInteger(parsed.failedSequence) && parsed.failedSequence >= 0 ? parsed.failedSequence : 0,
-    present: true,
     error: null,
   };
 }

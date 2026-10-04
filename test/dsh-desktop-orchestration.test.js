@@ -549,7 +549,7 @@ test("a first desktop install carries firstInstall without restartRequired", asy
   }));
   assert.strictEqual(result.firstInstall, true);
   assert.strictEqual(result.restartRequired, false);
-  assert.match(result.message, /restart it after a generation change/);
+  assert.match(result.message, /after a plugin update, restart the desktop app/);
 });
 
 test("a desktop generation change carries restartRequired without firstInstall", async (t) => {

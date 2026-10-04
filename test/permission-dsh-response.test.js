@@ -154,4 +154,9 @@ describe("DSH permission response contract", () => {
     assert.strictEqual(entry.res.captured.statusCode, 204);
     assert.strictEqual(entry.res.captured.destroyed, false);
   });
+
+  it("labels the DeepSeek Harness queue entry by its agent id", () => {
+    assert.strictEqual(initPermission.__test.queueAgentLabel({ agentId: "deepseek-harness" }), "DeepSeek Harness");
+    assert.strictEqual(initPermission.__test.queueAgentLabel({ agentId: "unknown-agent" }), "unknown-agent");
+  });
 });

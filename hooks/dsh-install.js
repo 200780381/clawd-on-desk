@@ -24,9 +24,10 @@ const DSH_PROFILE_NAMES = Object.freeze([WEB_PROFILE_NAME, DESKTOP_PROFILE_NAME]
 const INSPECTION_LATCH_FILE = "inspection-required.json";
 const DESKTOP_INSPECTION_LATCH_FILE = "inspection-required-desktop.json";
 const DSH_RESTART_HINT = "DeepSeek Harness bridge verified on disk. Restart any running dsh web process to load this plugin generation.";
-// The desktop app loads plugins on start and does not hot-reload a replaced
-// same-name package, so a generation change needs a desktop restart.
-const DSH_DESKTOP_RESTART_HINT = "DeepSeek Harness bridge verified on disk. The desktop app loads plugins when it starts; restart it after a generation change.";
+// The desktop app loads a newly added plugin while it runs, but a replaced
+// same-name package does not hot-reload, so a plugin update (a generation
+// change) needs a desktop restart.
+const DSH_DESKTOP_RESTART_HINT = "DeepSeek Harness bridge verified on disk. The desktop app loads a newly added plugin while it runs; after a plugin update, restart the desktop app.";
 const MANAGED_OWNER = "clawd-on-desk";
 const MANIFEST_FILE = "clawd-manifest.json";
 const MANIFEST_SCHEMA_VERSION = 1;

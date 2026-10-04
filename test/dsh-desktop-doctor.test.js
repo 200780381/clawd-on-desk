@@ -231,6 +231,18 @@ test("a missing desktop app with a surviving registration shows needs-review", (
   assert.match(detail.detail, /desktop: The DeepSeek Harness desktop app was not found/);
 });
 
+test("neither side applicable still reports not-connected without a fix", (t) => {
+  const harness = makeHarness(t);
+  const detail = runDsh(harness);
+  assert.strictEqual(detail.status, "not-connected");
+  assert.strictEqual(detail.level, "warning");
+  assert.strictEqual(detail.fixAction, undefined);
+  assert.match(detail.detail, /web: not used/);
+  assert.match(detail.detail, /desktop: desktop app not installed/);
+  assert.strictEqual(detail.dshTargets.web.status, null);
+  assert.strictEqual(detail.dshTargets.desktop.status, null);
+});
+
 test("concurrent Windows registry reads for the same key share one PowerShell", async (t) => {
   dshInstallTest.resetWindowsRegistryCache();
   let calls = 0;
