@@ -847,12 +847,10 @@ test("a mutable web target with no command falls back to the no-command decision
     manualFallback: false,
     initializesProfile: false,
   };
-  const result = await dshInstallTest.resolveDshTargetCarrier(
+  const result = await dshInstallTest.resolveDshWebTarget(
     staticTarget,
-    "web",
     { dshCommand: false },
-    "startup-sync",
-    null
+    "startup-sync"
   );
   assert.strictEqual(result.role, "diagnose");
   assert.strictEqual(result.reason, "cli-unavailable");
@@ -901,7 +899,10 @@ test("an ambiguous desktop install is diagnosed and not probed", async (t) => {
       reason: "multiple-desktop-installs",
       candidates: [],
     },
-    runCommand: async () => { called = true; return { code: 0 }; },
+    runCommand: async (_program, args) => {
+      if (args.includes("--version")) called = true;
+      return { code: 0 };
+    },
   }, { operation: "install" });
   assert.strictEqual(result.desktop.role, "diagnose");
   assert.strictEqual(result.desktop.reason, "multiple-desktop-installs");

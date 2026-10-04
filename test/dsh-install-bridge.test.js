@@ -135,6 +135,7 @@ function installOptions(harness, cli, overrides = {}) {
     dshVersion: SUPPORTED_DSH_VERSION,
     dshInstallRoot: null,
     silent: true,
+    desktopDiscovery: { status: "not-found", appRoot: null, launcherPath: null, staticVersion: null, checkedPaths: [], reason: null },
     ...overrides,
   };
 }
@@ -840,9 +841,9 @@ test("malformed or foreign manual generation anchors fail closed and retain ever
     assert.strictEqual(installResult.manualInspectionRequired, true, scenario);
 
     const uninstallResult = await uninstallDeepSeekHarnessBridge(options);
-    assert.strictEqual(uninstallResult.status, "error", scenario);
-    assert.strictEqual(uninstallResult.reason, "manual-generation-reference-invalid", scenario);
-    assert.strictEqual(uninstallResult.referencePath, referencePath, scenario);
+    assert.strictEqual(uninstallResult.status, "ok", scenario);
+    assert.strictEqual(uninstallResult.registrationRemoved, true, scenario);
+    assert.ok(uninstallResult.warnings.some((line) => line.includes(referencePath)), scenario);
     assert.strictEqual(fs.existsSync(generationDir), true, scenario);
     assert.strictEqual(fs.existsSync(referencePath), true, scenario);
   }
@@ -878,9 +879,9 @@ test("manual generation cleanup preserves an anchor swapped before or during its
       ...options,
       __testManualGenerationReferenceHooks: hooks,
     });
-    assert.strictEqual(result.status, "error", scenario);
-    assert.strictEqual(result.reason, "manual-generation-reference-invalid", scenario);
-    assert.strictEqual(result.referencePath, referencePath, scenario);
+    assert.strictEqual(result.status, "ok", scenario);
+    assert.strictEqual(result.registrationRemoved, true, scenario);
+    assert.ok(result.warnings.some((line) => line.includes(referencePath)), scenario);
     assert.strictEqual(readJson(referencePath).bundleHash, replacement.bundleHash, scenario);
     assert.strictEqual(fs.existsSync(generationDir), true, scenario);
   }
@@ -920,8 +921,9 @@ test("manual reference clearing residues remain a persistent inspection fence", 
       ...options,
       __testManualGenerationReferenceHooks: hooks,
     });
-    assert.strictEqual(first.status, "error", scenario);
-    assert.strictEqual(first.reason, "manual-generation-reference-invalid", scenario);
+    assert.strictEqual(first.status, "ok", scenario);
+    assert.strictEqual(first.registrationRemoved, true, scenario);
+    assert.ok(first.warnings.some((line) => line.includes("manual generation reference is invalid")), scenario);
     assert.strictEqual(fs.existsSync(generationDir), true, scenario);
     const residue = fs.readdirSync(path.dirname(referencePath))
       .find((name) => name.startsWith(`${path.basename(referencePath)}.clearing-`));
@@ -929,9 +931,9 @@ test("manual reference clearing residues remain a persistent inspection fence", 
     if (scenario === "restore-link-failure") fs.unlinkSync(referencePath);
 
     const second = await uninstallDeepSeekHarnessBridge(options);
-    assert.strictEqual(second.status, "error", scenario);
-    assert.strictEqual(second.reason, "manual-generation-reference-invalid", scenario);
-    assert.match(second.referencePath, /\.clearing-/, scenario);
+    assert.strictEqual(second.status, "ok", scenario);
+    assert.strictEqual(second.registrationRemoved, true, scenario);
+    assert.ok(second.warnings.some((line) => line.includes(".clearing-")), scenario);
     assert.strictEqual(fs.existsSync(generationDir), true, scenario);
   }
 });
@@ -957,10 +959,9 @@ test("an unreadable manual-reference directory is never treated as an empty resi
         },
       },
     });
-    assert.strictEqual(result.status, "error", code);
-    assert.strictEqual(result.reason, "manual-generation-reference-invalid", code);
-    assert.strictEqual(result.referencePath, resolveManagedRoot({ managedRoot: harness.managedRoot }), code);
-    assert.strictEqual(result.manualInspectionRequired, true, code);
+    assert.strictEqual(result.status, "ok", code);
+    assert.strictEqual(result.registrationRemoved, true, code);
+    assert.ok(result.warnings.some((line) => line.includes(resolveManagedRoot({ managedRoot: harness.managedRoot }))), code);
     assert.strictEqual(fs.existsSync(generationDir), true, code);
   }
 });
@@ -1851,17 +1852,17 @@ test("a healthy or absent fast path cannot clear an inspection latch outside the
   }
 
   const healthyCalls = healthyCli.calls.length;
-  await assert.rejects(
-    installDeepSeekHarnessBridge(installOptions(healthy, healthyCli, { operation: "explicit-repair" })),
-    /already locked/,
-  );
+  const healthyResult = await installDeepSeekHarnessBridge(installOptions(healthy, healthyCli, { operation: "explicit-repair" }));
+  assert.strictEqual(healthyResult.status, "error");
+  assert.strictEqual(healthyResult.reason, "unexpected-error");
+  assert.match(healthyResult.message, /already locked/);
+  assert.match(healthyResult.lockPath, /mutation\.lock/);
   assert.strictEqual(healthyCli.calls.length, healthyCalls);
   assert.strictEqual(fs.existsSync(path.join(healthy.managedRoot, "inspection-required.json")), true);
 
-  await assert.rejects(
-    uninstallDeepSeekHarnessBridge(installOptions(absent, absentCli)),
-    /already locked/,
-  );
+  const absentResult = await uninstallDeepSeekHarnessBridge(installOptions(absent, absentCli));
+  assert.strictEqual(absentResult.status, "error");
+  assert.ok(absentResult.warnings.some((line) => line.includes("already locked")));
   assert.deepStrictEqual(absentCli.calls, []);
   assert.strictEqual(fs.existsSync(path.join(absent.managedRoot, "inspection-required.json")), true);
 });
@@ -2355,10 +2356,11 @@ test("a marker staged for an unlisted DSH version reports version-unsupported", 
 });
 
 test("install rejects a malformed host token or a version below its family floor", async (t) => {
-  for (const raw of [
+  const invalidTokens = [
     "0.2.0-", "0.2.0+", "0.2.0+build", "0.2.0-rc.2.", "00.2.0", "0.2.0-rc..1", "0.2.0-01",
-    "0.2.01", "0.2.0-rc.02", "0.2.0-beta.9",
-  ]) {
+    "0.2.01", "0.2.0-rc.02",
+  ];
+  for (const raw of [...invalidTokens, "0.2.0-beta.9"]) {
     const harness = makeHarness();
     const cli = makeOfficialCli(harness);
     t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
@@ -2366,7 +2368,7 @@ test("install rejects a malformed host token or a version below its family floor
       dshVersion: raw,
     }));
     assert.strictEqual(result.status, "error", raw);
-    assert.strictEqual(result.reason, "version-unsupported", raw);
+    assert.strictEqual(result.reason, invalidTokens.includes(raw) ? "version-invalid" : "version-unsupported", raw);
     assert.deepStrictEqual(cli.calls, [], raw);
     assert.strictEqual(inspectDeepSeekHarnessDiskSync({
       dshHome: harness.dshHome,
@@ -2424,7 +2426,7 @@ test("install treats several candidate version lines as an unknown host version"
     runCommand: async () => ({ code: 0, stdout: "0.2.0-rc.2\n0.2.1\n" }),
   }));
   assert.strictEqual(result.status, "error");
-  assert.strictEqual(result.reason, "version-unsupported");
+  assert.strictEqual(result.reason, "version-invalid");
   assert.deepStrictEqual(cli.calls, []);
 });
 
@@ -2846,7 +2848,7 @@ test("install treats a version line on stdout and another on stderr as an unknow
     runCommand: async () => ({ code: 0, stdout: "0.2.1\n", stderr: "0.2.2\n" }),
   }));
   assert.strictEqual(result.status, "error");
-  assert.strictEqual(result.reason, "version-unsupported");
+  assert.strictEqual(result.reason, "version-invalid");
   assert.deepStrictEqual(cli.calls, []);
 });
 

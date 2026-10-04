@@ -19,6 +19,9 @@ const DSH_PROFILE_NAMES = Object.freeze([WEB_PROFILE_NAME, DESKTOP_PROFILE_NAME]
 const INSPECTION_LATCH_FILE = "inspection-required.json";
 const DESKTOP_INSPECTION_LATCH_FILE = "inspection-required-desktop.json";
 const DSH_RESTART_HINT = "DeepSeek Harness bridge verified on disk. Restart any running dsh web process to load this plugin generation.";
+// The desktop app loads plugins on start and does not hot-reload a replaced
+// same-name package, so a generation change needs a desktop restart.
+const DSH_DESKTOP_RESTART_HINT = "DeepSeek Harness bridge verified on disk. The desktop app loads plugins when it starts; restart it after a generation change.";
 const MANAGED_OWNER = "clawd-on-desk";
 const MANIFEST_FILE = "clawd-manifest.json";
 const MANIFEST_SCHEMA_VERSION = 1;
@@ -863,6 +866,14 @@ async function readDshVersion(commandInfo, options = {}) {
 // "the version is not admitted" as distinct reasons.
 async function probeDshCarrier(commandInfo, options = {}) {
   if (!commandInfo) return { status: "failed", reason: "carrier-failed", detail: "no dsh command" };
+  // Tests and callers may pin the version instead of running the host; keep the
+  // same shortcut readDshVersion uses.
+  if (typeof options.dshVersion === "string") {
+    const pinned = parseDshVersion(options.dshVersion);
+    if (!pinned) return { status: "failed", reason: "version-invalid", detail: options.dshVersion };
+    if (!isSupportedDshVersion(pinned)) return { status: "failed", reason: "version-unsupported", version: pinned };
+    return { status: "available", version: pinned };
+  }
   const result = await runCommand(commandInfo.command, [...commandInfo.prefixArgs, "--version"], {
     ...commandExecutionOptions(commandInfo, options),
     timeoutMs: dshVersionTimeoutMs(commandInfo),
@@ -2261,59 +2272,76 @@ function dshCarrierUnavailable(kind) {
   return { status: "unavailable", kind, path: null };
 }
 
-// Operation-mode refinement of one static target: only a mutable target is
+// Operation-mode refinement of one desktop target: only a mutable target is
 // actually probed. The probe's version is kept so the caller can re-check it
 // under the mutation lock.
 async function resolveDshTargetCarrier(staticTarget, profile, options, operation, desktopDiscovery) {
   if (staticTarget.role !== "mutable") return staticTarget;
-  let commandInfo = null;
-  let noCommandReason = null;
-  if (profile === WEB_PROFILE_NAME) {
-    commandInfo = await resolveDshCommand(options);
-  } else {
-    const desktop = desktopCommandInfo(desktopDiscovery, options);
-    commandInfo = desktop.commandInfo;
-    noCommandReason = desktop.reason;
-  }
-  if (!commandInfo) {
-    if (profile === DESKTOP_PROFILE_NAME) {
-      return {
-        ...staticTarget,
-        role: "diagnose",
-        reason: noCommandReason || "launcher-unrecognized",
-        carrier: dshCarrierUnavailable("desktop"),
-      };
-    }
-    // web: fall back to the static "no command candidate" decision.
-    const fallback = resolveWebDshRole({
-      evidence: staticTarget.evidence,
-      carrier: dshCarrierUnavailable("npm"),
-      operation,
-    });
+  const desktop = desktopCommandInfo(desktopDiscovery, options);
+  if (!desktop.commandInfo) {
     return {
       ...staticTarget,
-      role: fallback.role,
-      reason: fallback.reason,
-      manualFallback: fallback.manualFallback === true,
-      initializesProfile: fallback.initializesProfile === true,
-      carrier: dshCarrierUnavailable("npm"),
+      role: "diagnose",
+      reason: desktop.reason || "launcher-unrecognized",
+      carrier: dshCarrierUnavailable("desktop"),
     };
   }
-  const kind = commandInfo.kind === "desktop" ? "desktop" : "npm";
-  const probe = await probeDshCarrier(commandInfo, options);
+  const probe = await probeDshCarrier(desktop.commandInfo, options);
   if (probe.status === "available") {
     return {
       ...staticTarget,
       role: "mutable",
       reason: null,
-      carrier: { status: "available", kind, version: probe.version, commandInfo },
+      carrier: { status: "available", kind: "desktop", version: probe.version, commandInfo: desktop.commandInfo },
     };
   }
   return {
     ...staticTarget,
     role: "diagnose",
     reason: probe.reason,
-    carrier: dshCarrierUnavailable(kind),
+    carrier: { ...dshCarrierUnavailable("desktop"), version: probe.version || null },
+  };
+}
+
+// Web always re-resolves its command in operation mode instead of trusting the
+// static PATH scan: on macOS the app PATH usually cannot see a login-shell dsh.
+// Rows 1-9 of the role table (residue, latch, foreign, ...) are diagnose and
+// keep their static decision; only the command/manifest row is re-decided.
+async function resolveDshWebTarget(staticTarget, options, operation) {
+  const rowTen = staticTarget.role === "mutable"
+    || staticTarget.reason === "web-profile-uninitialized"
+    || staticTarget.reason === "cli-unavailable"
+    || staticTarget.reason === "web-not-used";
+  if (!rowTen) return staticTarget;
+  const commandInfo = await resolveDshCommand(options);
+  const kind = commandInfo && commandInfo.kind === "desktop" ? "desktop" : "npm";
+  const carrier = commandInfo
+    ? { status: "unverified", kind, path: commandInfo.command }
+    : { status: "unavailable", kind: "npm", path: null };
+  const role = resolveWebDshRole({ evidence: staticTarget.evidence, carrier, operation });
+  const rebuilt = {
+    ...staticTarget,
+    role: role.role,
+    reason: role.reason,
+    manualFallback: role.manualFallback === true,
+    initializesProfile: role.initializesProfile === true,
+    carrier,
+  };
+  if (rebuilt.role !== "mutable" || !commandInfo) return rebuilt;
+  const probe = await probeDshCarrier(commandInfo, options);
+  if (probe.status === "available") {
+    return {
+      ...rebuilt,
+      role: "mutable",
+      reason: null,
+      carrier: { status: "available", kind, version: probe.version, commandInfo },
+    };
+  }
+  return {
+    ...rebuilt,
+    role: "diagnose",
+    reason: probe.reason,
+    carrier: { ...dshCarrierUnavailable(kind), version: probe.version || null },
   };
 }
 
@@ -2328,7 +2356,7 @@ async function resolveDshTargets(options = {}, { operation } = {}) {
     { operation: resolvedOperation }
   );
   return {
-    web: await resolveDshTargetCarrier(staticTargets.web, WEB_PROFILE_NAME, options, resolvedOperation, desktopDiscovery),
+    web: await resolveDshWebTarget(staticTargets.web, options, resolvedOperation),
     desktop: await resolveDshTargetCarrier(staticTargets.desktop, DESKTOP_PROFILE_NAME, options, resolvedOperation, desktopDiscovery),
   };
 }
@@ -3073,6 +3101,21 @@ function inspectionLatchResult(latch) {
   };
 }
 
+// Startup sync reports a plugin the user disabled in DSH instead of re-adding
+// it; that decision is independent of Clawd's version and the target hash.
+function pluginDisabledInDshResult(health) {
+  return {
+    status: "error",
+    reason: "plugin-disabled-in-dsh",
+    healthReason: health && health.status || null,
+    message: "The DeepSeek Harness plugin is disabled in DSH (dependency present, bundle entry missing); startup sync only reports it",
+  };
+}
+
+function dshSuccessMessage(profile) {
+  return profile === DESKTOP_PROFILE_NAME ? DSH_DESKTOP_RESTART_HINT : DSH_RESTART_HINT;
+}
+
 function isUnknownCommandResult(result) {
   return !!(result && (result.timedOut || result.signal || result.outputLimited));
 }
@@ -3247,7 +3290,10 @@ async function cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch
       manualInspectionRequired: true,
     };
   }
-  await clearManualGenerationReference(options);
+  // manual reference is web-owned, so residue cleanup on desktop never touches it.
+  if ((options.profile || WEB_PROFILE_NAME) === WEB_PROFILE_NAME) {
+    await clearManualGenerationReference(options);
+  }
   await cleanUnreferencedGenerations(null, options);
   if (lockedLatch) await clearInspectionLatch(options);
   return { status: "ok", removed: true, updated: true };
@@ -3382,36 +3428,39 @@ async function discardCreatedGenerationIfUnreferenced(generation, _health, optio
   await fsp.rm(candidate, { recursive: true, force: false });
 }
 
-async function syncDeepSeekHarnessIntegration(options = {}) {
-  options = freezeDshOperationOptions(options);
+async function syncDshProfile(options, target) {
+  const profile = target.profile;
+  const scoped = { ...options, profile };
   const operation = options.operation || "install";
   const silent = options.silent === true;
+  const commandInfo = target.carrier && target.carrier.status === "available"
+    ? target.carrier.commandInfo
+    : null;
   try {
-    return await enqueueMutation(async () => {
     const removalResidueHealth = managedProfileRemovalResidueHealth(
-      await listManagedProfileRemovalResidues(options),
-      options
+      await listManagedProfileRemovalResidues(scoped),
+      scoped
     );
     if (removalResidueHealth) return managedProfileRemovalResidueResult(removalResidueHealth);
-    const latch = await readInspectionLatch(options);
+    const latch = await readInspectionLatch(scoped);
     if (latch && operation === "startup-sync") return inspectionLatchResult(latch);
-    if (!(await isDshInstalled(options))) {
-      return { status: "skipped", reason: "dsh-not-found", message: "DeepSeek Harness is not installed" };
-    }
-    const profileDir = resolveDshProfileDir(options.dshHome || resolveDshHome(options.env));
+    const profileDir = resolveDshProfileDir(options.dshHome || resolveDshHome(options.env), profile);
     if (operation === "startup-sync" && !(await exists(path.join(profileDir, "package.json")))) {
       return {
         status: "error",
         reason: "repair-required",
-        message: "DeepSeek Harness web profile is missing; use Settings Repair to initialize it",
+        message: `DeepSeek Harness ${profile} profile is missing; use Settings Repair to initialize it`,
       };
     }
-    const commandInfo = await resolveDshCommand(options);
-    const before = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+    const before = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
     const currentVersion = await sourceClawdVersion(options);
-    const manualReference = await readManualGenerationReference(options);
+    // manual reference is web-owned; desktop reads nothing here so an install
+    // on desktop can never consume or clear web's anchor.
+    const manualReference = profile === WEB_PROFILE_NAME
+      ? await readManualGenerationReference(options)
+      : null;
     if (manualReference && manualReference.invalid) {
-      return manualGenerationReferenceResult(manualReference, options);
+      return manualGenerationReferenceResult(manualReference, scoped);
     }
     if (!hasMutableManagedState(before)) {
       return {
@@ -3420,12 +3469,22 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
         message: before.status === "generation-integrity-failed"
           ? "The managed DSH bridge bytes no longer match their ownership marker; manual inspection is required"
           : (before.status === "profile-corrupt"
-            ? "The DeepSeek Harness web profile manifest is unreadable; Clawd will not rewrite it automatically"
+            ? `The DeepSeek Harness ${profile} profile manifest is unreadable; Clawd will not rewrite it automatically`
             : "A foreign or conflicting DSH plugin uses the Clawd package name"),
         manualInspectionRequired: true,
       };
     }
+    // Startup sync never re-enables a plugin the user disabled in DSH: that is
+    // a report-only state regardless of Clawd's version or the target hash.
+    if (operation === "startup-sync" && before.status === "profile-entry-incomplete") {
+      return pluginDisabledInDshResult(before);
+    }
     if (!commandInfo) {
+      if (profile === DESKTOP_PROFILE_NAME) {
+        // desktop is never driven by npx; the orchestrator only sends an
+        // available carrier here, so this is a defensive fail-closed.
+        return { status: "error", reason: "carrier-unavailable", message: "DeepSeek Harness desktop command is unavailable" };
+      }
       const markerContract = before.marker ? dshContractForMarker(before.marker) : null;
       if (before.marker && !markerContract) {
         return {
@@ -3455,14 +3514,14 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
         };
       }
       const assumedVersion = before.marker ? before.marker.installedDshVersion : noCliContract.artifactVersion;
-      const bundle = await readSourceBundle({ ...options, contract: noCliContract });
+      const bundle = await readSourceBundle({ ...scoped, contract: noCliContract });
       if (before.status === "healthy" && before.marker.bundleHash === bundle.bundleHash) {
         if (latch) return inspectionLatchResult(latch);
         if (manualReference) {
           const lock = await acquireMutationLock(options);
           try {
             const locked = await inspectDeepSeekHarnessIntegration({
-              ...options,
+              ...scoped,
               commandInfo: null,
               resolveCommandForInspection: false,
             });
@@ -3476,18 +3535,18 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
             }
             await clearManualGenerationReference(options);
             await cleanUnreferencedGenerations(locked.marker.bundleHash, options);
-            return { status: "ok", updated: false, health: locked, message: DSH_RESTART_HINT };
+            return { status: "ok", updated: false, health: locked, message: dshSuccessMessage(profile) };
           } finally {
             await lock.release();
           }
         }
-        return { status: "ok", updated: false, health: before, message: DSH_RESTART_HINT };
+        return { status: "ok", updated: false, health: before, message: dshSuccessMessage(profile) };
       }
       if (operation !== "startup-sync") {
         const lock = await acquireMutationLock(options);
         try {
           const locked = await inspectDeepSeekHarnessIntegration({
-            ...options,
+            ...scoped,
             commandInfo: null,
             resolveCommandForInspection: false,
           });
@@ -3524,7 +3583,7 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
               noCliContract.verifiedDshArtifact,
               "plugin",
               "--profile",
-              WEB_PROFILE_NAME,
+              profile,
               "add",
               generation.generationDir,
             ], options),
@@ -3536,7 +3595,7 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
       }
       return { status: "error", reason: "cli-unavailable", message: "DeepSeek Harness CLI is not available" };
     }
-    const dshVersion = await readDshVersion(commandInfo, options);
+    const dshVersion = target.carrier.version;
     const family = dshFamilyForVersion(dshVersion);
     if (!family) {
       return {
@@ -3548,14 +3607,14 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
       };
     }
     const contract = dshTargetContract(family, dshVersion);
-    const bundle = await readSourceBundle({ ...options, contract });
+    const bundle = await readSourceBundle({ ...scoped, contract });
     if (
       !latch
       && !manualReference
       && before.status === "healthy"
       && before.marker.bundleHash === bundle.bundleHash
     ) {
-      return { status: "ok", updated: false, health: before, message: DSH_RESTART_HINT };
+      return { status: "ok", updated: false, health: before, message: dshSuccessMessage(profile) };
     }
     if (before.owned && before.marker && before.marker.bundleHash !== bundle.bundleHash) {
       const order = compareVersions(before.marker.sourceClawdVersion, currentVersion);
@@ -3569,7 +3628,7 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
 
     const lock = await acquireMutationLock(options);
     try {
-      const locked = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+      const locked = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
       const lockedVersion = await readDshVersion(commandInfo, options);
       if (!isSupportedDshVersion(lockedVersion)) {
         return {
@@ -3598,14 +3657,17 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
           manualInspectionRequired: true,
         };
       }
-      const lockedLatch = await readInspectionLatch(options);
+      if (operation === "startup-sync" && locked.status === "profile-entry-incomplete") {
+        return pluginDisabledInDshResult(locked);
+      }
+      const lockedLatch = await readInspectionLatch(scoped);
       if (locked.status === "healthy" && locked.marker.bundleHash === bundle.bundleHash) {
         if (manualReference) {
           await clearManualGenerationReference(options);
           await cleanUnreferencedGenerations(locked.marker.bundleHash, options);
         }
-        if (lockedLatch) await clearInspectionLatch(options);
-        return { status: "ok", updated: false, health: locked, message: DSH_RESTART_HINT };
+        if (lockedLatch) await clearInspectionLatch(scoped);
+        return { status: "ok", updated: false, health: locked, message: dshSuccessMessage(profile) };
       }
       const pnpmRuntime = await resolvePnpmRuntime(commandInfo, options);
       if (!pnpmRuntime.available) {
@@ -3622,24 +3684,24 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
       }
       const generation = await promoteGeneration(bundle, { ...options, contract, dshVersion });
       const result = await runDshCommand([
-        "plugin", "--profile", WEB_PROFILE_NAME, "add", generation.generationDir,
+        "plugin", "--profile", profile, "add", generation.generationDir,
       ], { ...options, commandInfo: pnpmRuntime.commandInfo });
       if (result.code !== 0) {
-        const failedHealth = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+        const failedHealth = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
         const unknown = isUnknownCommandResult(result);
         const changed = healthFingerprint(failedHealth) !== healthFingerprint(locked);
         if (unknown || changed) {
           await writeInspectionLatch(
             unknown ? "plugin-add-unknown" : "plugin-add-partial-mutation",
             (result.stderr || result.stdout || "dsh plugin add failed").trim(),
-            options
+            scoped
           );
           return {
             status: "error",
             reason: "inspection-required",
             message: (result.stderr || result.stdout || "dsh plugin add had an unknown or partial result").trim(),
             manualCommand: buildManualDshCommand([
-              "dsh", "plugin", "--profile", WEB_PROFILE_NAME, "add", generation.generationDir,
+              "dsh", "plugin", "--profile", profile, "add", generation.generationDir,
             ], options),
             manualInspectionRequired: true,
           };
@@ -3650,17 +3712,17 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
           reason: "plugin-add-failed",
           message: (result.stderr || result.stdout || "dsh plugin add failed").trim(),
           manualCommand: buildManualDshCommand([
-            "dsh", "plugin", "--profile", WEB_PROFILE_NAME, "add", generation.generationDir,
+            "dsh", "plugin", "--profile", profile, "add", generation.generationDir,
           ], options),
         };
       }
       const after = await inspectDeepSeekHarnessIntegration({
-        ...options,
+        ...scoped,
         commandInfo,
         expectedHashes: { [contract.supportedDshRange]: generation.bundleHash },
       });
       if (after.status !== "healthy") {
-        await writeInspectionLatch("plugin-add-verification-failed", after.status, options);
+        await writeInspectionLatch("plugin-add-verification-failed", after.status, scoped);
         return {
           status: "error",
           reason: "inspection-required",
@@ -3669,50 +3731,61 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
           manualInspectionRequired: true,
         };
       }
-      await clearManualGenerationReference(options);
+      if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
       await cleanUnreferencedGenerations(generation.bundleHash, options);
-      if (lockedLatch) await clearInspectionLatch(options);
-      if (!silent) console.log(`Clawd: DeepSeek Harness bridge ready (${generation.bundleHash.slice(0, 12)})`);
-      return {
+      if (lockedLatch) await clearInspectionLatch(scoped);
+      if (!silent) console.log(`Clawd: DeepSeek Harness ${profile} bridge ready (${generation.bundleHash.slice(0, 12)})`);
+      const success = {
         status: "ok",
         updated: true,
         generation: generation.generationDir,
         health: after,
-        message: DSH_RESTART_HINT,
+        message: dshSuccessMessage(profile),
       };
+      // Step 5 turns these into the desktop notice; a same-generation check
+      // (updated:false) above returns before them.
+      if (profile === DESKTOP_PROFILE_NAME) {
+        success.firstInstall = !before.owned;
+        success.restartRequired = before.owned === true;
+      }
+      return success;
     } finally {
       await lock.release();
     }
-    });
   } catch (err) {
     if (err && err.code === "DSH_MANUAL_GENERATION_REFERENCE_INVALID") {
-      return manualGenerationReferenceResult({ referencePath: err.referencePath }, options);
+      return manualGenerationReferenceResult({ referencePath: err.referencePath }, scoped);
     }
     throw err;
   }
 }
 
-async function uninstallDeepSeekHarnessBridge(options = {}) {
-  options = freezeDshOperationOptions(options);
+async function uninstallDshProfile(options, target) {
+  const profile = target.profile;
+  const scoped = { ...options, profile };
+  const commandInfo = target.carrier && target.carrier.status === "available"
+    ? target.carrier.commandInfo
+    : null;
   try {
-    return await enqueueMutation(async () => {
     const removalResidueHealth = managedProfileRemovalResidueHealth(
-      await listManagedProfileRemovalResidues(options),
-      options
+      await listManagedProfileRemovalResidues(scoped),
+      scoped
     );
     if (removalResidueHealth) return managedProfileRemovalResidueResult(removalResidueHealth);
-    const latch = await readInspectionLatch(options);
-    const manualReference = await readManualGenerationReference(options);
+    const latch = await readInspectionLatch(scoped);
+    // manual reference is web-owned; desktop must never clear or rewrite it.
+    const manualReference = profile === WEB_PROFILE_NAME
+      ? await readManualGenerationReference(options)
+      : null;
     if (manualReference && manualReference.invalid) {
-      return manualGenerationReferenceResult(manualReference, options);
+      return manualGenerationReferenceResult(manualReference, scoped);
     }
-    const commandInfo = await resolveDshCommand(options);
-    const before = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+    const before = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
     if (before.status === "absent" || before.status === "profile-missing") {
       if (!latch) {
         const lock = await acquireMutationLock(options);
         try {
-          const locked = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+          const locked = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
           if (locked.status !== "absent" && locked.status !== "profile-missing") {
             return {
               status: "error",
@@ -3721,7 +3794,7 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
               manualInspectionRequired: true,
             };
           }
-          await clearManualGenerationReference(options);
+          if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
           await cleanUnreferencedGenerations(null, options);
           return { status: "skipped", reason: "bridge-not-installed" };
         } finally {
@@ -3729,7 +3802,7 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
         }
       }
       if (!commandInfo) return inspectionLatchResult(latch);
-      const dshVersion = await readDshVersion(commandInfo, options);
+      const dshVersion = target.carrier.version;
       if (!isSupportedDshVersion(dshVersion)) {
         return {
           status: "error",
@@ -3742,7 +3815,7 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
       }
       const lock = await acquireMutationLock(options);
       try {
-        const locked = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+        const locked = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
         const lockedVersion = await readDshVersion(commandInfo, options);
         if (!isSupportedDshVersion(lockedVersion)) {
           return {
@@ -3762,10 +3835,10 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
             manualInspectionRequired: true,
           };
         }
-        const lockedLatch = await readInspectionLatch(options);
-        await clearManualGenerationReference(options);
+        const lockedLatch = await readInspectionLatch(scoped);
+        if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
         await cleanUnreferencedGenerations(null, options);
-        if (lockedLatch) await clearInspectionLatch(options);
+        if (lockedLatch) await clearInspectionLatch(scoped);
         return { status: "skipped", reason: "bridge-not-installed" };
       } finally {
         await lock.release();
@@ -3779,6 +3852,11 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
       };
     }
     if (!commandInfo) {
+      if (profile === DESKTOP_PROFILE_NAME) {
+        // desktop is never removed with npx; the orchestrator only sends an
+        // available carrier here, so this is a defensive fail-closed.
+        return { status: "error", reason: "carrier-unavailable", message: "DeepSeek Harness desktop command is unavailable" };
+      }
       const removalContract = dshContractForMarker(before.marker);
       if (!removalContract) {
         return {
@@ -3807,7 +3885,7 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
       if (before.status === "managed-residue") {
         const lock = await acquireMutationLock(options);
         try {
-          const locked = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+          const locked = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
           if (
             locked.status !== "managed-residue"
             || !hasMutableManagedState(locked)
@@ -3839,8 +3917,8 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
               message: "DSH plugin contract changed before managed residue cleanup",
             };
           }
-          const lockedLatch = await readInspectionLatch(options);
-          return await cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch, options);
+          const lockedLatch = await readInspectionLatch(scoped);
+          return await cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch, scoped);
         } finally {
           await lock.release();
         }
@@ -3854,13 +3932,13 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
           removalTarget.verifiedDshArtifact,
           "plugin",
           "--profile",
-          WEB_PROFILE_NAME,
+          profile,
           "remove",
           BRIDGE_PACKAGE_NAME,
         ], options),
       };
     }
-    const dshVersion = await readDshVersion(commandInfo, options);
+    const dshVersion = target.carrier.version;
     if (!isSupportedDshVersion(dshVersion)) {
       return {
         status: "error",
@@ -3873,7 +3951,7 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
     }
     const lock = await acquireMutationLock(options);
     try {
-      const locked = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+      const locked = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
       const lockedVersion = await readDshVersion(commandInfo, options);
       if (!isSupportedDshVersion(lockedVersion)) {
         return {
@@ -3885,6 +3963,18 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
           manualInspectionRequired: true,
         };
       }
+      // An uninstall must also confirm the host version did not move while the
+      // lock was acquired; the removal contract depends on the exact version.
+      if (lockedVersion !== dshVersion) {
+        return {
+          status: "error",
+          reason: "version-changed",
+          message: `DeepSeek Harness changed from ${dshVersion} to ${lockedVersion} before removal; retry after the host version is stable`,
+          detectedVersion: lockedVersion,
+          expectedVersion: dshVersion,
+          supportedRange: supportedDshRangeLabel(),
+        };
+      }
       if (
         !hasMutableManagedState(locked)
         || !locked.owned
@@ -3893,26 +3983,26 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
       ) {
         return { status: "error", reason: "ownership-changed", message: "DSH plugin ownership changed before removal" };
       }
-      const lockedLatch = await readInspectionLatch(options);
+      const lockedLatch = await readInspectionLatch(scoped);
       if (locked.status === "managed-residue") {
-        return await cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch, options);
+        return await cleanLockedManagedProfileResidue(locked, commandInfo, lockedLatch, scoped);
       }
       const pnpmRuntime = await resolvePnpmRuntime(commandInfo, options);
       if (!pnpmRuntime.available) {
         return { status: "error", reason: "pnpm-unavailable", message: "pnpm is required by dsh plugin remove" };
       }
       const result = await runDshCommand([
-        "plugin", "--profile", WEB_PROFILE_NAME, "remove", BRIDGE_PACKAGE_NAME,
+        "plugin", "--profile", profile, "remove", BRIDGE_PACKAGE_NAME,
       ], { ...options, commandInfo: pnpmRuntime.commandInfo });
       if (result.code !== 0) {
-        const failedHealth = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+        const failedHealth = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
         const unknown = isUnknownCommandResult(result);
         const changed = healthFingerprint(failedHealth) !== healthFingerprint(locked);
         if (unknown || changed) {
           await writeInspectionLatch(
             unknown ? "plugin-remove-unknown" : "plugin-remove-partial-mutation",
             (result.stderr || result.stdout || "dsh plugin remove failed").trim(),
-            options
+            scoped
           );
           return {
             status: "error",
@@ -3927,11 +4017,11 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
           message: (result.stderr || result.stdout || "dsh plugin remove failed").trim(),
         };
       }
-      let after = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+      let after = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
       if (after.status === "managed-residue") {
-        const cleanup = await unlinkManagedProfileResidue(after, options);
+        const cleanup = await unlinkManagedProfileResidue(after, scoped);
         if (!cleanup.removed) {
-          await writeInspectionLatch("plugin-remove-residue-cleanup-failed", cleanup.reason, options);
+          await writeInspectionLatch("plugin-remove-residue-cleanup-failed", cleanup.reason, scoped);
           return {
             status: "error",
             reason: "inspection-required",
@@ -3941,10 +4031,10 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
             manualInspectionRequired: true,
           };
         }
-        after = await inspectDeepSeekHarnessIntegration({ ...options, commandInfo });
+        after = await inspectDeepSeekHarnessIntegration({ ...scoped, commandInfo });
       }
       if (after.status !== "absent" && after.status !== "profile-missing") {
-        await writeInspectionLatch("plugin-remove-verification-failed", after.status, options);
+        await writeInspectionLatch("plugin-remove-verification-failed", after.status, scoped);
         return {
           status: "error",
           reason: "inspection-required",
@@ -3953,13 +4043,340 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
           manualInspectionRequired: true,
         };
       }
-      await clearManualGenerationReference(options);
+      if (profile === WEB_PROFILE_NAME) await clearManualGenerationReference(options);
       await cleanUnreferencedGenerations(null, options);
-      if (lockedLatch) await clearInspectionLatch(options);
+      if (lockedLatch) await clearInspectionLatch(scoped);
       return { status: "ok", removed: true, updated: true };
     } finally {
       await lock.release();
     }
+  } catch (err) {
+    if (err && err.code === "DSH_MANUAL_GENERATION_REFERENCE_INVALID") {
+      return manualGenerationReferenceResult({ referencePath: err.referencePath }, scoped);
+    }
+    throw err;
+  }
+}
+
+function dshDiagnoseMessage(target) {
+  const profile = target && target.profile ? target.profile : "dsh";
+  return `DeepSeek Harness ${profile} target requires manual attention (${(target && target.reason) || "unknown"})`;
+}
+
+function dshOutcome(result) {
+  if (!result) return "not-applicable";
+  if (result.status === "ok") return "success";
+  if (result.status === "skipped") return "not-applicable";
+  return "failed";
+}
+
+function dshFailureWarning(entry) {
+  const message = entry.result
+    ? (entry.result.message || entry.result.reason || "failed")
+    : dshDiagnoseMessage(entry.target);
+  return `${entry.profile}: ${message}`;
+}
+
+// The settings whitelist keeps these top-level fields; copy the first failing
+// target's fields verbatim (or synthesize them for a diagnose target).
+function dshErrorFields(result, entry) {
+  if (!result) {
+    return { reason: entry.reason || "diagnose", message: dshDiagnoseMessage(entry.target) };
+  }
+  const out = {};
+  for (const key of [
+    "reason",
+    "message",
+    "manualCommand",
+    "detectedVersion",
+    "expectedVersion",
+    "supportedRange",
+    "healthReason",
+    "cleanupReason",
+    "residuePath",
+    "residuePaths",
+    "referencePath",
+    "lockPath",
+    "targetReason",
+    "manualInspectionRequired",
+    "manualGenerationReferenced",
+  ]) {
+    if (result[key] !== undefined) out[key] = result[key];
+  }
+  return out;
+}
+
+function dshTargetsMap(entries) {
+  const map = {};
+  for (const entry of entries) {
+    map[entry.profile] = {
+      role: entry.role,
+      reason: entry.reason === undefined ? null : entry.reason,
+      result: entry.result || null,
+    };
+  }
+  return map;
+}
+
+function dshOwnershipFailureResult(target, profile, kind) {
+  if (kind === "uninstall") {
+    return {
+      status: "error",
+      reason: "ownership-not-proven",
+      message: "Refusing to remove a DSH plugin whose Clawd ownership is not fully verified",
+    };
+  }
+  const status = target.health && target.health.status;
+  const message = status === "generation-integrity-failed"
+    ? "The managed DSH bridge bytes no longer match their ownership marker; manual inspection is required"
+    : (status === "profile-corrupt"
+      ? `The DeepSeek Harness ${profile} profile manifest is unreadable; Clawd will not rewrite it automatically`
+      : "A foreign or conflicting DSH plugin uses the Clawd package name");
+  return { status: "error", reason: status || "ownership-not-proven", message, manualInspectionRequired: true };
+}
+
+function dshUnsupportedVersionResult(target, profile, kind) {
+  const detected = (target.carrier && target.carrier.version)
+    || (target.health && target.health.detectedDshVersion)
+    || (target.discovery && target.discovery.staticVersion)
+    || null;
+  if (kind === "uninstall") {
+    return {
+      status: "error",
+      reason: "version-unsupported",
+      message: `DeepSeek Harness ${detected || "unknown"} is unsupported; refusing to mutate it with a removal contract for an unlisted version (supported: ${supportedDshRangeLabel()})`,
+      detectedVersion: detected,
+      supportedRange: supportedDshRangeLabel(),
+      manualInspectionRequired: true,
+    };
+  }
+  return {
+    status: "error",
+    reason: "version-unsupported",
+    message: `DeepSeek Harness ${detected || "unknown"} is unsupported; this bridge supports ${supportedDshRangeLabel()}`,
+    detectedVersion: detected,
+    supportedRange: supportedDshRangeLabel(),
+  };
+}
+
+// A diagnose target is reported without running its profile flow. For states
+// the old single-profile flow also diagnosed, reuse its result functions so
+// web's reason/message/fields do not change; the role table's reason code is
+// kept separately in targetReason for logs and later steps.
+async function dshDiagnoseResult(target, options, kind) {
+  const profile = target.profile;
+  const scoped = { ...options, profile };
+  const reason = target.reason;
+  let result;
+  if (reason === "residue-unreadable" || reason === "removal-residue") {
+    result = managedProfileRemovalResidueResult(target.health);
+  } else if (reason === "latch-unreadable" || reason === "latch-invalid" || reason === "inspection-required") {
+    result = inspectionLatchResult(target.health && target.health.inspectionLatch || null);
+  } else if (reason === "manual-reference-unreadable" || reason === "manual-reference-invalid") {
+    result = manualGenerationReferenceResult(await readManualGenerationReference(scoped), scoped);
+  } else if (reason === "version-unsupported") {
+    result = dshUnsupportedVersionResult(target, profile, kind);
+  } else if (reason === "web-profile-uninitialized") {
+    result = {
+      status: "error",
+      reason: "repair-required",
+      message: `DeepSeek Harness ${profile} profile is missing; use Settings Repair to initialize it`,
+    };
+  } else if (reason === "foreign-package" || reason === "integrity-failed" || reason === "registration-unknown"
+    || reason === "profile-corrupt" || reason === "profile-unreadable" || reason === "profile-symlink"
+    || reason === "source-unavailable") {
+    result = dshOwnershipFailureResult(target, profile, kind);
+  } else {
+    // desktop-only reasons plus carrier-failed / version-invalid keep the role code.
+    result = { status: "error", reason, message: dshDiagnoseMessage(target) };
+  }
+  return { ...result, targetReason: reason };
+}
+
+// One target runs its profile flow only when it is mutable, or when web can
+// fall back to the manual npx path. Everything else is reported, not run.
+async function runDshTarget(options, operation, target, kind) {
+  const runsFlow = target.role === "mutable"
+    || (target.profile === WEB_PROFILE_NAME && target.role === "diagnose" && target.manualFallback === true);
+  if (!runsFlow) {
+    const result = target.role === "diagnose" ? await dshDiagnoseResult(target, options, kind) : null;
+    return { profile: target.profile, role: target.role, reason: target.reason, result, target };
+  }
+  try {
+    const result = kind === "uninstall"
+      ? await uninstallDshProfile(options, target)
+      : await syncDshProfile(options, target);
+    return { profile: target.profile, role: target.role, reason: target.reason, result, target };
+  } catch (err) {
+    // A failure on one side never stops the other side from being processed.
+    const result = {
+      status: "error",
+      reason: "unexpected-error",
+      message: err && err.message ? err.message : String(err),
+    };
+    if (err && typeof err.lockPath === "string") result.lockPath = err.lockPath;
+    return { profile: target.profile, role: target.role, reason: target.reason, result, target };
+  }
+}
+
+async function runDshTargets(options, operation, targets, kind) {
+  return {
+    web: await runDshTarget(options, operation, targets.web, kind),
+    desktop: await runDshTarget(options, operation, targets.desktop, kind),
+  };
+}
+
+function summarizeDshInstallResults(entries) {
+  const successes = entries.filter((entry) => dshOutcome(entry.result) === "success");
+  const failures = entries.filter((entry) => dshOutcome(entry.result) === "failed");
+  const targets = dshTargetsMap(entries);
+  if (successes.length) {
+    const warnings = failures.map(dshFailureWarning);
+    const webFailure = failures.find((entry) => entry.profile === WEB_PROFILE_NAME
+      && entry.result
+      && entry.result.manualCommand);
+    // Keep the single-target result shape (updated / generation / health) the
+    // callers already read; only message, warnings and targets are summarized.
+    const merged = { ...successes[0].result };
+    merged.updated = successes.some((entry) => entry.result.updated === true);
+    const desktopSuccess = successes.find((entry) => entry.profile === DESKTOP_PROFILE_NAME);
+    if (desktopSuccess) {
+      if (desktopSuccess.result.firstInstall !== undefined) merged.firstInstall = desktopSuccess.result.firstInstall;
+      if (desktopSuccess.result.restartRequired !== undefined) merged.restartRequired = desktopSuccess.result.restartRequired;
+    }
+    return {
+      ...merged,
+      status: "ok",
+      message: successes.map((entry) => entry.result.message).filter(Boolean).join(" "),
+      ...(warnings.length ? { warnings } : {}),
+      ...(webFailure ? { manualCommand: webFailure.result.manualCommand } : {}),
+      targets,
+    };
+  }
+  if (failures.length) {
+    const first = failures[0];
+    return {
+      status: "error",
+      ...dshErrorFields(first.result, first),
+      ...(failures.length > 1 ? { warnings: failures.slice(1).map(dshFailureWarning) } : {}),
+      targets,
+    };
+  }
+  const skipped = entries.find((entry) => entry.role !== "not-applicable"
+    && entry.result
+    && entry.result.status === "skipped");
+  if (skipped) return { ...skipped.result, targets };
+  const parts = entries.map((entry) => `${entry.profile}: ${entry.reason || "not-applicable"}`);
+  let message = `No applicable DeepSeek Harness target (${parts.join("; ")})`;
+  if (entries.some((entry) => entry.reason === "desktop-profile-uninitialized")) {
+    message += "; open the DeepSeek Harness desktop app once to initialize its profile";
+  }
+  return { status: "skipped", reason: "no-applicable-target", message, targets };
+}
+
+function summarizeDshUninstallResults(entries) {
+  const targets = dshTargetsMap(entries);
+  const participants = entries.filter((entry) => entry.role !== "not-applicable");
+  if (participants.length === 0) {
+    return { status: "skipped", reason: "bridge-not-installed", registrationRemoved: true, targets };
+  }
+  let anyUnremoved = false;
+  let anyUnconfirmed = false;
+  let firstUnremoved = null;
+  let firstUnconfirmed = null;
+  const warnings = [];
+  for (const entry of participants) {
+    const outcome = dshOutcome(entry.result);
+    if (outcome === "success" || (entry.result && entry.result.status === "skipped")) continue;
+    warnings.push(dshFailureWarning(entry));
+    const evidence = entry.target && entry.target.evidence ? entry.target.evidence : {};
+    const registration = evidence.registration || "unknown";
+    const residue = evidence.residue || "none";
+    const latch = evidence.latch || "none";
+    if (registration === "unknown" || registration === "foreign" || registration === "damaged"
+      || residue !== "none" || latch !== "none") {
+      anyUnconfirmed = true;
+      if (!firstUnconfirmed) firstUnconfirmed = entry;
+    } else if (registration === "owned") {
+      anyUnremoved = true;
+      if (!firstUnremoved) firstUnremoved = entry;
+    }
+  }
+  if (anyUnremoved) {
+    return {
+      status: "error",
+      registrationRemoved: false,
+      ...dshErrorFields(firstUnremoved.result, firstUnremoved),
+      ...(warnings.length ? { warnings } : {}),
+      targets,
+    };
+  }
+  if (anyUnconfirmed) {
+    return {
+      status: "error",
+      registrationRemoved: null,
+      ...dshErrorFields(firstUnconfirmed.result, firstUnconfirmed),
+      ...(warnings.length ? { warnings } : {}),
+      targets,
+    };
+  }
+  const anyFailed = participants.some((entry) => dshOutcome(entry.result) === "failed");
+  const removedSomething = participants.some((entry) => entry.result && entry.result.status === "ok");
+  if (removedSomething) {
+    return {
+      status: "ok",
+      registrationRemoved: true,
+      removed: true,
+      updated: true,
+      ...(warnings.length ? { warnings } : {}),
+      targets,
+    };
+  }
+  if (anyFailed) {
+    // Our registration is gone on every side; only secondary cleanup failed.
+    return {
+      status: "ok",
+      registrationRemoved: true,
+      ...(warnings.length ? { warnings } : {}),
+      targets,
+    };
+  }
+  return {
+    status: "skipped",
+    reason: "bridge-not-installed",
+    registrationRemoved: true,
+    ...(warnings.length ? { warnings } : {}),
+    targets,
+  };
+}
+
+async function syncDeepSeekHarnessIntegration(options = {}) {
+  const operation = options.operation || "install";
+  try {
+    return await enqueueMutation(async () => {
+      const frozen = freezeDshOperationOptions(options);
+      if (!(await isDshInstalled(frozen))) {
+        return { status: "skipped", reason: "dsh-not-found", message: "DeepSeek Harness is not installed" };
+      }
+      const targets = await resolveDshTargets(frozen, { operation });
+      const entries = await runDshTargets(frozen, operation, targets, "sync");
+      return summarizeDshInstallResults([entries.web, entries.desktop]);
+    });
+  } catch (err) {
+    if (err && err.code === "DSH_MANUAL_GENERATION_REFERENCE_INVALID") {
+      return manualGenerationReferenceResult({ referencePath: err.referencePath }, options);
+    }
+    throw err;
+  }
+}
+
+async function uninstallDeepSeekHarnessBridge(options = {}) {
+  try {
+    return await enqueueMutation(async () => {
+      const frozen = freezeDshOperationOptions(options);
+      const targets = await resolveDshTargets(frozen, { operation: "uninstall" });
+      const entries = await runDshTargets(frozen, "uninstall", targets, "uninstall");
+      return summarizeDshUninstallResults([entries.web, entries.desktop]);
     });
   } catch (err) {
     if (err && err.code === "DSH_MANUAL_GENERATION_REFERENCE_INVALID") {
@@ -3980,9 +4397,13 @@ function registerDeepSeekHarness(options = {}) {
 async function unregisterDeepSeekHarness(options = {}) {
   const result = await uninstallDeepSeekHarnessBridge(options);
   if (result.status === "error") return result;
-  return result.status === "ok"
-    ? { ...result, removed: true, skipped: false }
-    : { ...result, removed: false, skipped: true };
+  if (result.status === "ok") {
+    // An idempotent "nothing registered" ok must not count as a removal for
+    // the About cleanup pass, which sums removed entries across repeats.
+    const removed = result.removed === true;
+    return { ...result, removed, skipped: !removed };
+  }
+  return { ...result, removed: false, skipped: true };
 }
 
 async function isBridgeInstalled(options = {}) {
@@ -4061,6 +4482,7 @@ module.exports = {
     resolvePnpmRuntime,
     readDshVersion,
     resolveDshTargetCarrier,
+    resolveDshWebTarget,
     DSH_WINDOWS_REGISTRY_SCRIPT,
     DSH_WRITE_TIMEOUT_MS,
     DSH_NPM_VERSION_TIMEOUT_MS,
