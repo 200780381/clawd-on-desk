@@ -286,6 +286,74 @@ test("a desktop command cwd reaches runCommand unless the caller overrides it", 
   assert.strictEqual(seen[1].cwd, "/override");
 });
 
+test("the final desktop child env is sanitized, not merged with the caller's", async () => {
+  for (const platform of ["darwin", "win32"]) {
+    const callerEnv = {
+      DSH_HOME: "/dsh",
+      ELECTRON_EXTRA: "sentinel",
+      NODE_OPTIONS: "sentinel",
+      ...(platform === "win32" ? { Node_Options: "lower", electron_extra: "lower" } : {}),
+    };
+    const commandInfo = {
+      command: "dsh",
+      prefixArgs: [],
+      kind: "desktop",
+      env: dshInstallTest.buildDesktopCommandEnv({ platform, env: callerEnv }),
+    };
+    const seen = [];
+    const runCommand = async (_command, _args, options) => {
+      seen.push(options.env);
+      return { code: 0, stdout: `${FAMILY_VERSION}\n` };
+    };
+    await probeDshCarrier(commandInfo, { platform, env: callerEnv, runCommand });
+    await runDshCommand(["plugin", "--profile", "desktop", "add", "/gen"], {
+      platform,
+      env: callerEnv,
+      commandInfo,
+      runCommand,
+    });
+    assert.strictEqual(seen.length, 2);
+    for (const env of seen) {
+      assert.strictEqual(env.ELECTRON_RUN_AS_NODE, "1");
+      assert.strictEqual(env.DSH_HOME, "/dsh");
+      for (const key of Object.keys(env)) {
+        const normalized = platform === "win32" ? key.toUpperCase() : key;
+        assert.ok(normalized !== "NODE_OPTIONS", `inherited key returned: ${key}`);
+        assert.ok(
+          !(normalized.startsWith("ELECTRON_") && normalized !== "ELECTRON_RUN_AS_NODE"),
+          `inherited key returned: ${key}`
+        );
+      }
+    }
+  }
+});
+
+test("interleaved registry cache keys keep single flight per key", async () => {
+  dshInstallTest.resetWindowsRegistryCache();
+  const releases = [];
+  let calls = 0;
+  const common = {
+    platform: "win32",
+    fs: { statSync() { const err = new Error("missing"); err.code = "ENOENT"; throw err; } },
+    runCommand: async () => {
+      calls += 1;
+      await new Promise((resolve) => releases.push(resolve));
+      return { code: 0, stdout: JSON.stringify({ uninstall: [], commandDirectory: null }) };
+    },
+  };
+  const a = { ...common, env: { SystemRoot: "C:\\Windows", LOCALAPPDATA: "C:\\A" } };
+  const b = { ...common, env: { SystemRoot: "C:\\Windows", LOCALAPPDATA: "C:\\B" } };
+
+  const first = refreshDshDesktopDiscovery(a);
+  const second = refreshDshDesktopDiscovery(b);
+  const third = refreshDshDesktopDiscovery(a);
+  for (const release of releases) release();
+  await Promise.all([first, second, third]);
+
+  assert.strictEqual(calls, 2);
+  dshInstallTest.resetWindowsRegistryCache();
+});
+
 // ---------------------------------------------------------------------------
 // Timeouts
 // ---------------------------------------------------------------------------

@@ -475,6 +475,65 @@ test("a desktop registration keeps its evidence when the app is gone", async (t)
   assert.strictEqual(cli.calls.length, callsAfterInstall);
 });
 
+test("a registration restored under the lock cannot be reported as removed", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const cli = makeCli(harness);
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  const profileManifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
+  const registered = readJson(profileManifestPath);
+
+  // Clear the registration so the pre-operation evidence says "none".
+  const empty = readJson(profileManifestPath);
+  empty.dependencies = {};
+  empty.dsh.profile.bundles = [];
+  writeJson(profileManifestPath, empty);
+  fs.rmSync(packageDir(harness.dshHome, "web"), { recursive: true, force: true });
+
+  let changed = false;
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness), {
+    __testMutationLockHooks: {
+      beforeOwnerWrite: async () => {
+        if (changed) return;
+        changed = true;
+        writeJson(profileManifestPath, registered);
+        fs.symlinkSync(installed.generation, packageDir(harness.dshHome, "web"), "dir");
+      },
+    },
+  }));
+
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.registrationRemoved, false);
+  assert.strictEqual(result.targets.web.result.registrationAfter, "present");
+  assert.ok(readJson(profileManifestPath).dependencies[BRIDGE_PACKAGE_NAME]);
+});
+
+test("a confirmed removal stays removed when only the generation cleanup fails", async (t) => {
+  const harness = makeHarness(t);
+  writeProfileManifest(harness, "web");
+  const cli = makeCli(harness);
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  const error = new Error("injected generation cleanup denied");
+  error.code = "EACCES";
+  const realRm = fs.promises.rm;
+  fs.promises.rm = async (file, ...args) => {
+    if (file === installed.generation) throw error;
+    return realRm.call(fs.promises, file, ...args);
+  };
+  try {
+    const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness)));
+    assert.strictEqual(result.status, "ok");
+    assert.strictEqual(result.registrationRemoved, true);
+    assert.strictEqual(result.targets.web.result.registrationAfter, "removed");
+    assert.strictEqual(
+      !!readJson(path.join(harness.dshHome, "profiles", "web", "package.json")).dependencies[BRIDGE_PACKAGE_NAME],
+      false
+    );
+  } finally {
+    fs.promises.rm = realRm;
+  }
+});
+
 test("unregisterDeepSeekHarness maps removed and skipped from the top level", async (t) => {
   const harness = makeHarness(t);
   writeProfileManifest(harness, "web");

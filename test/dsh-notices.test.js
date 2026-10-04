@@ -489,6 +489,65 @@ test("startup sync records a disabled plugin as a failed-target notice", async (
   assert.strictEqual(failed.payload.reason, "plugin-disabled-in-dsh");
 });
 
+test("a healthy web manual fallback clears the failed notices", async (t) => {
+  const harness = makeHarness(t);
+  writeProfile(harness, "web");
+  const cli = makeCli(harness);
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli));
+  // A stale failure from an earlier attempt; the fallback success must clear it.
+  await applyDshNoticeOutcome(harness.managedRoot, "web", { operation: "install", failure: { reason: "cli-unavailable" } });
+  assert.strictEqual((await noticesFor(harness.managedRoot, "web")).length, 1);
+
+  const noCli = { commandInfo: null, dshCommand: false, env: { PATH: "" } };
+  const verified = await installDeepSeekHarnessBridge(orchOptions(harness, cli, noCli));
+  assert.strictEqual(verified.status, "ok");
+  assert.strictEqual(verified.targets.web.role, "diagnose");
+  assert.strictEqual(verified.targets.web.result.status, "ok");
+  assert.deepStrictEqual(await noticesFor(harness.managedRoot, "web"), []);
+});
+
+test("a confirmed manual web removal clears the side's notices without a CLI", async (t) => {
+  const harness = makeHarness(t);
+  writeProfile(harness, "web");
+  // Upstream `dsh plugin add` resolves the dependency as a link; its remove
+  // leaves that link behind, which is the residue the uninstall has to clean.
+  const linkedCli = {
+    runDshCommand: async (args) => {
+      const profile = args[args.indexOf("--profile") + 1];
+      const manifestPath = path.join(harness.dshHome, "profiles", profile, "package.json");
+      const manifest = readJson(manifestPath);
+      if (args[3] !== "add") return { code: 1, stderr: "unexpected" };
+      manifest.dependencies[BRIDGE_PACKAGE_NAME] = `link:${args[4]}`;
+      if (!manifest.dsh.profile.bundles.includes(BRIDGE_PACKAGE_NAME)) {
+        manifest.dsh.profile.bundles.push(BRIDGE_PACKAGE_NAME);
+      }
+      writeJson(manifestPath, manifest);
+      const target = packageDir(harness.dshHome, profile);
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.symlinkSync(args[4], target, "dir");
+      return { code: 0 };
+    },
+  };
+  await installDeepSeekHarnessBridge(orchOptions(harness, linkedCli));
+  await applyDshNoticeOutcome(harness.managedRoot, "web", { operation: "install", failure: { reason: "cli-unavailable" } });
+  assert.strictEqual((await noticesFor(harness.managedRoot, "web")).length, 1);
+
+  // The user runs the manual remove: dependency and bundle row go, link stays.
+  const manifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
+  const manifest = readJson(manifestPath);
+  delete manifest.dependencies[BRIDGE_PACKAGE_NAME];
+  manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter((n) => n !== BRIDGE_PACKAGE_NAME);
+  writeJson(manifestPath, manifest);
+
+  const noCli = { commandInfo: null, dshCommand: false, env: { PATH: "" } };
+  const removed = await uninstallDeepSeekHarnessBridge(orchOptions(harness, linkedCli, noCli));
+  assert.strictEqual(removed.status, "ok");
+  assert.strictEqual(removed.registrationRemoved, true);
+  assert.strictEqual(removed.targets.web.result.registrationAfter, "removed");
+  assert.deepStrictEqual(await noticesFor(harness.managedRoot, "web"), []);
+});
+
 test("a CLI-less repair records the failure and the manual command together", async (t) => {
   const harness = makeHarness(t);
   writeProfile(harness, "web");

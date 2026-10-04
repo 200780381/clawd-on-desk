@@ -415,10 +415,12 @@ function commandExecutionOptions(commandInfo, options = {}) {
   if (!commandInfo || (!commandInfo.env && !commandInfo.cwd)) return options;
   const next = { ...options };
   if (commandInfo.env) {
-    next.env = {
-      ...(options.env || process.env),
-      ...commandInfo.env,
-    };
+    // A desktop command carries a complete, sanitized env; merging the caller's
+    // env would re-introduce the ELECTRON_* / NODE_OPTIONS keys it removed.
+    const completeEnv = commandInfo.envIsComplete === true || commandInfo.kind === "desktop";
+    next.env = completeEnv
+      ? { ...commandInfo.env }
+      : { ...(options.env || process.env), ...commandInfo.env };
   }
   // A caller-provided cwd wins; otherwise use the command's own cwd.
   if (options.cwd === undefined && commandInfo.cwd) next.cwd = commandInfo.cwd;
@@ -602,6 +604,7 @@ function desktopLauncherCommandInfo(launcherPath, options = {}) {
     prefixArgs: [],
     installRoot: null,
     env: buildDesktopCommandEnv(options),
+    envIsComplete: true,
     cwd: desktopCommandCwd(options),
     kind: "desktop",
     bundledPackageManager: true,
@@ -653,6 +656,7 @@ function parseDesktopDshCmd(cmdPath, options = {}) {
       prefixArgs: ["--expose-internals", cliJs],
       installRoot: null,
       env: buildDesktopCommandEnv(options),
+      envIsComplete: true,
       cwd: desktopCommandCwd(options),
       kind: "desktop",
       bundledPackageManager: true,
@@ -1662,9 +1666,9 @@ const DSH_WINDOWS_REGISTRY_SCRIPT = [
 // Only the async entry point fills this. Static discovery just reads it, so a
 // synchronous Doctor / detector call can never spawn PowerShell.
 let windowsRegistryCache = { key: null, snapshot: null };
-// In-flight registry read, keyed so concurrent readers of the same environment
-// share one PowerShell instead of racing to start several.
-let windowsRegistryRefresh = null;
+// In-flight registry reads, keyed so concurrent readers of the same
+// environment share one PowerShell instead of racing to start several.
+let windowsRegistryRefresh = new Map();
 
 function windowsSystemRoot(options = {}) {
   const env = options.env || process.env;
@@ -1743,7 +1747,7 @@ function cachedWindowsRegistrySnapshot(options = {}) {
 
 function resetWindowsRegistryCache() {
   windowsRegistryCache = { key: null, snapshot: null };
-  windowsRegistryRefresh = null;
+  windowsRegistryRefresh = new Map();
 }
 
 function windowsRootKey(root) {
@@ -1860,9 +1864,8 @@ async function refreshDshDesktopDiscovery(options = {}) {
   // environment is shared instead of starting a second PowerShell. Injected
   // discovery / snapshots returned above and never take part.
   const key = windowsRegistryCacheKey(options);
-  if (windowsRegistryRefresh && windowsRegistryRefresh.key === key) {
-    return windowsRegistryRefresh.promise;
-  }
+  const inflight = windowsRegistryRefresh.get(key);
+  if (inflight) return inflight;
   const promise = (async () => {
     let snapshot;
     try {
@@ -1873,11 +1876,9 @@ async function refreshDshDesktopDiscovery(options = {}) {
     windowsRegistryCache = { key, snapshot };
     return discoverDshDesktopWindows(options, snapshot);
   })().finally(() => {
-    if (windowsRegistryRefresh && windowsRegistryRefresh.promise === promise) {
-      windowsRegistryRefresh = null;
-    }
+    if (windowsRegistryRefresh.get(key) === promise) windowsRegistryRefresh.delete(key);
   });
-  windowsRegistryRefresh = { key, promise };
+  windowsRegistryRefresh.set(key, promise);
   return promise;
 }
 
@@ -2747,11 +2748,41 @@ function inspectionLatchPath(options = {}) {
   return path.join(resolveManagedRoot(options), fileName);
 }
 
+// Mirrors inspectionLatchEvidenceSync: a missing node is "no record", while an
+// invalid node (non-file, symlink, unreadable, wrong schema) is returned as an
+// invalid record so every caller treats it conservatively. A plain existence
+// check would follow symlinks and fold read errors into "absent", letting a
+// broken record slip past the shared generation cleanup.
 async function readInspectionLatch(options = {}) {
   const filePath = inspectionLatchPath(options);
-  if (!(await exists(filePath))) return null;
-  const parsed = await readJson(filePath);
-  return parsed || { invalid: true, reason: "inspection-latch-invalid" };
+  let stat;
+  try {
+    stat = await fsp.lstat(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    return { invalid: true, reason: "inspection-latch-unreadable" };
+  }
+  if (!stat.isFile() || (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink())) {
+    return { invalid: true, reason: "inspection-latch-invalid" };
+  }
+  let raw;
+  try {
+    raw = await fsp.readFile(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    return { invalid: true, reason: "inspection-latch-unreadable" };
+  }
+  let parsed;
+  try {
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    parsed = JSON.parse(raw);
+  } catch {
+    return { invalid: true, reason: "inspection-latch-invalid" };
+  }
+  if (!parsed || parsed.owner !== MANAGED_OWNER || parsed.schemaVersion !== 1) {
+    return { invalid: true, reason: "inspection-latch-invalid" };
+  }
+  return parsed;
 }
 
 async function writeInspectionLatch(reason, detail, options = {}) {
@@ -4788,25 +4819,54 @@ async function dshDiagnoseResult(target, options, kind) {
 async function runDshTarget(options, operation, target, kind) {
   const runsFlow = target.role === "mutable"
     || (target.profile === WEB_PROFILE_NAME && target.role === "diagnose" && target.manualFallback === true);
+  let entry;
   if (!runsFlow) {
     const result = target.role === "diagnose" ? await dshDiagnoseResult(target, options, kind) : null;
-    return { profile: target.profile, role: target.role, reason: target.reason, result, target };
+    entry = { profile: target.profile, role: target.role, reason: target.reason, result, target };
+  } else {
+    try {
+      const result = kind === "uninstall"
+        ? await uninstallDshProfile(options, target)
+        : await syncDshProfile(options, target);
+      entry = { profile: target.profile, role: target.role, reason: target.reason, result, target };
+    } catch (err) {
+      // A failure on one side never stops the other side from being processed.
+      const result = {
+        status: "error",
+        reason: "unexpected-error",
+        message: err && err.message ? err.message : String(err),
+      };
+      if (err && typeof err.lockPath === "string") result.lockPath = err.lockPath;
+      entry = { profile: target.profile, role: target.role, reason: target.reason, result, target };
+    }
   }
-  try {
-    const result = kind === "uninstall"
-      ? await uninstallDshProfile(options, target)
-      : await syncDshProfile(options, target);
-    return { profile: target.profile, role: target.role, reason: target.reason, result, target };
-  } catch (err) {
-    // A failure on one side never stops the other side from being processed.
-    const result = {
-      status: "error",
-      reason: "unexpected-error",
-      message: err && err.message ? err.message : String(err),
-    };
-    if (err && typeof err.lockPath === "string") result.lockPath = err.lockPath;
-    return { profile: target.profile, role: target.role, reason: target.reason, result, target };
+  // Whether the profile flow actually ran (mutable or web manual fallback). The
+  // notices use this to tell a finished flow from a report-only diagnose.
+  entry.ranFlow = runsFlow;
+  if (kind === "uninstall") {
+    // The lock recheck or another Clawd instance can change a profile while the
+    // operation runs, so the uninstall conclusion must come from the disk as it
+    // is now, not from the pre-operation target role.
+    const registrationAfter = dshRegistrationAfter(options, target.profile);
+    entry.registrationAfter = registrationAfter;
+    if (entry.result) entry.result.registrationAfter = registrationAfter;
   }
+  return entry;
+}
+
+// A disk-only registration conclusion for one profile after an uninstall attempt.
+// Reuses the role table's evidence so it stays consistent with Doctor/roles.
+function dshRegistrationAfter(options, profile) {
+  const targets = inspectDshTargetsSync(options, { operation: "uninstall" });
+  const target = targets[profile];
+  if (!target || target.role === "not-applicable") return "removed";
+  const evidence = target.evidence || {};
+  const registration = evidence.registration || "unknown";
+  const residue = evidence.residue || "none";
+  const latch = evidence.latch || "none";
+  if (registration === "owned") return "present";
+  if (registration === "none" && residue === "none" && latch === "none") return "removed";
+  return "unknown";
 }
 
 async function runDshTargets(options, operation, targets, kind) {
@@ -4880,20 +4940,16 @@ function summarizeDshUninstallResults(entries) {
     if (entry.result && Array.isArray(entry.result.warnings)) {
       for (const line of entry.result.warnings) warnings.push(`${entry.profile}: ${line}`);
     }
-    const outcome = dshOutcome(entry.result);
-    if (outcome === "success" || (entry.result && entry.result.status === "skipped")) continue;
-    warnings.push(dshFailureWarning(entry));
-    const evidence = entry.target && entry.target.evidence ? entry.target.evidence : {};
-    const registration = evidence.registration || "unknown";
-    const residue = evidence.residue || "none";
-    const latch = evidence.latch || "none";
-    if (registration === "unknown" || registration === "foreign" || registration === "damaged"
-      || residue !== "none" || latch !== "none") {
-      anyUnconfirmed = true;
-      if (!firstUnconfirmed) firstUnconfirmed = entry;
-    } else if (registration === "owned") {
+    if (dshOutcome(entry.result) === "failed") warnings.push(dshFailureWarning(entry));
+    // The pre-operation role is not the truth here: the profile could have
+    // changed under the lock. Read the conclusion the operation left on disk.
+    const after = entry.registrationAfter;
+    if (after === "present") {
       anyUnremoved = true;
       if (!firstUnremoved) firstUnremoved = entry;
+    } else if (after !== "removed") {
+      anyUnconfirmed = true;
+      if (!firstUnconfirmed) firstUnconfirmed = entry;
     }
   }
   if (anyUnremoved) {
@@ -4945,35 +5001,49 @@ function summarizeDshUninstallResults(entries) {
 }
 
 // Map one resolved target entry onto the notice outcome this profile applies.
+// The flow's own result decides for anything that actually ran; a report-only
+// diagnose is the only no-flow case that is a real failure.
 function dshNoticeOutcome(operation, entry) {
-  if (!entry || entry.role === "not-applicable" || !entry.result) {
-    return { operation, notApplicable: true };
-  }
+  if (!entry) return { operation, notApplicable: true };
   const result = entry.result;
   // A failed result can still hand the user a manual command (e.g. no global
   // CLI); it must reach the notice rules together with the failure.
-  const manualCommands = typeof result.manualCommand === "string" && result.manualCommand
+  const manualCommands = typeof (result && result.manualCommand) === "string" && result.manualCommand
     ? result.manualCommand.split("\n")
     : null;
-  const manualBundleHash = result.manualBundleHash || null;
-  if (result.status === "error" || entry.role === "diagnose") {
-    return {
-      operation,
-      manualCommands,
-      manualBundleHash,
-      failure: {
-        reason: result.reason || entry.reason,
-        targetReason: result.targetReason || entry.reason,
-        message: result.message,
-        residuePath: result.residuePath,
-        referencePath: result.referencePath,
-        lockPath: result.lockPath,
-        repairPath: result.repairPath,
-        healthReason: result.healthReason,
-        cleanupReason: result.cleanupReason,
-      },
-    };
+  const manualBundleHash = (result && result.manualBundleHash) || null;
+  const asFailure = (reason, message) => ({
+    operation,
+    manualCommands,
+    manualBundleHash,
+    failure: {
+      reason: reason || entry.reason || "unexpected-error",
+      targetReason: (result && (result.targetReason || result.reason)) || entry.reason || null,
+      message: message !== undefined ? message : (result ? result.message : null),
+      residuePath: result && result.residuePath,
+      referencePath: result && result.referencePath,
+      lockPath: result && result.lockPath,
+      repairPath: result && result.repairPath,
+      healthReason: result && result.healthReason,
+      cleanupReason: result && result.cleanupReason,
+    },
+  });
+
+  if (operation === "uninstall") {
+    // The post-operation disk read is the truth: confirmed gone clears this
+    // side's notices; anything else is reported as a failure.
+    if (entry.registrationAfter === "removed") {
+      return { operation, notApplicable: true, removedOk: true };
+    }
+    const reason = (result && result.reason) || "uninstall-unconfirmed";
+    return asFailure(reason, result ? result.message : null);
   }
+
+  if (entry.ranFlow !== true) {
+    if (entry.role === "diagnose" && result) return asFailure(result.reason, result.message);
+    return { operation, notApplicable: true };
+  }
+  if (result.status === "error") return asFailure(result.reason, result.message);
   return {
     operation,
     status: result.status,

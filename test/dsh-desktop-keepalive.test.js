@@ -364,6 +364,40 @@ test("the other side's valid operation record keeps its generation and cleans th
   assert.strictEqual(fs.existsSync(stray), false);
 });
 
+test("a dangling inspection latch symlink pauses cleanup", async (t) => {
+  const harness = makeHarness(t);
+  const stray = writeStrayGeneration(harness);
+  const latch = latchPath(harness, "desktop");
+  fs.mkdirSync(path.dirname(latch), { recursive: true });
+  fs.symlinkSync(path.join(harness.root, "missing-latch-target"), latch);
+
+  const result = await installWeb(harness);
+
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(fs.existsSync(stray), true);
+  assert.strictEqual(fs.lstatSync(latch).isSymbolicLink(), true);
+});
+
+test("an unreadable inspection latch pauses cleanup", async (t) => {
+  const harness = makeHarness(t);
+  const stray = writeStrayGeneration(harness);
+  const latch = latchPath(harness, "desktop");
+  const error = new Error("EACCES: permission denied");
+  error.code = "EACCES";
+  const realLstat = fs.promises.lstat;
+  fs.promises.lstat = async (file, ...args) => {
+    if (file === latch) throw error;
+    return realLstat.call(fs.promises, file, ...args);
+  };
+  try {
+    const result = await installWeb(harness);
+    assert.strictEqual(result.status, "ok");
+    assert.strictEqual(fs.existsSync(stray), true);
+  } finally {
+    fs.promises.lstat = realLstat;
+  }
+});
+
 test("a broken web manual reference pauses desktop cleanup and is left untouched", async (t) => {
   const harness = makeHarness(t);
   const stray = writeStrayGeneration(harness);
