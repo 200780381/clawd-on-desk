@@ -291,6 +291,17 @@ function registerSettingsIpc(options = {}) {
   const getSizeContext = options.getSizeContext || (() => null);
   const getAllAgents = requiredDependency(options.getAllAgents, "getAllAgents");
   const detectAgentInstallations = options.detectAgentInstallations || defaultDetectAgentInstallations;
+  const platform = options.platform || process.platform;
+  // Injectable for tests; production refreshes the Windows registry snapshot.
+  const refreshDshDesktopDiscovery = typeof options.refreshDshDesktopDiscovery === "function"
+    ? options.refreshDshDesktopDiscovery
+    : async () => {
+      const { refreshDshDesktopDiscovery: refresh } = require("../hooks/dsh-install.js");
+      return refresh({});
+    };
+  const refreshWslDetection = typeof options.refreshWslDetection === "function"
+    ? options.refreshWslDetection
+    : require("./agent-installation-detector").refreshWslDetection;
   const getHookServerPort = options.getHookServerPort || (() => null);
   const getRecentHookEvents = options.getRecentHookEvents || (() => []);
   const checkForUpdates = options.checkForUpdates || (() => {});
@@ -972,8 +983,15 @@ function registerSettingsIpc(options = {}) {
       const options = opts && typeof opts === "object" ? opts : {};
       const detectorOptions = { fs, path, now, snapshot: settingsController.getSnapshot() };
       if (options.refreshWsl) {
-        const { refreshWslDetection } = require("./agent-installation-detector");
         await refreshWslDetection({ ...detectorOptions, skipDefaultIntegrations: false });
+        // The manual Scan waits for the Windows registry too, so the report it
+        // returns already sees the desktop app. Opening the page without a scan
+        // skips this to avoid a PowerShell on every visit.
+        if (platform === "win32") {
+          try {
+            await refreshDshDesktopDiscovery();
+          } catch {}
+        }
         return detectAgentInstallations(detectorOptions);
       }
       return detectAgentInstallations(detectorOptions);

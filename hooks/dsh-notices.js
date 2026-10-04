@@ -73,8 +73,11 @@ function noticeKey(notice) {
 
 // Enforce one notice per kind. Same key keeps id/createdAt/acknowledged and
 // only refreshes payload (+bundleHash); a new key replaces the old record with
-// a fresh, unacknowledged one.
-function putNotice(notices, { kind, profile, key, id, bundleHash, payload }) {
+// a fresh, unacknowledged one. The key is derived from the record itself so the
+// format lives in exactly one place (noticeKey).
+function putNotice(notices, { kind, profile, id, bundleHash, payload }) {
+  const candidate = makeNotice(id, kind, profile, bundleHash, payload);
+  const key = noticeKey(candidate);
   const existing = notices.find((notice) => notice.kind === kind);
   if (existing && noticeKey(existing) === key) {
     existing.payload = payload || {};
@@ -83,7 +86,7 @@ function putNotice(notices, { kind, profile, key, id, bundleHash, payload }) {
     return notices;
   }
   const rest = notices.filter((notice) => notice.kind !== kind);
-  return [...rest, makeNotice(id, kind, profile, bundleHash, payload)];
+  return [...rest, candidate];
 }
 
 function bundleId(kind, bundleHash) {
@@ -95,7 +98,6 @@ function putBundleNotice(notices, kind, profile, bundleHash) {
   return putNotice(notices, {
     kind,
     profile,
-    key: `hash:${bundleHash}`,
     id: bundleId(kind, bundleHash),
     bundleHash,
     payload: {},
@@ -115,7 +117,6 @@ function putManualNotice(notices, profile, outcome) {
   return putNotice(notices, {
     kind: "manual-command",
     profile,
-    key: `command:${text}`,
     id: `manual-command:${crypto.createHash("sha256").update(text).digest("hex").slice(0, 16)}`,
     bundleHash: outcome.manualBundleHash || null,
     payload: { commands },
@@ -201,16 +202,17 @@ function failurePayload(failure, operation) {
 
 function upsertFailedNotice(notices, sequence, profile, outcome) {
   const payload = failurePayload(outcome.failure, outcome.operation);
-  const key = `failure:${payload.operation}:${payload.reason || ""}`;
   const existing = notices.find((notice) => notice.kind === "failed-target");
-  const same = existing && noticeKey(existing) === key;
+  // Probe the key through noticeKey so the format is not duplicated here.
+  const probe = makeNotice("failed-target:probe", "failed-target", profile, null, payload);
+  const same = existing && noticeKey(existing) === noticeKey(probe);
   // Same category and reason: keep the id; otherwise the sequence advances so
   // an acknowledged failure that recurs after a success gets a new id instead
   // of staying silently acknowledged.
   const next = same ? sequence : sequence + 1;
   const id = same ? existing.id : `failed-target:${payload.reason}:${next}`;
   return {
-    notices: putNotice(notices, { kind: "failed-target", profile, key, id, bundleHash: null, payload }),
+    notices: putNotice(notices, { kind: "failed-target", profile, id, bundleHash: null, payload }),
     sequence: next,
   };
 }
@@ -220,16 +222,14 @@ function hasManualCommand(outcome) {
 }
 
 // Persist only when something actually changed: startup sync walks every
-// profile on every launch and must not rewrite identical files (or create one
-// for a profile that has nothing to say). `beforeJson` is the serialized read
-// taken before the rules mutate any record in place.
+// profile on every launch and must not rewrite identical files. An unchanged
+// empty result also means a profile with no notices never gets a file, because
+// its read (sequence 0, notices []) compares equal to the computed result.
+// `beforeJson` is the serialized read taken before the rules mutate any record.
 async function commitDshNotices(managedRoot, profile, notices, sequence, before, deps) {
   const sorted = sortNotices(notices);
   if (sequence === before.sequence && JSON.stringify(sorted) === before.json) {
     return { notices: sorted, error: null };
-  }
-  if (!before.present && sorted.length === 0 && !sequence) {
-    return { notices: [], error: null };
   }
   return writeDshNotices(managedRoot, profile, sorted, sequence, deps);
 }
@@ -239,7 +239,7 @@ async function commitDshNotices(managedRoot, profile, notices, sequence, before,
 async function applyDshNoticeOutcome(managedRoot, profile, outcome = {}, deps = {}) {
   const read = await readDshNotices(managedRoot, profile, deps);
   if (read.error) return { notices: read.notices, error: read.error };
-  const before = { present: read.present, sequence: read.sequence || 0, json: JSON.stringify(read.notices) };
+  const before = { sequence: read.sequence || 0, json: JSON.stringify(read.notices) };
   let notices = read.notices;
   let sequence = read.sequence || 0;
 

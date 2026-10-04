@@ -1661,6 +1661,9 @@ const DSH_WINDOWS_REGISTRY_SCRIPT = [
 // Only the async entry point fills this. Static discovery just reads it, so a
 // synchronous Doctor / detector call can never spawn PowerShell.
 let windowsRegistryCache = { key: null, snapshot: null };
+// In-flight registry read, keyed so concurrent readers of the same environment
+// share one PowerShell instead of racing to start several.
+let windowsRegistryRefresh = null;
 
 function windowsSystemRoot(options = {}) {
   const env = options.env || process.env;
@@ -1739,6 +1742,7 @@ function cachedWindowsRegistrySnapshot(options = {}) {
 
 function resetWindowsRegistryCache() {
   windowsRegistryCache = { key: null, snapshot: null };
+  windowsRegistryRefresh = null;
 }
 
 function windowsRootKey(root) {
@@ -1844,14 +1848,29 @@ async function refreshDshDesktopDiscovery(options = {}) {
     if (options.windowsRegistrySnapshot instanceof Error) return windowsRegistryUnknownResult();
     return discoverDshDesktopWindows(options, options.windowsRegistrySnapshot);
   }
-  let snapshot;
-  try {
-    snapshot = await readWindowsRegistry(options);
-  } catch {
-    return windowsRegistryUnknownResult();
+  // Single-flight per cache key: an already-running read for the same
+  // environment is shared instead of starting a second PowerShell. Injected
+  // discovery / snapshots returned above and never take part.
+  const key = windowsRegistryCacheKey(options);
+  if (windowsRegistryRefresh && windowsRegistryRefresh.key === key) {
+    return windowsRegistryRefresh.promise;
   }
-  windowsRegistryCache = { key: windowsRegistryCacheKey(options), snapshot };
-  return discoverDshDesktopWindows(options, snapshot);
+  const promise = (async () => {
+    let snapshot;
+    try {
+      snapshot = await readWindowsRegistry(options);
+    } catch {
+      return windowsRegistryUnknownResult();
+    }
+    windowsRegistryCache = { key, snapshot };
+    return discoverDshDesktopWindows(options, snapshot);
+  })().finally(() => {
+    if (windowsRegistryRefresh && windowsRegistryRefresh.promise === promise) {
+      windowsRegistryRefresh = null;
+    }
+  });
+  windowsRegistryRefresh = { key, promise };
+  return promise;
 }
 
 async function discoverDshDesktop(options = {}) {

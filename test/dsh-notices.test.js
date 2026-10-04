@@ -384,6 +384,16 @@ test("an uninstall failure without a manual command still drops the old add comm
   assert.strictEqual((await noticesFor(root, "web")).some((n) => n.kind === "manual-command"), false);
 });
 
+test("a never-installed side is cleared when its uninstall is skipped", async (t) => {
+  const harness = makeHarness(t);
+  await applyDshNoticeOutcome(harness.managedRoot, "web", { operation: "install", failure: { reason: "plugin-add-failed" } });
+  assert.strictEqual((await noticesFor(harness.managedRoot, "web")).length, 1);
+  const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness)));
+  assert.strictEqual(result.status, "skipped");
+  assert.strictEqual(result.reason, "bridge-not-installed");
+  assert.deepStrictEqual(await noticesFor(harness.managedRoot, "web"), []);
+});
+
 test("a not-applicable install clears a stale failed-target", async (t) => {
   const root = makeRoot(t);
   await applyDshNoticeOutcome(root, "desktop", { operation: "install", failure: { reason: "carrier-unavailable" } });

@@ -240,6 +240,9 @@ function createHarness(overrides = {}) {
     getQuotaSourceCount: overrides.getQuotaSourceCount,
     kimiQuotaRuntime: overrides.kimiQuotaRuntime,
     detectAgentInstallations: overrides.detectAgentInstallations,
+    platform: overrides.platform,
+    refreshDshDesktopDiscovery: overrides.refreshDshDesktopDiscovery,
+    refreshWslDetection: overrides.refreshWslDetection,
     checkForUpdates: overrides.checkForUpdates || ((manual) => {
       calls.push(["checkForUpdates", manual]);
       return { state: "up-to-date", version: "1.2.3" };
@@ -1506,6 +1509,25 @@ test("settings IPC scan examines Codex locally and still withholds Claude", asyn
     runtime.dispose();
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
+});
+
+test("the Agents scan preheats DSH desktop discovery only with refreshWsl on Windows", async () => {
+  const calls = [];
+  const harness = createHarness({
+    platform: "win32",
+    refreshWslDetection: async () => { calls.push("wsl"); },
+    refreshDshDesktopDiscovery: async () => { calls.push("dsh"); },
+    detectAgentInstallations: () => ({ checkedAt: 1, agents: [], skippedAgentIds: [] }),
+  });
+
+  await harness.ipcMain.invoke("settings:detect-agent-installations", { refreshWsl: true });
+  assert.deepStrictEqual(calls, ["wsl", "dsh"]);
+
+  calls.length = 0;
+  await harness.ipcMain.invoke("settings:detect-agent-installations", {});
+  assert.deepStrictEqual(calls, []);
+
+  harness.runtime.dispose();
 });
 
 test("official theme IPC is owner-gated and never reachable through settings:command", async () => {
