@@ -73,6 +73,7 @@ Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数�
 main 中的 displayed-visual projection 是文件、hitbox 和视觉来源的唯一权威。renderer 对每个仍有效的 request 恰好返回一个终结结果：正常加载为 `swapped`，当前文件已经显示为 `already-displayed`，实际显示了可投影的替代文件为 `fallback`，无法验证则为 `failed`；被后续请求取代的 generation 由 main 标为 `superseded`，renderer 不伪造 ACK。
 
 - renderer 的 object → img → accessory-settle 回退链必须先自行走完；main 的 9750ms settlement deadline 只是无 ACK 兜底
+- 显式 `restartAnimation: true` 请求绕过 renderer 的同文件复用，重播动画并走正常结算；超时重投递保留该标记。Codex 压缩完成用它重播与 `PreCompact` 相同的清扫文件，同时从完成事件重新计入最小显示时间；普通请求继续复用同文件。
 - 同一 logical visual 最多自动 re-request 一次；连续两个 request 都没有 ACK 时，同一 displayed-visual projection 实例最多尝试 reload 一次，失败也消耗预算。当前 main 只创建一个实例，因此该预算覆盖当前主进程寿命，不随 renderer reload 重置；独立 crash recovery 有自己的限制。visual timeout 本身不得循环 reload
 - 只有 `verified: true` 且实际 basename 合法的结果可提交；不可投影的 fallback 以 failed 终结，保留上一份 committed visual
 - reaction 也走 generation 合同，但不广播到 Presence；hit renderer 继续即时消费 logical state，不等待视觉 ACK

@@ -904,6 +904,27 @@ describe("renderer displayed-visual settlement", () => {
     assert.deepStrictEqual(settlements(harness).map((entry) => entry.visualGeneration), [11]);
   });
 
+  for (const objectChannel of [false, true]) {
+    it(`replays the displayed compaction SVG through the ${objectChannel ? "object" : "img"} channel`, () => {
+      const harness = createRendererHarness({
+        themeConfig: objectChannel ? { rendering: { objectChannelFiles: ["sweeping.svg"] } } : {},
+      });
+      harness.electronHandlers.onStateChange(visualRequest(12, "sweeping.svg", "sweeping"));
+      const first = harness.api.pendingNext;
+      first.listeners.get("load")();
+      harness.electronHandlers.onStateChange({
+        ...visualRequest(13, "sweeping.svg", "sweeping"), restartAnimation: true,
+      });
+      const replay = harness.api.pendingNext;
+      assert.ok(replay, "completion must load a fresh animation timeline");
+      assert.notStrictEqual(replay, first);
+      assert.notStrictEqual(objectChannel ? replay.data : replay.src, objectChannel ? first.data : first.src);
+      assert.strictEqual(replay.tagName, objectChannel ? "OBJECT" : "IMG");
+      replay.listeners.get("load")();
+      assert.deepStrictEqual(settlements(harness).map(entry => entry.outcome), ["swapped", "swapped"]);
+    });
+  }
+
   it("reports an object-to-img recovery as a verified fallback", () => {
     const harness = createRendererHarness({
       themeConfig: { trustedScriptedSvgFiles: ["scripted.svg"] },

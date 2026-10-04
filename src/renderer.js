@@ -1783,6 +1783,7 @@ function normalizeVisualRequest(value) {
     file: value.file,
     source: value.source,
     visualGeneration: value.visualGeneration,
+    ...(value.restartAnimation === true ? { restartAnimation: true } : {}),
   });
 }
 
@@ -2294,7 +2295,10 @@ function renderStateFile(requestOrState, legacySvg) {
     cancelPendingSwap("superseded");
   }
 
-  if ((alreadyDisplayed && displayedChannelMatches) || (alreadyPending && pendingChannelMatches)) {
+  // A new cue can intentionally replay the same file (compaction completion
+  // after PreCompact). Give it a fresh timeline and normal settlement ACK.
+  if (!visualRequest?.restartAnimation
+    && ((alreadyDisplayed && displayedChannelMatches) || (alreadyPending && pendingChannelMatches))) {
     // Same file, no swap — but the flip is state-dependent (mini flip vs roam
     // heading), so re-apply it for the incoming state. E.g. a leftward roam
     // entering mini pre-entry reuses the same crabwalk asset; without this the

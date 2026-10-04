@@ -55,7 +55,10 @@ Codex 压缩开始通过 official `PreCompact` hook 触发既有 `sweeping` 一�
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版
 `event_msg:item_completed`（`payload.item.type === "ContextCompaction"`）。本地与
 Remote SSH monitor 共用 `hooks/codex-log-event.js`，把后者归一化到旧事件键，沿用
-`sweeping` 映射、timestamp/backfill 保护与 hook 仲裁；它不是 turn completion，也不清理
+`sweeping` 映射、timestamp/backfill 保护与 hook 仲裁。完成事件即使遇到仍显示的开始清扫，
+也会重播动画并重新计入主题的最小显示时长，避免随后 `SessionStart` / 工作事件直接盖掉
+完成提示；普通重复状态仍去重，待显示的更高优先级告警与审批锁仍受保护。
+它不是 turn completion，也不清理
 待回答问题。`compacted` 检查点、`response_item:compaction` 与其他 item 事件不作为实时压缩信号。
 
 Local Codex archive lifecycle (#655)：Codex 归档会把该 thread 的 rollout 从

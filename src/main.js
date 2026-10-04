@@ -1550,6 +1550,7 @@ function requestDisplayedVisual(displayState, file, options = {}) {
     file: visualFile,
     hitBox: _state.resolveHitBoxForSvg(file),
     source: options.source || inferVisualSource(displayState, file),
+    restartAnimation: options.restartAnimation === true,
     deliver: options.deliver || ((payload) => sendRawToRenderer("state-change", payload)),
     onLogicalSettlement: options.onLogicalSettlement,
   });

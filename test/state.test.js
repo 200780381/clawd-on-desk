@@ -646,6 +646,27 @@ describe("setState() debounce", () => {
     assert.strictEqual(api.getCurrentState(), "error");
   });
 
+  it("a same-state restart renews the hold and cancels a queued idle", () => {
+    api.setState("sweeping");
+    mock.timers.tick(1000);
+    api.setState("idle");
+    api.setState("sweeping", undefined, { restartAnimation: true });
+    api.setState("idle");
+    mock.timers.tick(_defaultTheme.timings.minDisplay.sweeping - 1);
+    assert.strictEqual(api.getCurrentState(), "sweeping");
+    mock.timers.tick(1);
+    assert.strictEqual(api.getCurrentState(), "idle");
+  });
+
+  it("a same-state restart preserves a queued higher-priority alert", () => {
+    api.setState("sweeping");
+    api.setState("notification");
+    mock.timers.tick(1000);
+    api.setState("sweeping", undefined, { restartAnimation: true });
+    mock.timers.tick(_defaultTheme.timings.minDisplay.sweeping - 1000);
+    assert.strictEqual(api.getCurrentState(), "notification");
+  });
+
   it("lower priority cannot override pending", () => {
     api.setState("error");
     // error MIN_DISPLAY_MS = 5000

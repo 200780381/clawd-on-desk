@@ -608,6 +608,17 @@ function setState(newState, svgOverride, options = {}) {
   const realEventTakingOverPreview = currentVisualSource === VISUAL_SOURCE_SETTINGS_PREVIEW
     && options.settingsPreview !== true;
   if (sameState && sameSvg && !realEventTakingOverPreview) {
+    // Compaction start and completion are distinct cues with the same visual.
+    // Restart the SVG and its minimum hold at completion, while preserving a
+    // queued higher-priority alert and ordinary repeated-event deduplication.
+    if (options.restartAnimation === true) {
+      if (pendingState && getStatePriority(newState, STATE_PRIORITY) < getStatePriority(pendingState, STATE_PRIORITY)) {
+        return;
+      }
+      clearPendingStateTimer();
+      applyState(newState, svgOverride, options);
+      return;
+    }
     // Kimi CLI permission hold: re-arm the auto-return timer so the
     // notification animation keeps cycling while the user is reviewing
     // the permission prompt.
@@ -819,7 +830,11 @@ function applyState(state, svgOverride, options = {}) {
 
   currentHitBox = resolveHitBoxForSvg(svg);
 
-  ctx.sendToRenderer("state-change", state, svg);
+  if (applyOptions.restartAnimation === true) {
+    ctx.sendToRenderer("state-change", state, svg, { restartAnimation: true });
+  } else {
+    ctx.sendToRenderer("state-change", state, svg);
+  }
   ctx.syncHitWin();
   ctx.sendToHitWin("hit-state-sync", { currentState: state });
   ctx.sendToHitWin("hit-cancel-reaction");
@@ -2980,7 +2995,11 @@ function updateSession(sessionId, state, event, opts = {}) {
       setState(displayState, getSvgOverride(displayState));
       return;
     }
-    setState(state, state === "attention" && event === "Stop" ? completionVisual : null);
+    setState(state, state === "attention" && event === "Stop" ? completionVisual : null, {
+      restartAnimation: srcAgentId === "codex"
+        && state === "sweeping"
+        && event === "event_msg:context_compacted",
+    });
     return;
   }
 
