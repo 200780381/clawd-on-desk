@@ -112,6 +112,52 @@ function completionVisualForHint(hint) {
 }
 
 // ── Session tracking ──
+// Presentation ownership is per conversation, not the shared Desktop PID.
+// Keep normal session bookkeeping intact; a lost completion has a finite cap.
+const CODEX_COMPACTION_HOLD_MS = 10 * 60 * 1000;
+const codexCompactionHolds = new Map();
+
+function releaseCodexCompaction(sessionId) {
+  const hold = codexCompactionHolds.get(sessionId);
+  if (!hold) return false;
+  clearTimeout(hold.timer);
+  codexCompactionHolds.delete(sessionId);
+  return true;
+}
+
+function observeCodexCompaction(sessionId, state, event, agentId, headless) {
+  if (agentId !== "codex" || headless) {
+    releaseCodexCompaction(sessionId);
+    return;
+  }
+  if (event === "PreCompact" && state === "sweeping") {
+    if (codexCompactionHolds.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      codexCompactionHolds.delete(sessionId);
+      const resolved = resolveDisplayState();
+      setState(resolved, getSvgOverride(resolved));
+    }, CODEX_COMPACTION_HOLD_MS);
+    timer.unref?.();
+    codexCompactionHolds.set(sessionId, { timer });
+  } else if (event === "event_msg:context_compacted" || event === "SessionStart"
+    || event === "SessionEnd" || event === "Stop" || event === "event_msg:task_complete"
+    || event === "event_msg:turn_aborted"
+    || state === "working" || state === "thinking" || state === "juggling") {
+    // Accepted activity from THIS conversation proves compaction has finished,
+    // even when its explicit completion was lost. Other conversations do not.
+    releaseCodexCompaction(sessionId);
+  }
+}
+
+function hasCodexCompactionVisual() {
+  if (ctx.miniMode || isOneshotDisabled("sweeping")) return false;
+  for (const id of codexCompactionHolds.keys()) {
+    const session = sessions.get(id);
+    if (session && session.agentId === "codex" && !session.headless) return true;
+  }
+  return false;
+}
+
 const sessions = new Map();
 // Account-wide rate-limit quota, keyed by reporting source — deliberately
 // NOT session state (see src/state-account-quota.js). Persistence is
@@ -593,6 +639,12 @@ function clearPendingStateTimer() {
 
 function setState(newState, svgOverride, options = {}) {
   if (shouldDropForDnd()) return;
+
+  if (options.settingsPreview !== true && hasCodexCompactionVisual()
+    && getStatePriority(newState, STATE_PRIORITY) < getStatePriority("sweeping", STATE_PRIORITY)) {
+    newState = resolveDisplayState();
+    svgOverride = getSvgOverride(newState);
+  }
 
   if (newState === "yawning" && SLEEP_SEQUENCE.has(currentState)) return;
 
@@ -1765,6 +1817,7 @@ function clearAllClaudeTranscriptCompletionProbes() {
 }
 
 function deleteSessionWithCompletionCleanup(sessionId, reason) {
+  releaseCodexCompaction(sessionId);
   cancelCompletionDebounce(sessionId, reason);
   cancelClaudeTranscriptCompletionProbe(sessionId, reason);
   return sessions.delete(sessionId);
@@ -2332,6 +2385,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcWslDistro = wslDistro || (existing && existing.wslDistro) || null;
   const srcHeadless = headless || (existing && existing.headless) || false;
   const srcPlatform = platform || (existing && existing.platform) || null;
+  observeCodexCompaction(sessionId, state, event, srcAgentId, srcHeadless);
   const srcModel = model || (existing && existing.model) || null;
   const srcProvider = provider || (existing && existing.provider) || null;
   const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
@@ -2956,6 +3010,11 @@ function updateSession(sessionId, state, event, opts = {}) {
     duplicateCompletionVisualAtEntry || shouldSuppressDuplicateCompletionVisual(existing, state, event);
 
   if (ONESHOT_STATES.has(state)) {
+    if (srcAgentId === "codex" && srcHeadless && state === "sweeping") {
+      const displayState = resolveDisplayState();
+      setState(displayState, getSvgOverride(displayState));
+      return;
+    }
     // Permission animation lock: while any permission request is pending,
     // keep the pet on notification and block all other one-shot visuals.
     // (One-shot branch normally bypasses resolveDisplayState()).
@@ -3142,6 +3201,7 @@ function cleanStaleSessions() {
     }
 
     if (decision.action === "idle") {
+      releaseCodexCompaction(id);
       debugSession(`stale-idle ${decision.reason} ${describeSession(id, s)}`);
       s.state = "idle"; s.displayHint = null;
       s.subagentTracker = clearSubagentTracker(cloneSubagentTracker(s));
@@ -3546,6 +3606,7 @@ function disposeKimiPermissionSession(sessionId) {
 function resolveDisplayState() {
   return resolveDisplayStateFromSessions(sessions, {
     statePriority: STATE_PRIORITY,
+    compacting: hasCodexCompactionVisual(),
     permissionLocked: hasPermissionAnimationLock(),
     updateVisualState,
     updateVisualPriority,
@@ -3680,6 +3741,7 @@ function getCurrentHitBox() { return currentHitBox; }
 function getStartupRecoveryActive() { return startupRecoveryActive; }
 
 function cleanup() {
+  for (const id of codexCompactionHolds.keys()) releaseCodexCompaction(id);
   // The persist debounce timer is unref'd, so a quota update inside the
   // final debounce window before quit would otherwise never reach disk
   // (main.js before-quit calls this cleanup).

@@ -104,6 +104,13 @@ function createCodexTurnFence(options = {}) {
       sessionId,
       turnId: normalizeCodexTurnId(rawInput.turnId),
     };
+    // Manual compaction is valid while no turn is open. It is presentation
+    // housekeeping, not work that can reopen a completed turn. JSONL replay
+    // and timestamp guards run at ingestion before this fence.
+    if (input.state === "sweeping"
+      && (input.event === "PreCompact" || input.event === "event_msg:context_compacted")) {
+      return { accept: true, reason: "housekeeping" };
+    }
     const syntheticOpenStart = input.syntheticBackfill === true
       && input.turnBoundaryOpen === true
       && !!input.turnId;

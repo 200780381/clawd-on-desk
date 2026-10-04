@@ -94,6 +94,35 @@ function makeRealStateHarness({ preserveThemeTimings = false } = {}) {
 }
 
 describe("agent-runtime-main", () => {
+  it("presents manual compaction after Stop while continuing to reject late work", ({ mock }) => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const harness = makeRealStateHarness();
+    const instances = [];
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => makeFakeMonitorClass(instances),
+      loadCodexAgent: () => ({ id: "codex" }), codexSubagentClassifier: {},
+      getStateRuntime: () => harness.state,
+      updateSession: (...args) => harness.state.updateSession(...args),
+    });
+    const rawSessionId = "codex:manual-after-stop", sessionId = localSessionKey(rawSessionId);
+    const opts = { agentId: "codex", hookSource: "codex-official", turnId: "finished-turn",
+      sourcePid: 42, profileId: "local", rawSessionId };
+    try {
+      runtime.updateSessionFromServer(sessionId, "thinking", "UserPromptSubmit", opts);
+      runtime.updateSessionFromServer(sessionId, "idle", "Stop", opts);
+      runtime.updateSessionFromServer(sessionId, "sweeping", "PreCompact", opts);
+      assert.equal(harness.state.getCurrentState(), "sweeping");
+      const before = harness.stateChanges.length;
+      runtime.startCodexLogMonitor().emit(rawSessionId, "sweeping", "event_msg:context_compacted", {
+        turnId: opts.turnId, sourcePid: 42,
+      });
+      assert.deepEqual(harness.stateChanges.slice(before), ["sweeping"]);
+      runtime.updateSessionFromServer(sessionId, "idle", "SessionStart", opts);
+      assert.equal(harness.state.getCurrentState(), "idle");
+      runtime.updateSessionFromServer(sessionId, "working", "PostToolUse", opts);
+      assert.equal(harness.state.sessions.get(sessionId).state, "idle");
+    } finally { runtime.cleanup(); harness.state.cleanup(); }
+  });
   it("replays a long compaction's completion cue before compact SessionStart can return idle", ({ mock }) => {
     mock.timers.enable({ apis: ["setTimeout", "Date"] });
     const harness = makeRealStateHarness({ preserveThemeTimings: true });
