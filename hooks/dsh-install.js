@@ -12,6 +12,12 @@ const { resolveNodeBinAsync } = require("./server-config");
 
 const BRIDGE_PACKAGE_NAME = "@dsh-external/dsh-clawd-bridge";
 const WEB_PROFILE_NAME = "web";
+const DESKTOP_PROFILE_NAME = "desktop";
+const DSH_PROFILE_NAMES = Object.freeze([WEB_PROFILE_NAME, DESKTOP_PROFILE_NAME]);
+// Per-profile inspection latch. Each profile's latch only fences its own
+// startup sync, so a web and a desktop latch must never share a file.
+const INSPECTION_LATCH_FILE = "inspection-required.json";
+const DESKTOP_INSPECTION_LATCH_FILE = "inspection-required-desktop.json";
 const DSH_RESTART_HINT = "DeepSeek Harness bridge verified on disk. Restart any running dsh web process to load this plugin generation.";
 const MANAGED_OWNER = "clawd-on-desk";
 const MANIFEST_FILE = "clawd-manifest.json";
@@ -105,8 +111,18 @@ function resolveDshHome(env = process.env) {
   return path.resolve(override || path.join(os.homedir(), ".dsh"));
 }
 
-function resolveDshProfileDir(dshHome) {
-  return path.join(dshHome, "profiles", WEB_PROFILE_NAME);
+function resolveDshProfileDir(dshHome, profile) {
+  return path.join(dshHome, "profiles", normalizeDshProfileName(profile));
+}
+
+// Only web and desktop are real DSH profiles. Rejecting anything else keeps a
+// caller-supplied name from steering reads and writes into an unexpected path.
+function normalizeDshProfileName(profile) {
+  const value = profile === undefined || profile === null ? WEB_PROFILE_NAME : profile;
+  if (!DSH_PROFILE_NAMES.includes(value)) {
+    throw new Error(`Unsupported DeepSeek Harness profile: ${String(profile)}`);
+  }
+  return value;
 }
 
 function realpathSyncCanonical(fsImpl, value) {
@@ -758,7 +774,7 @@ function packagePath(root, packageName) {
 
 function managedProfileRemovalResidueLocation(options = {}) {
   const dshHome = options.dshHome || resolveDshHome(options.env);
-  const profileDir = resolveDshProfileDir(dshHome);
+  const profileDir = resolveDshProfileDir(dshHome, options.profile);
   const linkDir = path.dirname(packagePath(profileDir, BRIDGE_PACKAGE_NAME));
   return {
     dir: path.dirname(linkDir),
@@ -801,11 +817,14 @@ async function listManagedProfileRemovalResidues(options = {}) {
 function managedProfileRemovalResidueHealth(scan, options = {}) {
   if (!scan || (!scan.unreadableError && scan.paths.length === 0)) return null;
   const dshHome = options.dshHome || resolveDshHome(options.env);
+  const profile = normalizeDshProfileName(options.profile);
   return {
     status: "inspection-required",
     healthReason: "profile-removal-residue",
     dshHome,
-    profileDir: resolveDshProfileDir(dshHome),
+    profile,
+    profileDir: resolveDshProfileDir(dshHome, profile),
+    diskStatus: null,
     dependencyPresent: false,
     bundlePresent: false,
     owned: false,
@@ -1061,6 +1080,7 @@ function isManagedGenerationRecord(record, managedRoot, options = {}) {
 
 function classifyDeepSeekHarnessProfile({
   dshHome,
+  profile,
   profileDir,
   profileManifest,
   installationResolved,
@@ -1147,6 +1167,7 @@ function classifyDeepSeekHarnessProfile({
   return {
     status,
     dshHome,
+    profile,
     profileDir,
     profileManifest,
     dependencySpec,
@@ -1167,8 +1188,10 @@ function classifyDeepSeekHarnessProfile({
 
 function inspectDeepSeekHarnessDiskSync(options = {}) {
   const fsImpl = options.fs || fs;
+  const profile = normalizeDshProfileName(options.profile);
+  const isDesktop = profile === DESKTOP_PROFILE_NAME;
   const dshHome = options.dshHome || resolveDshHome(options.env);
-  const profileDir = resolveDshProfileDir(dshHome);
+  const profileDir = resolveDshProfileDir(dshHome, profile);
   const removalResidueHealth = managedProfileRemovalResidueHealth(
     listManagedProfileRemovalResiduesSync(fsImpl, options),
     options
@@ -1180,9 +1203,12 @@ function inspectDeepSeekHarnessDiskSync(options = {}) {
     let profileManifestExists = false;
     try { profileManifestExists = fsImpl.statSync(profileManifestPath).isFile(); } catch {}
     const latch = readInspectionLatchSync(fsImpl, options);
+    const rawStatus = profileManifestExists ? "profile-corrupt" : "profile-missing";
     return {
-      status: latch ? "inspection-required" : (profileManifestExists ? "profile-corrupt" : "profile-missing"),
+      status: latch ? "inspection-required" : rawStatus,
+      diskStatus: rawStatus,
       dshHome,
+      profile,
       profileDir,
       dependencyPresent: false,
       bundlePresent: false,
@@ -1196,15 +1222,22 @@ function inspectDeepSeekHarnessDiskSync(options = {}) {
     : {};
   const dependencySpec = dependencies[BRIDGE_PACKAGE_NAME] || null;
   const sourcePath = dependencySourcePath(dependencySpec, profileDir, options.platform || process.platform);
-  const dshInstallRoot = options.dshInstallRoot !== undefined
-    ? options.dshInstallRoot
-    : resolveDshInstallRootSync({ ...options, fs: fsImpl });
+  // The desktop app ships its dependency inside app.asar, which a plain Node
+  // process cannot read, so there is no npm install root to inspect. The caller
+  // passes the version it read from the app bundle instead.
+  const dshInstallRoot = isDesktop
+    ? null
+    : (options.dshInstallRoot !== undefined
+      ? options.dshInstallRoot
+      : resolveDshInstallRootSync({ ...options, fs: fsImpl }));
   const dshPackageManifest = dshInstallRoot
     ? readJsonSync(fsImpl, path.join(dshInstallRoot, "package.json"))
     : null;
-  const detectedDshVersion = dshPackageManifest && typeof dshPackageManifest.version === "string"
-    ? parseDshVersion(dshPackageManifest.version)
-    : null;
+  const detectedDshVersion = isDesktop
+    ? (typeof options.hostVersion === "string" ? parseDshVersion(options.hostVersion) : null)
+    : (dshPackageManifest && typeof dshPackageManifest.version === "string"
+      ? parseDshVersion(dshPackageManifest.version)
+      : null);
   const installationManifest = dshInstallRoot
     ? packagePath(dshInstallRoot, BRIDGE_PACKAGE_NAME)
     : null;
@@ -1243,6 +1276,7 @@ function inspectDeepSeekHarnessDiskSync(options = {}) {
       : null);
   const health = classifyDeepSeekHarnessProfile({
     dshHome,
+    profile,
     profileDir,
     profileManifest,
     installationResolved,
@@ -1269,6 +1303,10 @@ function inspectDeepSeekHarnessDiskSync(options = {}) {
     && !immutableConflict
     ? { ...sourceAwareHealth, status: "host-version-unsupported" }
     : sourceAwareHealth;
+  compatibilityAwareHealth.profile = profile;
+  // The raw classification before the source, host-version and latch layers
+  // replace it; registration is derived from this, not from the overrides.
+  compatibilityAwareHealth.diskStatus = health.status;
   compatibilityAwareHealth.detectedDshVersion = detectedDshVersion;
   compatibilityAwareHealth.supportedDshRange = supportedDshRangeLabel();
   compatibilityAwareHealth.supportedDshVersions = VERIFIED_DSH_ARTIFACTS.map((entry) => entry.version);
@@ -1279,13 +1317,18 @@ function inspectDeepSeekHarnessDiskSync(options = {}) {
   return {
     ...compatibilityAwareHealth,
     status: latchBlockedByHigherPriority ? compatibilityAwareHealth.status : "inspection-required",
+    // The latch replaces the whole status; keep the real one for callers that
+    // need to classify ownership behind a pending inspection.
+    statusBeforeLatch: compatibilityAwareHealth.status,
     inspectionLatch: latch,
   };
 }
 
 async function inspectDeepSeekHarnessIntegration(options = {}) {
+  const profile = normalizeDshProfileName(options.profile);
+  const isDesktop = profile === DESKTOP_PROFILE_NAME;
   const dshHome = options.dshHome || resolveDshHome(options.env);
-  const profileDir = resolveDshProfileDir(dshHome);
+  const profileDir = resolveDshProfileDir(dshHome, profile);
   const removalResidueHealth = managedProfileRemovalResidueHealth(
     await listManagedProfileRemovalResidues(options),
     options
@@ -1294,9 +1337,12 @@ async function inspectDeepSeekHarnessIntegration(options = {}) {
   const profileManifestPath = path.join(profileDir, "package.json");
   const profileManifest = await readJson(profileManifestPath);
   if (!profileManifest) {
+    const rawStatus = await exists(profileManifestPath) ? "profile-corrupt" : "profile-missing";
     return {
-      status: await exists(profileManifestPath) ? "profile-corrupt" : "profile-missing",
+      status: rawStatus,
+      diskStatus: rawStatus,
       dshHome,
+      profile,
       profileDir,
       dependencyPresent: false,
       bundlePresent: false,
@@ -1314,7 +1360,9 @@ async function inspectDeepSeekHarnessIntegration(options = {}) {
   if (!commandInfo && options.resolveCommandForInspection !== false) {
     commandInfo = await resolveDshCommand(options);
   }
-  const installationManifest = commandInfo && commandInfo.installRoot
+  // The desktop app's dependency lives inside app.asar, so it has no npm
+  // install root to inspect; only the profile-side copies are checked.
+  const installationManifest = !isDesktop && commandInfo && commandInfo.installRoot
     ? packagePath(commandInfo.installRoot, BRIDGE_PACKAGE_NAME)
     : null;
   const profilePackageManifest = packagePath(profileDir, BRIDGE_PACKAGE_NAME);
@@ -1338,8 +1386,9 @@ async function inspectDeepSeekHarnessIntegration(options = {}) {
       "managed-generation"
     )
     : null;
-  return classifyDeepSeekHarnessProfile({
+  const health = classifyDeepSeekHarnessProfile({
     dshHome,
+    profile,
     profileDir,
     profileManifest,
     installationResolved,
@@ -1352,6 +1401,421 @@ async function inspectDeepSeekHarnessIntegration(options = {}) {
     expectedHashes: options.expectedHashes,
     platform: options.platform,
   });
+  health.diskStatus = health.status;
+  return health;
+}
+
+const DSH_DESKTOP_BUNDLE_ID = "com.deepseek.dsh";
+const DSH_DESKTOP_APP_NAME = "DeepSeek Harness.app";
+const DSH_DESKTOP_LAUNCHER_RELATIVE = "Contents/Resources/runtime/cli/bin/dsh";
+const DESKTOP_DISCOVERY_WINDOWS_REASON = "windows-discovery-not-implemented";
+const DESKTOP_DISCOVERY_UNSUPPORTED_REASON = "unsupported-platform";
+const DESKTOP_DISCOVERY_UNCONFIRMED_REASON = "app-bundle-unconfirmed";
+
+function isXmlPlistText(raw) {
+  const head = String(raw || "").slice(0, 1024);
+  return /<\?xml/.test(head) || /<plist[\s>]/.test(head);
+}
+
+// The bundle identifier is the only thing that proves an .app is DeepSeek
+// Harness and not a look-alike, so it is read straight from the Info.plist.
+function readXmlPlistString(xml, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`<key>\\s*${escaped}\\s*</key>\\s*<string>([\\s\\S]*?)</string>`).exec(xml);
+  if (!match) return null;
+  return match[1]
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+function readDesktopBundleSync(fsImpl, appRoot) {
+  let raw;
+  try {
+    raw = fsImpl.readFileSync(path.join(appRoot, "Contents", "Info.plist"), "utf8");
+  } catch {
+    return { ok: false, reason: "info-plist-unreadable" };
+  }
+  if (!isXmlPlistText(raw)) return { ok: false, reason: "info-plist-not-xml" };
+  if (readXmlPlistString(raw, "CFBundleIdentifier") !== DSH_DESKTOP_BUNDLE_ID) {
+    return { ok: false, reason: "bundle-id-mismatch" };
+  }
+  const launcherPath = path.join(appRoot, ...DSH_DESKTOP_LAUNCHER_RELATIVE.split("/"));
+  let launcherStat;
+  try { launcherStat = fsImpl.statSync(launcherPath); } catch { launcherStat = null; }
+  if (!launcherStat || !launcherStat.isFile()) return { ok: false, reason: "launcher-missing" };
+  return {
+    ok: true,
+    launcherPath,
+    staticVersion: parseDshVersion(readXmlPlistString(raw, "CFBundleShortVersionString") || ""),
+  };
+}
+
+// File-only discovery of the macOS desktop app. It never launches the app or
+// its bundled command; Windows discovery is a later step, so win32 reports
+// unknown instead of a false not-found.
+function discoverDshDesktopSync(options = {}) {
+  if (options.desktopDiscovery) return options.desktopDiscovery;
+  const platform = options.platform || process.platform;
+  const empty = { appRoot: null, launcherPath: null, staticVersion: null };
+  if (platform === "win32") {
+    return { status: "unknown", ...empty, checkedPaths: [], reason: DESKTOP_DISCOVERY_WINDOWS_REASON };
+  }
+  if (platform !== "darwin") {
+    return { status: "not-found", ...empty, checkedPaths: [], reason: DESKTOP_DISCOVERY_UNSUPPORTED_REASON };
+  }
+  const fsImpl = options.fs || fs;
+  const homeDir = typeof options.homeDir === "string" && options.homeDir.trim()
+    ? options.homeDir
+    : os.homedir();
+  const appPaths = Array.isArray(options.desktopAppPaths)
+    ? options.desktopAppPaths
+    : [
+      path.join("/", "Applications", DSH_DESKTOP_APP_NAME),
+      path.join(homeDir, "Applications", DSH_DESKTOP_APP_NAME),
+    ];
+  const checkedPaths = [];
+  let unconfirmedReason = null;
+  for (const appRoot of appPaths) {
+    checkedPaths.push(appRoot);
+    let dirStat;
+    try { dirStat = fsImpl.statSync(appRoot); } catch { continue; }
+    if (!dirStat.isDirectory()) continue;
+    const bundle = readDesktopBundleSync(fsImpl, appRoot);
+    if (!bundle.ok) {
+      // A binary/unreadable Info.plist cannot prove the app is not DSH, and a
+      // matching bundle id with no launcher is a DSH app we cannot use; both
+      // stay "unknown" instead of being reported as not installed.
+      if (bundle.reason === "info-plist-unreadable" || bundle.reason === "info-plist-not-xml") {
+        if (!unconfirmedReason) unconfirmedReason = DESKTOP_DISCOVERY_UNCONFIRMED_REASON;
+      } else if (bundle.reason === "launcher-missing") {
+        if (!unconfirmedReason) unconfirmedReason = "launcher-missing";
+      }
+      continue;
+    }
+    return {
+      status: "found",
+      appRoot,
+      launcherPath: bundle.launcherPath,
+      staticVersion: bundle.staticVersion,
+      checkedPaths,
+      reason: null,
+    };
+  }
+  if (unconfirmedReason) {
+    return { status: "unknown", ...empty, checkedPaths, reason: unconfirmedReason };
+  }
+  return { status: "not-found", ...empty, checkedPaths, reason: null };
+}
+
+// Disk-only evidence for one profile, read independently of the health result
+// so a latch cannot hide it. Each value is deliberately one of a small set.
+function describeManifestSync(fsImpl, profileDir) {
+  let dirStat;
+  try {
+    dirStat = fsImpl.lstatSync(profileDir);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "absent";
+    return "unreadable";
+  }
+  if (typeof dirStat.isSymbolicLink === "function" && dirStat.isSymbolicLink()) return "symlink";
+  const manifestPath = path.join(profileDir, "package.json");
+  let manifestStat;
+  try {
+    manifestStat = fsImpl.statSync(manifestPath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "absent";
+    return "unreadable";
+  }
+  if (!manifestStat.isFile()) return "absent";
+  let raw;
+  try {
+    raw = fsImpl.readFileSync(manifestPath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "absent";
+    return "unreadable";
+  }
+  try {
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    JSON.parse(raw);
+    return "present";
+  } catch {
+    return "corrupt";
+  }
+}
+
+function inspectionLatchEvidenceSync(fsImpl, options) {
+  const filePath = inspectionLatchPath(options);
+  let stat;
+  try {
+    stat = fsImpl.lstatSync(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "none";
+    return "unknown";
+  }
+  if (!stat.isFile() || (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink())) {
+    return "invalid";
+  }
+  let raw;
+  try {
+    raw = fsImpl.readFileSync(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "none";
+    return "unknown";
+  }
+  let parsed;
+  try {
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    parsed = JSON.parse(raw);
+  } catch {
+    return "invalid";
+  }
+  return parsed && parsed.owner === MANAGED_OWNER && parsed.schemaVersion === 1 ? "present" : "invalid";
+}
+
+function manualReferenceEvidence(reference) {
+  if (!reference) return "none";
+  if (isValidManualGenerationReference(reference)) return "present";
+  if (reference.reason === "reference-directory-unreadable" || reference.reason === "reference-unreadable") {
+    return "unknown";
+  }
+  return "invalid";
+}
+
+// Ownership is read from the raw classification (diskStatus), not from the
+// source/host-version/latch layers that rewrite status afterwards.
+function registrationEvidenceFromHealth(manifestEvidence, health) {
+  if (manifestEvidence !== "present") {
+    return manifestEvidence === "absent" ? "none" : "unknown";
+  }
+  const status = health ? health.diskStatus : null;
+  switch (status) {
+    case "absent":
+    case "profile-missing":
+      return "none";
+    case "profile-entry-foreign-or-conflicting":
+      return "foreign";
+    case "generation-integrity-failed":
+      return "damaged";
+    case "healthy":
+    case "profile-entry-incomplete":
+    case "generation-mismatch":
+    case "managed-bundle-missing":
+    case "managed-residue":
+    case "version-unsupported":
+      return health && health.owned ? "owned" : "unknown";
+    default:
+      return "unknown";
+  }
+}
+
+function dshDiagnose(reason) {
+  return { role: "diagnose", reason };
+}
+
+function resolveWebDshRole({ evidence, carrier, operation }) {
+  if (carrier.status === "unverified") {
+    if (evidence.manifest === "present") return { role: "mutable", reason: null };
+    if (operation === "install" || operation === "explicit-repair") {
+      // Upstream plugin add creates the web profile, so this operation may too.
+      return { role: "mutable", reason: null, initializesProfile: true };
+    }
+    if (operation === "startup-sync") return dshDiagnose("web-profile-uninitialized");
+    if (operation === "uninstall") return { role: "mutable", reason: null };
+    return dshDiagnose("web-profile-uninitialized");
+  }
+  if (
+    evidence.manifest === "present"
+    || evidence.registration === "owned"
+    || evidence.manualReference === "present"
+    || evidence.latch === "present"
+  ) {
+    // No command, but Clawd still owns state here: report instead of touching
+    // it, and let the existing manual npx fallback handle it later.
+    return { role: "diagnose", reason: "cli-unavailable", manualFallback: true };
+  }
+  return { role: "not-applicable", reason: "web-not-used" };
+}
+
+function resolveDesktopDshRole({ evidence, discovery }) {
+  // Only Clawd's own registration, latch or residue counts as desktop
+  // evidence; a desktop profile we never registered does not. Residue is
+  // already resolved above, so it cannot reach this step.
+  const ourEvidence = evidence.registration === "owned" || evidence.latch === "present";
+  if (discovery.status === "not-found") {
+    return ourEvidence
+      ? dshDiagnose("carrier-unavailable")
+      : { role: "not-applicable", reason: "desktop-not-installed" };
+  }
+  if (discovery.status === "unknown") {
+    // "Could not find it" is not "it is gone": any surviving manifest counts.
+    return ourEvidence || evidence.manifest === "present"
+      ? dshDiagnose("desktop-unverifiable")
+      : { role: "not-applicable", reason: "desktop-not-installed" };
+  }
+  if (evidence.manifest === "absent") {
+    return evidence.latch === "present"
+      ? dshDiagnose("inspection-required")
+      : { role: "not-applicable", reason: "desktop-profile-uninitialized" };
+  }
+  return { role: "mutable", reason: null };
+}
+
+// Ordered role decision, one branch per row of the profile role table. The
+// first matching row wins; profile-specific rows are split into the two small
+// helpers above.
+function resolveDshRole({ profile, evidence, carrier, discovery, health, operation }) {
+  if (evidence.manifest === "corrupt") return dshDiagnose("profile-corrupt");
+  if (evidence.manifest === "unreadable") return dshDiagnose("profile-unreadable");
+  if (evidence.manifest === "symlink") return dshDiagnose("profile-symlink");
+  if (evidence.residue === "unknown") return dshDiagnose("residue-unreadable");
+  if (evidence.residue === "present") return dshDiagnose("removal-residue");
+  if (evidence.latch === "unknown") return dshDiagnose("latch-unreadable");
+  if (evidence.latch === "invalid") return dshDiagnose("latch-invalid");
+  if (profile === WEB_PROFILE_NAME && evidence.manualReference === "unknown") {
+    return dshDiagnose("manual-reference-unreadable");
+  }
+  if (evidence.registration === "unknown") return dshDiagnose("registration-unknown");
+  if (evidence.registration === "foreign") return dshDiagnose("foreign-package");
+  if (evidence.registration === "damaged") return dshDiagnose("integrity-failed");
+  // The source/unavailable status only exists on the pre-latch status, so read
+  // it through statusBeforeLatch when a latch has replaced the status.
+  const statusBeforeLatch = health && health.status === "inspection-required" && health.statusBeforeLatch
+    ? health.statusBeforeLatch
+    : (health ? health.status : null);
+  if (statusBeforeLatch === "source-unavailable") return dshDiagnose("source-unavailable");
+  if (profile === WEB_PROFILE_NAME && evidence.manualReference === "invalid") {
+    return dshDiagnose("manual-reference-invalid");
+  }
+  // A known host version outside every family is decided from the detected
+  // version, not from the overridden status.
+  if (profile === WEB_PROFILE_NAME) {
+    const detected = health && health.detectedDshVersion;
+    if (detected && !isSupportedDshVersion(detected)) return dshDiagnose("version-unsupported");
+  } else if (discovery && discovery.staticVersion && !isSupportedDshVersion(discovery.staticVersion)) {
+    return dshDiagnose("version-unsupported");
+  }
+  if (evidence.latch === "present" && operation === "startup-sync") {
+    return dshDiagnose("inspection-required");
+  }
+  if (profile === WEB_PROFILE_NAME) return resolveWebDshRole({ evidence, carrier, operation });
+  return resolveDesktopDshRole({ evidence, discovery });
+}
+
+function inspectWebDshTargetSync(options, operation, fsImpl) {
+  const scoped = { ...options, profile: WEB_PROFILE_NAME };
+  const dshHome = options.dshHome || resolveDshHome(options.env);
+  const profileDir = resolveDshProfileDir(dshHome, WEB_PROFILE_NAME);
+  const health = inspectDeepSeekHarnessDiskSync(scoped);
+  const manifest = describeManifestSync(fsImpl, profileDir);
+  const residueScan = listManagedProfileRemovalResiduesSync(fsImpl, scoped);
+  const residue = residueScan.unreadableError ? "unknown" : (residueScan.paths.length ? "present" : "none");
+  const latch = inspectionLatchEvidenceSync(fsImpl, scoped);
+  const manualReference = manualReferenceEvidence(readManualGenerationReferenceSync(fsImpl, scoped));
+  const commandCandidates = dshCommandPathsSync(scoped);
+  const carrier = commandCandidates.length
+    ? { status: "unverified", kind: "npm", path: commandCandidates[0] }
+    : { status: "unavailable", kind: "npm", path: null };
+  const evidence = {
+    manifest,
+    registration: registrationEvidenceFromHealth(manifest, health),
+    residue,
+    latch,
+    manualReference,
+  };
+  const role = resolveDshRole({
+    profile: WEB_PROFILE_NAME,
+    evidence,
+    carrier,
+    discovery: null,
+    health,
+    operation,
+  });
+  return {
+    profile: WEB_PROFILE_NAME,
+    profileDir,
+    health,
+    evidence,
+    carrier,
+    discovery: null,
+    role: role.role,
+    reason: role.reason,
+    manualFallback: role.manualFallback === true,
+    initializesProfile: role.initializesProfile === true,
+  };
+}
+
+function inspectDesktopDshTargetSync(options, operation, fsImpl) {
+  const dshHome = options.dshHome || resolveDshHome(options.env);
+  const profileDir = resolveDshProfileDir(dshHome, DESKTOP_PROFILE_NAME);
+  const discovery = discoverDshDesktopSync(options);
+  const hostVersion = discovery && discovery.status === "found" ? discovery.staticVersion : null;
+  const scoped = {
+    ...options,
+    profile: DESKTOP_PROFILE_NAME,
+    dshInstallRoot: null,
+    hostVersion,
+  };
+  const health = inspectDeepSeekHarnessDiskSync(scoped);
+  const manifest = describeManifestSync(fsImpl, profileDir);
+  const residueScan = listManagedProfileRemovalResiduesSync(fsImpl, scoped);
+  const residue = residueScan.unreadableError ? "unknown" : (residueScan.paths.length ? "present" : "none");
+  const latch = inspectionLatchEvidenceSync(fsImpl, scoped);
+  const carrier = discovery && discovery.status === "found"
+    ? { status: "unverified", kind: "desktop", path: discovery.launcherPath }
+    : { status: "unavailable", kind: "desktop", path: null };
+  const evidence = {
+    manifest,
+    registration: registrationEvidenceFromHealth(manifest, health),
+    residue,
+    latch,
+    manualReference: null,
+  };
+  const role = resolveDshRole({
+    profile: DESKTOP_PROFILE_NAME,
+    evidence,
+    carrier,
+    discovery,
+    health,
+    operation,
+  });
+  return {
+    profile: DESKTOP_PROFILE_NAME,
+    profileDir,
+    health,
+    evidence,
+    carrier,
+    discovery,
+    role: role.role,
+    reason: role.reason,
+    manualFallback: false,
+    initializesProfile: false,
+  };
+}
+
+// Unknown operations are rejected, like unknown profile names, so a typo never
+// silently changes which capabilities an operation is granted.
+function normalizeDshTargetOperation(operation) {
+  const allowed = ["install", "startup-sync", "explicit-repair", "uninstall", "doctor"];
+  if (!allowed.includes(operation)) {
+    throw new Error(`Unsupported DeepSeek Harness target operation: ${String(operation)}`);
+  }
+  return operation === "doctor" ? "explicit-repair" : operation;
+}
+
+// Static target inspection for Doctor, detectors and Settings. It never spawns
+// a process, so the mutable role only means "may be attempted"; the real
+// operation mode still has to verify the carrier and re-check under the lock.
+function inspectDshTargetsSync(options = {}, { operation } = {}) {
+  const fsImpl = options.fs || fs;
+  const resolvedOperation = normalizeDshTargetOperation(operation);
+  return {
+    web: inspectWebDshTargetSync(options, resolvedOperation, fsImpl),
+    desktop: inspectDesktopDshTargetSync(options, resolvedOperation, fsImpl),
+  };
 }
 
 async function readSourceBundle(options = {}) {
@@ -1686,7 +2150,11 @@ async function acquireMutationLock(options = {}) {
 }
 
 function inspectionLatchPath(options = {}) {
-  return path.join(resolveManagedRoot(options), "inspection-required.json");
+  const profile = normalizeDshProfileName(options.profile);
+  const fileName = profile === DESKTOP_PROFILE_NAME
+    ? DESKTOP_INSPECTION_LATCH_FILE
+    : INSPECTION_LATCH_FILE;
+  return path.join(resolveManagedRoot(options), fileName);
 }
 
 async function readInspectionLatch(options = {}) {
@@ -1810,6 +2278,82 @@ async function readManualGenerationReference(options = {}) {
     return { invalid: true, referencePath: filePath, reason: "reference-invalid" };
   }
   const scanAfter = await listManualGenerationReferenceResidues(options);
+  if (scanAfter.unreadableError) {
+    return {
+      invalid: true,
+      referencePath: path.dirname(filePath),
+      reason: "reference-directory-unreadable",
+    };
+  }
+  const residues = [...new Set([...residuesBefore, ...scanAfter.paths])];
+  if (residues.length) {
+    return {
+      invalid: true,
+      referencePath: residues[0],
+      residuePaths: residues,
+      reason: "reference-residue",
+    };
+  }
+  return reference;
+}
+
+function listManualGenerationReferenceResiduesSync(fsImpl, options = {}) {
+  const filePath = manualGenerationReferencePath(options);
+  const dir = path.dirname(filePath);
+  const prefix = `${path.basename(filePath)}.`;
+  try {
+    return {
+      paths: fsImpl.readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.name.startsWith(prefix))
+        .map((entry) => path.join(dir, entry.name))
+        .sort(),
+      unreadableError: null,
+    };
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { paths: [], unreadableError: null };
+    return { paths: [], unreadableError: err || new Error("manual reference directory is unreadable") };
+  }
+}
+
+// Synchronous twin of readManualGenerationReference, for the static target
+// inspection. It keeps the same distinguishable outcomes (missing, valid,
+// residue, invalid, unreadable) so role reasons can tell them apart.
+function readManualGenerationReferenceSync(fsImpl, options = {}) {
+  const filePath = manualGenerationReferencePath(options);
+  const scanBefore = listManualGenerationReferenceResiduesSync(fsImpl, options);
+  if (scanBefore.unreadableError) {
+    return {
+      invalid: true,
+      referencePath: path.dirname(filePath),
+      reason: "reference-directory-unreadable",
+    };
+  }
+  const residuesBefore = scanBefore.paths;
+  let stat;
+  try {
+    stat = fsImpl.lstatSync(filePath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      if (residuesBefore.length) {
+        return {
+          invalid: true,
+          referencePath: residuesBefore[0],
+          residuePaths: residuesBefore,
+          reason: "reference-residue",
+        };
+      }
+      return null;
+    }
+    return { invalid: true, referencePath: filePath, reason: "reference-unreadable" };
+  }
+  if (!stat.isFile() || (typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink())) {
+    return { invalid: true, referencePath: filePath, reason: "reference-not-regular-file" };
+  }
+  const reference = readJsonSync(fsImpl, filePath);
+  if (!isValidManualGenerationReference(reference)) {
+    return { invalid: true, referencePath: filePath, reason: "reference-invalid" };
+  }
+  const scanAfter = listManualGenerationReferenceResiduesSync(fsImpl, options);
   if (scanAfter.unreadableError) {
     return {
       invalid: true,
@@ -2944,6 +3488,7 @@ module.exports = {
   VERIFIED_DSH_ARTIFACT_INTEGRITY,
   VERIFIED_DSH_ARTIFACTS,
   WEB_PROFILE_NAME,
+  DESKTOP_PROFILE_NAME,
   dshContractForMarker,
   dshContractForVersion,
   dshFamilyForVersion,
@@ -2951,11 +3496,13 @@ module.exports = {
   isSupportedDshVersion,
   supportedDshRangeLabel,
   dshCommandPathsSync,
+  discoverDshDesktopSync,
   hasDshCommand,
   hasPnpm,
   installDeepSeekHarnessBridge,
   inspectDeepSeekHarnessDiskSync,
   inspectDeepSeekHarnessIntegration,
+  inspectDshTargetsSync,
   isBridgeInstalled,
   isDshInstalled,
   registerDeepSeekHarness,
@@ -2981,6 +3528,9 @@ module.exports = {
     unlinkManagedProfileResidue,
     manualGenerationReferencePath,
     readManualGenerationReference,
+    readManualGenerationReferenceSync,
+    discoverDshDesktopSync,
+    inspectDshTargetsSync,
     buildManualDshCommand,
     computeExpectedSourceHashesSync,
     digestBridgeFiles,
