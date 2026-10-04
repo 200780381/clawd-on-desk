@@ -7,23 +7,37 @@ DSH `web` profile. A Clawd-managed plugin runs inside DSH and uses public APIs
 for both state observation and ordinary blocking approvals. Clawd does not read
 DSH's projection files and does not install a second monitor.
 
-The compatibility gate is intentionally narrow while DSH remains a developer
-preview. Clawd keeps an explicit table of verified DSH releases, each bound to its
-own npm artifact and integrity:
+The compatibility gate admits a whole verified minor line while DSH remains a
+developer preview. Clawd keeps two tables. The family table is the admission
+rule: a host version is supported when it parses strictly, its `major.minor`
+matches a family, and it is at or above that family's first verified release.
+Build metadata (`+...`) is rejected.
+
+| Family | Minimum admitted version | Range |
+| --- | --- | --- |
+| `0.2` | `0.2.0-rc.2` | `>=0.2.0-rc.2 <0.3.0-0` |
+| `0.1` | `0.1.0-rc.6` | `>=0.1.0-rc.6 <0.2.0-0` |
+
+The verified-artifact list is the one place that names concrete releases; new
+generation markers and manual `npx` fallbacks pin to it:
 
 | DSH version | npm artifact | npm integrity (sha512) |
 | --- | --- | --- |
-| `0.2.0-rc.2` (preferred for new installs) | `@deepseek-ai/dsh@0.2.0-rc.2` | `sha512-EAJ3gPNcVt/uv8X19PMm9NkVhWgT7xXNMk0UKCVm+IQ5rpSQOcsMUa0HWlnYYVybKMsccjcRB21vVVsaXQ6IdA==` |
+| `0.2.0-rc.2` (used when the host version is unknown) | `@deepseek-ai/dsh@0.2.0-rc.2` | `sha512-EAJ3gPNcVt/uv8X19PMm9NkVhWgT7xXNMk0UKCVm+IQ5rpSQOcsMUa0HWlnYYVybKMsccjcRB21vVVsaXQ6IdA==` |
 | `0.1.5-rc.3` | `@deepseek-ai/dsh@0.1.5-rc.3` | `sha512-c0W6Xqc4ChjFcCJkbzPeIxZQdnbKqe+QAcJzWGtogg0ZzsnZRcw3vopMyZ5oZU6E2fmyqGcyDR1sBeiCH4yHcg==` |
 | `0.1.5-rc.1` | `@deepseek-ai/dsh@0.1.5-rc.1` | `sha512-rmNmzQCg3oIc1z8xH7izRSOuy1TNzq+/NILyfM+7e8DKOyV+yBtg47WEsqR2SiIe1ATec3L/rUa1YhIcfQ2XEg==` |
 | `0.1.1-rc.2` | `@deepseek-ai/dsh@0.1.1-rc.2` | `sha512-UP1UIh6q3Gme/yXRn/QL2P8IsVlv8Shpg22TRJIZPsCRWLm4CBiA1MUvXmJAfsOEETBMLAl+xWPtFw6ICsN3wg==` |
 | `0.1.0-rc.6` | `@deepseek-ai/dsh@0.1.0-rc.6` | `sha512-brpZfED7ieRa2PQ5tUxMhHrM1pb2CmKFVM/f6yMULBDMicahk+Z2OsHgTwTDnoiZm23Ftu9rQz0NN4pflaoJcg==` |
 
-Install and Repair select the contract matching the detected host (or the owned
-marker when no CLI probe is available); new installs prefer `0.2.0-rc.2`.
-Uninstall and manual `npx` commands select the contract of the installed
-marker. Pre-release versions are exact-pinned — a broad `>=0.1.x` range would
-admit artifacts this bridge has not verified. The public seams were first
+Only the listed versions were verified by hand; a family is an admission rule,
+not a claim that every release inside it was tested. Install and Repair select
+the contract of the host's family; Uninstall and manual `npx` commands pin the
+marker's own artifact when its version is listed, otherwise the family's newest
+verified artifact. Two hosts in the same family share one generation, and the
+marker keeps the version it was first staged for. Pre-family markers keep their
+old exact `=<version>` range for hash verification. Adding a new minor line
+means verifying and listing at least one artifact for it and adding a family
+row. The public seams were first
 audited against upstream commit `47f9438`, then rechecked in the compiled
 rc.6 artifact; that commit is a source baseline, not a claimed tag mapping.
 The `0.1.5-rc.1` row was added after re-checking the same four public seams
@@ -49,7 +63,8 @@ A later 2026-10-04 run used the `0.2.0-rc.2` generation that Clawd's installer
 produced and passed (see below). In `0.2.0-rc.2` a failed `tool/result` marks
 `isError` on the message rather than on its content items; the bridge accepts
 both shapes.
-Unlisted versions fail before Clawd changes the DSH profile.
+A version outside every family, or below its family's floor, fails before Clawd
+changes the DSH profile.
 
 ## Behavior
 
@@ -105,7 +120,8 @@ mode is enabled; per-session grants are not offered in this experimental release
 
 ## Requirements
 
-- DSH `0.2.0-rc.2` (preferred), `0.1.5-rc.3`, `0.1.5-rc.1`, `0.1.1-rc.2`, or `0.1.0-rc.6` on the same machine.
+- A DSH host version inside a verified family on the same machine: `0.2` at or
+  above `0.2.0-rc.2`, or `0.1` at or above `0.1.0-rc.6`.
 - The `web` profile.
 - `pnpm`, because the official DSH plugin command delegates profile mutation to
   pnpm.
@@ -138,12 +154,14 @@ Separate DSH homes therefore never share a generation that one home's uninstall
 or cleanup could delete.
 
 If DSH is only used through `npx`, Clawd does not download it automatically.
-Settings returns an exact manual `npx @deepseek-ai/dsh@<contract> plugin ... add`
-command (the contract matching the staged generation — `0.2.0-rc.2` for a
-preferred-contract install, or the marker's own version
-`0.1.5-rc.3`, `0.1.5-rc.1`, `0.1.1-rc.2`, or `0.1.0-rc.6` otherwise) pointing at the staged managed generation and explicitly setting the
+Settings returns a manual `npx @deepseek-ai/dsh@<artifact> plugin ... add`
+command pointing at the staged managed generation and explicitly setting the
 canonical target `DSH_HOME` (PowerShell on Windows, POSIX environment-prefix
-syntax elsewhere). This keeps an alternate home from accidentally mutating the
+syntax elsewhere). The pinned artifact follows the owned marker: when the
+marker's version is on the verified list it is used as-is; otherwise it is the
+marker's family's newest verified artifact. With no marker at all it is the
+preferred family's newest verified artifact. This keeps an
+alternate home from accidentally mutating the
 default `~/.dsh` when the command is pasted into a fresh terminal. After that command succeeds,
 Install can verify the existing marker-owned plugin without requiring a global
 CLI. The generation is protected by a Clawd-owned manual reference until it is
@@ -206,9 +224,17 @@ Doctor reports DSH host detection separately from managed plugin disk health.
 Disk health cannot prove that an already-running DSH process loaded the new
 generation, so restart guidance remains conservative.
 
-The installer and Doctor accept only a listed DSH version before changing the
-profile; each operation resolves its contract from the detected host version or
-the owned marker, never from a broad range. DSH does not currently expose a public host-version/activation seam to
+The installer and Doctor admit only a host whose `major.minor` matches a family
+and that is at or above that family's floor before changing the profile; each
+operation resolves its target from the detected host version, or from the owned
+marker when no CLI probe is available, and never guesses from a range outside
+those families. Upgrading from a pre-family exact generation is automatic when
+the installed Clawd is newer: startup sync stages the family generation through
+the normal Clawd-version rules. Running the same Clawd version from source
+reports `generation-conflict` instead, and needs an explicit repair (Settings →
+Agents: uninstall, then install; or Doctor's repair).
+
+DSH does not currently expose a public host-version/activation seam to
 external plugins, so an already-installed bridge cannot reliably disable itself
 before listener registration if DSH is upgraded in place. This is an explicit
 experimental limitation: restart after changes, heed Doctor compatibility
