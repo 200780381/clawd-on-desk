@@ -75,6 +75,40 @@ function winDesktopFiles(root) {
   };
 }
 
+// A win32 fake fs whose statSync reports a chosen kind per path, so a test can
+// simulate Electron (app.asar is a directory) or plain Node (a file), as well
+// as reject a directory where a file is required.
+function winStatFs(entries) {
+  const map = new Map();
+  for (const [entryPath, kind] of entries) {
+    map.set(path.win32.resolve(entryPath).toLowerCase(), kind);
+  }
+  const missing = () => {
+    const err = new Error("ENOENT");
+    err.code = "ENOENT";
+    return err;
+  };
+  return {
+    statSync(filePath) {
+      const key = path.win32.resolve(String(filePath)).toLowerCase();
+      if (!map.has(key)) throw missing();
+      const kind = map.get(key);
+      return { isFile: () => kind === "file", isDirectory: () => kind === "dir", isSymbolicLink: () => false };
+    },
+    readFileSync() {
+      throw missing();
+    },
+  };
+}
+
+function windowsDesktopEntries(root, asarKind) {
+  return [
+    [path.win32.join(root, "DeepSeek Harness.exe"), "file"],
+    [path.win32.join(root, "resources", "runtime", "cli", "bin", "dsh.cmd"), "file"],
+    [path.win32.join(root, "resources", "app.asar"), asarKind],
+  ];
+}
+
 function makeHome(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-dsh-carriers-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -756,6 +790,87 @@ test("the async Windows entry honors an injected snapshot and an Error", async (
   });
   assert.strictEqual(broken.status, "unknown");
   assert.strictEqual(broken.reason, "registry-unreadable");
+});
+
+test("Windows discovery accepts app.asar reported as a directory (Electron fs)", () => {
+  const root = "C:\\Tools\\DeepSeek Harness";
+  const result = discoverDshDesktopSync({
+    platform: "win32",
+    env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    fs: winStatFs(windowsDesktopEntries(root, "dir")),
+    windowsRegistrySnapshot: {
+      uninstall: [{ installLocation: root, displayVersion: FAMILY_VERSION }],
+      commandDirectory: null,
+    },
+  });
+  assert.strictEqual(result.status, "found");
+  assert.strictEqual(result.appRoot, root);
+  assert.strictEqual(result.staticVersion, FAMILY_VERSION);
+});
+
+test("Windows discovery accepts app.asar reported as a file (plain Node fs)", () => {
+  const root = "C:\\Tools\\DeepSeek Harness";
+  const result = discoverDshDesktopSync({
+    platform: "win32",
+    env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    fs: winStatFs(windowsDesktopEntries(root, "file")),
+    windowsRegistrySnapshot: {
+      uninstall: [{ installLocation: root, displayVersion: FAMILY_VERSION }],
+      commandDirectory: null,
+    },
+  });
+  assert.strictEqual(result.status, "found");
+  assert.strictEqual(result.appRoot, root);
+});
+
+test("Windows discovery rejects a root without app.asar", () => {
+  const root = "C:\\Tools\\DeepSeek Harness";
+  const entries = windowsDesktopEntries(root, "file")
+    .filter(([entryPath]) => !entryPath.endsWith("app.asar"));
+  const result = discoverDshDesktopSync({
+    platform: "win32",
+    env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    fs: winStatFs(entries),
+    windowsRegistrySnapshot: {
+      uninstall: [{ installLocation: root, displayVersion: FAMILY_VERSION }],
+      commandDirectory: null,
+    },
+  });
+  assert.strictEqual(result.status, "not-found");
+  assert.ok(result.checkedPaths.includes(root));
+});
+
+test("Windows discovery rejects a root whose exe or launcher is a directory", () => {
+  const root = "C:\\Tools\\DeepSeek Harness";
+  const exeAsDir = windowsDesktopEntries(root, "file");
+  exeAsDir[0][1] = "dir";
+  assert.strictEqual(
+    discoverDshDesktopSync({
+      platform: "win32",
+      env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+      fs: winStatFs(exeAsDir),
+      windowsRegistrySnapshot: {
+        uninstall: [{ installLocation: root, displayVersion: FAMILY_VERSION }],
+        commandDirectory: null,
+      },
+    }).status,
+    "not-found"
+  );
+
+  const cmdAsDir = windowsDesktopEntries(root, "file");
+  cmdAsDir[1][1] = "dir";
+  assert.strictEqual(
+    discoverDshDesktopSync({
+      platform: "win32",
+      env: { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+      fs: winStatFs(cmdAsDir),
+      windowsRegistrySnapshot: {
+        uninstall: [{ installLocation: root, displayVersion: FAMILY_VERSION }],
+        commandDirectory: null,
+      },
+    }).status,
+    "not-found"
+  );
 });
 
 // ---------------------------------------------------------------------------

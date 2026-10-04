@@ -1754,17 +1754,24 @@ function windowsRootKey(root) {
 
 function verifyWindowsDesktopRoot(root, options = {}) {
   const fsImpl = options.fs || fs;
-  const required = [
+  const requiredFiles = [
     path.win32.join(root, DSH_DESKTOP_EXE_NAME),
     path.win32.join(root, "resources", "runtime", "cli", "bin", DSH_DESKTOP_CMD_NAME),
-    path.win32.join(root, "resources", "app.asar"),
   ];
-  for (const filePath of required) {
+  for (const filePath of requiredFiles) {
     let stat = null;
     try { stat = fsImpl.statSync(filePath); } catch {}
     if (!stat || !stat.isFile()) return false;
   }
-  return true;
+  // electron's patched fs reports an .asar bundle as a directory, while a plain
+  // Node process reports it as a file, so only "exists" is portable across both.
+  // (The bundled launcher target lives inside it, so a missing app.asar still
+  // fails the root.) Requiring isFile() here made Electron-based Clawd reject
+  // every real desktop install.
+  const asarPath = path.win32.join(root, "resources", "app.asar");
+  let asarStat = null;
+  try { asarStat = fsImpl.statSync(asarPath); } catch {}
+  return !!asarStat;
 }
 
 function windowsDesktopCandidates(registry, options = {}) {
