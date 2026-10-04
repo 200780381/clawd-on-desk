@@ -296,6 +296,22 @@ test("the old generation is only cleaned after the repair converges", async (t) 
   assert.strictEqual(fs.existsSync(staleDir), false);
 });
 
+test("a repair converge clears its own inspection latch before cleaning generations", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  const staleHash = "e".repeat(64);
+  const staleDir = path.join(managedRootOf(harness), "generations", staleHash);
+  writeGeneration(staleDir, staleHash);
+  const latchPath = path.join(managedRootOf(harness), "inspection-required.json");
+  writeJson(latchPath, { owner: "clawd-on-desk", schemaVersion: 1, reason: "previous-remove-failed", detail: "" });
+
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(fs.existsSync(latchPath), false);
+  assert.strictEqual(fs.existsSync(staleDir), false);
+});
+
 test("startup sync still only reports a disabled plugin", async (t) => {
   const harness = makeHarness(t);
   writeIncompleteProfile(harness, "web");

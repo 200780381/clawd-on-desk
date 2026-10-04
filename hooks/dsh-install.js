@@ -9,6 +9,11 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { asarUnpackedPath } = require("./json-utils");
 const { resolveNodeBinAsync } = require("./server-config");
+const {
+  readDshNotices,
+  applyDshNoticeOutcome,
+  acknowledgeDshNotice,
+} = require("./dsh-notices");
 
 const BRIDGE_PACKAGE_NAME = "@dsh-external/dsh-clawd-bridge";
 const WEB_PROFILE_NAME = "web";
@@ -4077,6 +4082,7 @@ async function syncDshProfile(options, target) {
               ? "DeepSeek Harness was detected, but a global dsh CLI is not available; remove then add the plugin manually"
               : "DeepSeek Harness was detected, but a global dsh CLI is not available",
             manualCommand: commands.join("\n"),
+            manualBundleHash: generation.bundleHash,
             manualGenerationReferenced: true,
           };
         } finally {
@@ -4216,17 +4222,23 @@ async function syncDshProfile(options, target) {
             manualCommand: buildManualDshCommand([
               "dsh", "plugin", "--profile", profile, "add", generation.generationDir,
             ], options),
+            manualBundleHash: generation.bundleHash,
             manualInspectionRequired: true,
           };
         }
-        await discardCreatedGenerationIfUnreferenced(generation, failedHealth, options);
+        const discarded = await discardCreatedGenerationIfUnreferenced(generation, failedHealth, options);
         return {
           status: "error",
           reason: "plugin-add-failed",
           message: (result.stderr || result.stdout || "dsh plugin add failed").trim(),
-          manualCommand: buildManualDshCommand([
-            "dsh", "plugin", "--profile", profile, "add", generation.generationDir,
-          ], options),
+          // The command only helps if the staged generation still exists; a
+          // discarded generation would point the user at a deleted directory.
+          ...(discarded && discarded.removed ? {} : {
+            manualCommand: buildManualDshCommand([
+              "dsh", "plugin", "--profile", profile, "add", generation.generationDir,
+            ], options),
+            manualBundleHash: generation.bundleHash,
+          }),
         };
       }
       const after = await inspectDeepSeekHarnessIntegration({
@@ -4454,6 +4466,7 @@ async function uninstallDshProfile(options, target) {
           "remove",
           BRIDGE_PACKAGE_NAME,
         ], options),
+        manualBundleHash: before.marker.bundleHash,
       };
     }
     const dshVersion = target.carrier.version;
@@ -4904,6 +4917,68 @@ function summarizeDshUninstallResults(entries) {
   };
 }
 
+// Map one resolved target entry onto the notice outcome this profile applies.
+function dshNoticeOutcome(operation, entry) {
+  if (!entry || entry.role === "not-applicable" || !entry.result) {
+    return { operation, notApplicable: true };
+  }
+  const result = entry.result;
+  // A failed result can still hand the user a manual command (e.g. no global
+  // CLI); it must reach the notice rules together with the failure.
+  const manualCommands = typeof result.manualCommand === "string" && result.manualCommand
+    ? result.manualCommand.split("\n")
+    : null;
+  const manualBundleHash = result.manualBundleHash || null;
+  if (result.status === "error" || entry.role === "diagnose") {
+    return {
+      operation,
+      manualCommands,
+      manualBundleHash,
+      failure: {
+        reason: result.reason || entry.reason,
+        targetReason: result.targetReason || entry.reason,
+        message: result.message,
+        residuePath: result.residuePath,
+        referencePath: result.referencePath,
+        lockPath: result.lockPath,
+        repairPath: result.repairPath,
+        healthReason: result.healthReason,
+        cleanupReason: result.cleanupReason,
+      },
+    };
+  }
+  return {
+    operation,
+    status: result.status,
+    removedOk: result.status === "ok"
+      || (result.status === "skipped" && result.reason === "bridge-not-installed"),
+    bundleHash: result.generation ? path.basename(result.generation) : null,
+    restartRequired: result.restartRequired === true,
+    firstInstall: result.firstInstall === true,
+    manualCommands,
+    manualBundleHash,
+  };
+}
+
+// Apply notices for every resolved target inside the caller's enqueueMutation so
+// notice writes stay serialized with the operation itself. A notice failure is
+// secondary: it adds a warning but never changes the operation status.
+async function applyDshNotices(frozen, operation, entries, result) {
+  const managedRoot = resolveManagedRoot(frozen);
+  const warnings = [];
+  for (const entry of entries) {
+    const outcome = dshNoticeOutcome(operation, entry);
+    try {
+      const applied = await applyDshNoticeOutcome(managedRoot, entry.profile, outcome);
+      if (applied && applied.error) warnings.push(`${entry.profile}: notice write skipped (${applied.error})`);
+    } catch (err) {
+      warnings.push(`${entry.profile}: notice write skipped (${err && err.message ? err.message : err})`);
+    }
+  }
+  if (!warnings.length) return result;
+  return { ...result, warnings: [...(result.warnings || []), ...warnings] };
+}
+
 async function syncDeepSeekHarnessIntegration(options = {}) {
   const operation = options.operation || "install";
   try {
@@ -4913,8 +4988,10 @@ async function syncDeepSeekHarnessIntegration(options = {}) {
         return { status: "skipped", reason: "dsh-not-found", message: "DeepSeek Harness is not installed" };
       }
       const targets = await resolveDshTargets(frozen, { operation });
-      const entries = await runDshTargets(frozen, operation, targets, "sync");
-      return summarizeDshInstallResults([entries.web, entries.desktop]);
+      const run = await runDshTargets(frozen, operation, targets, "sync");
+      const entries = [run.web, run.desktop];
+      const result = summarizeDshInstallResults(entries);
+      return await applyDshNotices(frozen, operation, entries, result);
     });
   } catch (err) {
     if (err && err.code === "DSH_MANUAL_GENERATION_REFERENCE_INVALID") {
@@ -4929,8 +5006,10 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
     return await enqueueMutation(async () => {
       const frozen = freezeDshOperationOptions(options);
       const targets = await resolveDshTargets(frozen, { operation: "uninstall" });
-      const entries = await runDshTargets(frozen, "uninstall", targets, "uninstall");
-      return summarizeDshUninstallResults([entries.web, entries.desktop]);
+      const run = await runDshTargets(frozen, "uninstall", targets, "uninstall");
+      const entries = [run.web, run.desktop];
+      const result = summarizeDshUninstallResults(entries);
+      return await applyDshNotices(frozen, "uninstall", entries, result);
     });
   } catch (err) {
     if (err && err.code === "DSH_MANUAL_GENERATION_REFERENCE_INVALID") {
@@ -4938,6 +5017,29 @@ async function uninstallDeepSeekHarnessBridge(options = {}) {
     }
     throw err;
   }
+}
+
+// Read the persisted notices for both profiles, for the Settings page.
+async function readDeepSeekHarnessNotices(options = {}) {
+  const frozen = freezeDshOperationOptions(options);
+  const managedRoot = resolveManagedRoot(frozen);
+  const web = await readDshNotices(managedRoot, WEB_PROFILE_NAME);
+  const desktop = await readDshNotices(managedRoot, DESKTOP_PROFILE_NAME);
+  const out = { web: web.notices, desktop: desktop.notices };
+  if (web.error || desktop.error) out.errors = { web: web.error, desktop: desktop.error };
+  return out;
+}
+
+// Acknowledge one notice by id. Serialized with the operation writes so the two
+// never clobber each other's notice file.
+async function acknowledgeDeepSeekHarnessNotice(options = {}, { profile, id } = {}) {
+  const name = normalizeDshProfileName(profile);
+  return enqueueMutation(async () => {
+    const frozen = freezeDshOperationOptions(options);
+    const managedRoot = resolveManagedRoot(frozen);
+    const result = await acknowledgeDshNotice(managedRoot, name, id);
+    return { found: result.found === true, ...(result.error ? { error: result.error } : {}) };
+  });
 }
 
 function installDeepSeekHarnessBridge(options = {}) {
@@ -4998,6 +5100,8 @@ module.exports = {
   inspectDeepSeekHarnessIntegration,
   inspectDshTargetsSync,
   resolveDshTargets,
+  readDeepSeekHarnessNotices,
+  acknowledgeDeepSeekHarnessNotice,
   isBridgeInstalled,
   isDshInstalled,
   registerDeepSeekHarness,
