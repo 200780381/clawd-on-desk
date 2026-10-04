@@ -125,6 +125,18 @@ describe("startup-recovered session snapshots", () => {
     assert.strictEqual(live.sessions[0].startupRecovered, false);
     assert.notStrictEqual(sessionSnapshotSignature(recovered), sessionSnapshotSignature(live));
   });
+
+  it("does not expose the internal prompt-derived title flag (#1125)", () => {
+    const snapshot = buildSessionSnapshot(new Map([
+      ["real-session", session("working", {
+        sessionTitle: "Prompt line",
+        sessionTitleFromPrompt: true,
+      })],
+    ]), { statePriority: STATE_PRIORITY });
+
+    assert.strictEqual(snapshot.sessions[0].sessionTitle, "Prompt line");
+    assert.ok(!("sessionTitleFromPrompt" in snapshot.sessions[0]));
+  });
 });
 
 describe("remote profile action ids", () => {

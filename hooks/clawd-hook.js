@@ -132,25 +132,35 @@ function readTranscriptTailEntries(transcriptPath) {
   return entries;
 }
 
-function extractSessionTitleFromEntries(entries) {
+function extractSessionTitleFromEntries(entries, sessionId) {
   if (!entries) return null;
-  let latest = null;
+  // Manual titles and AI titles are tracked separately: when Claude Code
+  // rewrites its metadata it appends the ai-title record after the manual
+  // custom-title one, so a single "last record wins" pass would let the AI
+  // title overwrite a manual rename.
+  let manualTitle = null;
+  let aiTitle = null;
   for (const obj of entries) {
     const type = typeof obj.type === "string" ? obj.type : "";
-    if (type !== "custom-title" && type !== "agent-name") continue;
-    latest =
-      normalizeTitle(obj.customTitle) ||
-      normalizeTitle(obj.title) ||
-      normalizeTitle(obj.custom_title) ||
-      normalizeTitle(obj.agentName) ||
-      normalizeTitle(obj.agent_name) ||
-      latest;
+    if (type === "custom-title" || type === "agent-name") {
+      manualTitle =
+        normalizeTitle(obj.customTitle) ||
+        normalizeTitle(obj.title) ||
+        normalizeTitle(obj.custom_title) ||
+        normalizeTitle(obj.agentName) ||
+        normalizeTitle(obj.agent_name) ||
+        manualTitle;
+      continue;
+    }
+    if (type === "ai-title" && entryMatchesSession(obj, sessionId)) {
+      aiTitle = normalizeTitle(obj.aiTitle) || aiTitle;
+    }
   }
-  return latest;
+  return manualTitle || aiTitle;
 }
 
-function extractSessionTitleFromTranscript(transcriptPath) {
-  return extractSessionTitleFromEntries(readTranscriptTailEntries(transcriptPath));
+function extractSessionTitleFromTranscript(transcriptPath, sessionId) {
+  return extractSessionTitleFromEntries(readTranscriptTailEntries(transcriptPath), sessionId);
 }
 
 function normalizeAssistantOutputText(value) {
@@ -182,7 +192,7 @@ function clampAssistantOutputText(text, maxLen = ASSISTANT_OUTPUT_MAX) {
   };
 }
 
-function assistantEntryMatchesSession(entry, sessionId) {
+function entryMatchesSession(entry, sessionId) {
   if (!sessionId) return true;
   if (!entry || typeof entry !== "object") return false;
   return !entry.sessionId || entry.sessionId === sessionId;
@@ -199,7 +209,7 @@ function assistantEntryLooksSubagent(entry) {
 function assistantEntryIsTurnBoundary(entry, sessionId) {
   if (!entry || typeof entry !== "object") return false;
   if (entry.type !== "user") return false;
-  return assistantEntryMatchesSession(entry, sessionId);
+  return entryMatchesSession(entry, sessionId);
 }
 
 function assistantTextPartsFromContent(content) {
@@ -263,7 +273,7 @@ function extractLastAssistantTextFromEntries(entries, sessionId, options = {}) {
     if (assistantEntryIsTurnBoundary(entry, sessionId)) break;
     if (entry.type !== "assistant") continue;
     if (entry.isApiErrorMessage === true) continue;
-    if (!assistantEntryMatchesSession(entry, sessionId)) continue;
+    if (!entryMatchesSession(entry, sessionId)) continue;
     if (assistantEntryLooksSubagent(entry)) continue;
     // The newest in-session assistant entry decides the turn. If it still
     // carries a tool_use block the turn is mid-flight — fail closed rather
@@ -691,18 +701,16 @@ function buildStateBody(event, payload, resolve) {
   if (contextUsage) body.context_usage = contextUsage;
   const sessionTitle =
     normalizeTitle(payload.session_title) ||
-    extractSessionTitleFromEntries(transcriptEntries);
+    extractSessionTitleFromEntries(transcriptEntries, payload.session_id || null);
   if (sessionTitle) body.session_title = sessionTitle;
   if (event === "UserPromptSubmit" && !body.session_title) {
     const promptTitle = extractPromptTitle(payload.prompt);
     if (promptTitle) {
       body.session_title = promptTitle;
-      // The fallback is derived from prompt content. It is useful for the live
-      // snapshot but must never cross the durable recovery privacy boundary.
-      Object.defineProperty(body, "_sessionTitleFromPrompt", {
-        value: true,
-        enumerable: false,
-      });
+      // The fallback is derived from prompt content. Mark it so the server
+      // never lets it replace a formal title, and so session history and
+      // recovery leases never persist it.
+      body.session_title_from_prompt = true;
     }
   }
 
