@@ -421,6 +421,60 @@ describe("session focus handoff", () => {
     assert.ok(!logs.some((line) => line.includes("reason=launched")));
   });
 
+  it("does not start when real discovery leaves a second candidate unconfirmed", async () => {
+    const first = "/Applications/DeepSeek Harness.app";
+    const second = "/Users/me/Applications/DeepSeek Harness.app";
+    const plistFirst = path.join(first, "Contents", "Info.plist");
+    const launcherFirst = path.join(first, "Contents", "Resources", "runtime", "cli", "bin", "dsh");
+    const plistSecond = path.resolve(path.join(second, "Contents", "Info.plist"));
+    const dirs = new Set([first, second].map((root) => path.resolve(root)));
+    const files = new Map([
+      [path.resolve(plistFirst), DSH_PLIST],
+      [path.resolve(launcherFirst), "launcher"],
+    ]);
+    const missing = (code) => {
+      const err = new Error(code);
+      err.code = code;
+      return err;
+    };
+    const fs = {
+      statSync(filePath) {
+        const key = path.resolve(String(filePath));
+        if (dirs.has(key)) return { isDirectory: () => true, isFile: () => false };
+        if (files.has(key)) return { isDirectory: () => false, isFile: () => true };
+        throw missing("ENOENT");
+      },
+      readFileSync(filePath) {
+        const key = path.resolve(String(filePath));
+        if (key === plistSecond) throw missing("EACCES");
+        if (files.has(key)) return files.get(key);
+        throw missing("ENOENT");
+      },
+    };
+
+    const spawned = [];
+    const logs = [];
+    await focusDshDesktopTarget({
+      shell: { openExternal: async () => { throw new Error("no protocol handler"); } },
+      focusEntry: { id: "deepseek-harness:s1", agentId: "deepseek-harness" },
+      sessionId: "deepseek-harness:s1",
+      url: "dsh://open",
+      focusLog: (line) => logs.push(line),
+      discoverDesktop: (options) => discoverDshDesktopSync({
+        ...options,
+        fs,
+        desktopAppPaths: [first, second],
+      }),
+      osPlatform: "darwin",
+      spawnImpl: () => { spawned.push(1); return eventedChild(); },
+      env: {},
+    });
+
+    assert.deepStrictEqual(spawned, []);
+    assert.ok(logs.some((line) => line.includes("reason=desktop-unconfirmed")));
+    assert.ok(!logs.some((line) => line.includes("reason=launched")));
+  });
+
   it("logs a launch failure with the child error code", async () => {
     const child = eventedChild();
     setImmediate(() => child.emit("error", Object.assign(new Error("spawn EACCES"), { code: "EACCES" })));

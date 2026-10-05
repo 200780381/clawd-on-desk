@@ -106,6 +106,49 @@ function macFs(appRoots, options = {}) {
   return fsImpl;
 }
 
+const MAC_UNREADABLE = "__EACCES__";
+
+function macBundlePaths(root) {
+  return {
+    plist: path.join(root, "Contents", "Info.plist"),
+    launcher: path.join(root, "Contents", "Resources", "runtime", "cli", "bin", "dsh"),
+  };
+}
+
+// A lower-level macOS fake fs for edge cases: choose which dirs exist, which
+// files exist (or throw EACCES on read), and which dirs fail statSync.
+function macFsRaw({ dirs = [], files = {}, statErrors = {} } = {}) {
+  const dirSet = new Set(dirs.map((dir) => path.resolve(dir)));
+  const fileMap = new Map(Object.entries(files).map(([key, value]) => [path.resolve(key), value]));
+  const statErrorMap = new Map(Object.entries(statErrors).map(([key, value]) => [path.resolve(key), value]));
+  const missing = (code = "ENOENT") => {
+    const err = new Error(code);
+    err.code = code;
+    return err;
+  };
+  return {
+    statSync(filePath) {
+      const key = path.resolve(String(filePath));
+      if (statErrorMap.has(key)) throw missing(statErrorMap.get(key));
+      if (dirSet.has(key)) return { isDirectory: () => true, isFile: () => false };
+      if (fileMap.has(key)) return { isDirectory: () => false, isFile: () => true };
+      throw missing();
+    },
+    readFileSync(filePath) {
+      const key = path.resolve(String(filePath));
+      if (!fileMap.has(key)) throw missing();
+      const value = fileMap.get(key);
+      if (value === MAC_UNREADABLE) throw missing("EACCES");
+      return value;
+    },
+  };
+}
+
+function macValidFiles(root) {
+  const { plist, launcher } = macBundlePaths(root);
+  return { [plist]: MAC_PLIST, [launcher]: "launcher" };
+}
+
 function winDesktopFiles(root) {
   return {
     [path.win32.join(root, "DeepSeek Harness.exe")]: "exe",
@@ -815,6 +858,126 @@ test("macOS requireUniqueApp still finds a single valid install", () => {
   assert.strictEqual(result.status, "found");
   assert.strictEqual(result.appRoot, root);
   assert.strictEqual(result.reason, null);
+});
+
+test("macOS uniqueness reports an unreadable second candidate as unknown", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const second = "/Users/me/Applications/DeepSeek Harness.app";
+  const fs = macFsRaw({
+    dirs: [first, second],
+    files: { ...macValidFiles(first), [macBundlePaths(second).plist]: MAC_UNREADABLE },
+  });
+
+  const unique = discoverDshDesktopSync({
+    platform: "darwin",
+    fs,
+    desktopAppPaths: [first, second],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(unique.status, "unknown");
+  assert.strictEqual(unique.reason, "app-bundle-unconfirmed");
+  assert.strictEqual(unique.appRoot, null);
+
+  // Without the uniqueness check the first valid candidate is still returned.
+  const firstHit = discoverDshDesktopSync({ platform: "darwin", fs, desktopAppPaths: [first, second] });
+  assert.strictEqual(firstHit.status, "found");
+  assert.strictEqual(firstHit.appRoot, first);
+});
+
+test("macOS uniqueness reports a binary second plist as unknown", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const second = "/Users/me/Applications/DeepSeek Harness.app";
+  const fs = macFsRaw({
+    dirs: [first, second],
+    files: { ...macValidFiles(first), [macBundlePaths(second).plist]: "bplist00...." },
+  });
+
+  const unique = discoverDshDesktopSync({
+    platform: "darwin",
+    fs,
+    desktopAppPaths: [first, second],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(unique.status, "unknown");
+  assert.strictEqual(unique.reason, "app-bundle-unconfirmed");
+
+  const firstHit = discoverDshDesktopSync({ platform: "darwin", fs, desktopAppPaths: [first, second] });
+  assert.strictEqual(firstHit.status, "found");
+  assert.strictEqual(firstHit.appRoot, first);
+});
+
+test("macOS uniqueness reports a launcher-less second bundle as unknown", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const second = "/Users/me/Applications/DeepSeek Harness.app";
+  const fs = macFsRaw({
+    dirs: [first, second],
+    files: { ...macValidFiles(first), [macBundlePaths(second).plist]: MAC_PLIST },
+  });
+
+  const unique = discoverDshDesktopSync({
+    platform: "darwin",
+    fs,
+    desktopAppPaths: [first, second],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(unique.status, "unknown");
+  assert.strictEqual(unique.reason, "launcher-missing");
+
+  const firstHit = discoverDshDesktopSync({ platform: "darwin", fs, desktopAppPaths: [first, second] });
+  assert.strictEqual(firstHit.status, "found");
+  assert.strictEqual(firstHit.appRoot, first);
+});
+
+test("macOS uniqueness reports a non-ENOENT second stat failure as unknown", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const second = "/Users/me/Applications/DeepSeek Harness.app";
+  const fs = macFsRaw({
+    dirs: [first],
+    files: macValidFiles(first),
+    statErrors: { [second]: "EACCES" },
+  });
+
+  const unique = discoverDshDesktopSync({
+    platform: "darwin",
+    fs,
+    desktopAppPaths: [first, second],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(unique.status, "unknown");
+  assert.strictEqual(unique.reason, "app-bundle-unconfirmed");
+
+  const firstHit = discoverDshDesktopSync({ platform: "darwin", fs, desktopAppPaths: [first, second] });
+  assert.strictEqual(firstHit.status, "found");
+  assert.strictEqual(firstHit.appRoot, first);
+});
+
+test("macOS uniqueness ignores a genuinely missing second path and a foreign app", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const missing = "/Users/me/Applications/DeepSeek Harness.app";
+  const foreignPlist = MAC_PLIST.replace("com.deepseek.dsh", "com.example.other");
+  const fs = macFsRaw({
+    dirs: [first, missing],
+    files: { ...macValidFiles(first), [macBundlePaths(missing).plist]: foreignPlist },
+  });
+
+  const unique = discoverDshDesktopSync({
+    platform: "darwin",
+    fs,
+    desktopAppPaths: [first, missing],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(unique.status, "found");
+  assert.strictEqual(unique.appRoot, first);
+
+  const absent = macFsRaw({ dirs: [first], files: macValidFiles(first) });
+  const absentResult = discoverDshDesktopSync({
+    platform: "darwin",
+    fs: absent,
+    desktopAppPaths: [first, missing],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(absentResult.status, "found");
+  assert.strictEqual(absentResult.appRoot, first);
 });
 
 test("the registry read runs the encoded PowerShell script with a 10s timeout", async () => {

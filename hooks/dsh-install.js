@@ -2019,7 +2019,18 @@ function discoverDshDesktopSync(options = {}) {
     if (seenRoots.has(rootKey)) continue;
     seenRoots.add(rootKey);
     let dirStat;
-    try { dirStat = fsImpl.statSync(appRoot); } catch { continue; }
+    try {
+      dirStat = fsImpl.statSync(appRoot);
+    } catch (err) {
+      // A path that plainly does not exist is not a candidate. Any other stat
+      // failure (e.g. EACCES) may still be a DSH install we cannot verify, so
+      // the uniqueness caller must not treat it as absent.
+      const code = err && err.code;
+      if (requireUniqueApp && code !== "ENOENT" && code !== "ENOTDIR") {
+        if (!unconfirmedReason) unconfirmedReason = DESKTOP_DISCOVERY_UNCONFIRMED_REASON;
+      }
+      continue;
+    }
     if (!dirStat.isDirectory()) continue;
     const bundle = readDesktopBundleSync(fsImpl, appRoot);
     if (!bundle.ok) {
@@ -2052,11 +2063,14 @@ function discoverDshDesktopSync(options = {}) {
       reason: DESKTOP_DISCOVERY_AMBIGUOUS_REASON,
     };
   }
-  if (requireUniqueApp && found.length === 1) {
-    return { status: "found", ...found[0], checkedPaths, reason: null };
-  }
+  // A single confirmed install is only unique when nothing else is unresolved:
+  // another candidate that cannot be verified may also be DSH, so an unknown
+  // candidate outranks the lone found result and blocks an automatic launch.
   if (unconfirmedReason) {
     return { status: "unknown", ...empty, checkedPaths, reason: unconfirmedReason };
+  }
+  if (requireUniqueApp && found.length === 1) {
+    return { status: "found", ...found[0], checkedPaths, reason: null };
   }
   return { status: "not-found", ...empty, checkedPaths, reason: null };
 }

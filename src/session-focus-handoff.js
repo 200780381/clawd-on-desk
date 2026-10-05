@@ -13,6 +13,14 @@ function sanitizeFocusError(err) {
   return err && err.message ? err.message.replace(/[\r\n\t]+/g, " ") : "unknown";
 }
 
+// Discovery outcomes that are not a verified unique install each get their own
+// reason so an unresolved candidate is not logged as "not installed".
+function discoveryStatusReason(discovery) {
+  if (discovery && discovery.status === "ambiguous") return "desktop-ambiguous";
+  if (discovery && discovery.status === "unknown") return "desktop-unconfirmed";
+  return "desktop-not-found";
+}
+
 // Keep the failure cause visible without changing the stable reason= token.
 function launchResultDetail(result) {
   if (!result || typeof result !== "object") return "";
@@ -68,7 +76,7 @@ function launchDshDesktopApp({
   if (!discovery || discovery.status !== "found" || !discovery.appRoot) {
     return Promise.resolve({
       launched: false,
-      reason: discovery && discovery.status === "ambiguous" ? "desktop-ambiguous" : "desktop-not-found",
+      reason: discoveryStatusReason(discovery),
     });
   }
   let command;
