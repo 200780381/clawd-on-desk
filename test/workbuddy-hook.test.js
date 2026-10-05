@@ -118,10 +118,17 @@ describe("WorkBuddy hook session title (#648)", () => {
 
   it("truncates long titles to SESSION_TITLE_MAX with an ellipsis", () => {
     const long = "x".repeat(200);
-    const title = deriveSessionTitle("UserPromptSubmit", { prompt: long });
+    const title = deriveSessionTitle("UserPromptSubmit", { session_title: long });
     assert.strictEqual(title.length, SESSION_TITLE_MAX);
     assert.ok(title.endsWith("\u2026"));
     assert.strictEqual(title, `${"x".repeat(SESSION_TITLE_MAX - 1)}\u2026`);
+    const prompt = "A longer readable prompt ".repeat(10);
+    assert.strictEqual(deriveSessionTitle("UserPromptSubmit", { prompt }), `${prompt.slice(0, SESSION_TITLE_MAX - 1)}\u2026`);
+  });
+
+  it("does not expose secret-looking fallback lines, including after the truncation boundary", () => {
+    assert.strictEqual(deriveSessionTitle("UserPromptSubmit", { prompt: "Check my token ghp_abcdefghijklmnopqrstuvwx" }), null);
+    assert.strictEqual(deriveSessionTitle("UserPromptSubmit", { prompt: `${"Readable text ".repeat(10)}password=hidden` }), null);
   });
 
   it("does not derive a prompt title on non-UserPromptSubmit events", () => {
@@ -164,6 +171,24 @@ describe("WorkBuddy hook session_id filter (#618 / #648) — real subprocess", (
       httpContract,
     });
   }
+
+  it("marks fallback provenance and forwards the transcript for native names", () => {
+    for (const explicit of [false, true]) {
+      const r = hookHarness.run({ script: HOOK, httpContract: "expect-attempt",
+        env: { CLAWD_POST_RECORDER_SUCCEED: "1", CLAWD_REMOTE: "1" },
+        payload: { hook_event_name: "UserPromptSubmit", session_id: "s-title", prompt: "Prompt text",
+          transcript_path: "/workbuddy/projects/project/s-title.jsonl", ...(explicit ? { session_title: "Actual chat name" } : {}) } });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout, "{}\n");
+      const post = r.attempts.find((attempt) => attempt.path === "/state" && attempt.method === "POST");
+      assert.ok(post, "the shipped adapter must send a real state payload");
+      const body = JSON.parse(post.body);
+      assert.strictEqual(body.session_title, explicit ? "Actual chat name" : "Prompt text");
+      assert.strictEqual(body.session_title_from_prompt, !explicit);
+      assert.strictEqual(body.transcript_path, "/workbuddy/projects/project/s-title.jsonl");
+      assert.strictEqual(body.agent_id, "workbuddy");
+    }
+  });
 
   it("forwards nothing and produces no placeholder session when session_id is absent", () => {
     const r = runHook(

@@ -79,6 +79,8 @@ function stdoutForEvent() {
 }
 
 const SESSION_TITLE_MAX = 60;
+// Check the complete fallback line before truncating it (same policy as Claude).
+const PROMPT_TITLE_SECRET_RE = /\b(api[_-]?key|authorization|bearer|password|passwd|private[_-]?key|secret|token)\b|sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|[A-Za-z0-9+/=_-]{32,}/i;
 
 // Derive the session title Clawd shows in the HUD. Without it the HUD falls
 // back to the agent label ("WorkBuddy") and two same-session bubbles can't be
@@ -102,6 +104,7 @@ function deriveSessionTitle(hookName, payload) {
     for (const line of payload.prompt.split(/\r?\n/)) {
       const candidate = line.trim();
       if (candidate) {
+        if (PROMPT_TITLE_SECRET_RE.test(candidate)) return null;
         return candidate.length > SESSION_TITLE_MAX
           ? `${candidate.slice(0, SESSION_TITLE_MAX - 1)}\u2026`
           : candidate;
@@ -197,7 +200,15 @@ function run() {
       if (cwd) body.cwd = cwd;
 
       const sessionTitle = deriveSessionTitle(hookName, payload);
-      if (sessionTitle) body.session_title = sessionTitle;
+      if (sessionTitle) {
+        body.session_title = sessionTitle;
+        // A later prompt must not overwrite a native or explicitly named chat.
+        body.session_title_from_prompt = !(typeof payload.session_title === "string"
+          && payload.session_title.trim());
+      }
+      if (typeof payload.transcript_path === "string" && payload.transcript_path.trim()) {
+        body.transcript_path = payload.transcript_path.trim();
+      }
 
       if (process.env.CLAWD_REMOTE) {
         body.host = readHostPrefix();
