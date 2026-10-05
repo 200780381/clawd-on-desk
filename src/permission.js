@@ -729,6 +729,9 @@ function buildPermissionFocusEntry(perm) {
   if (perm.model) focusEntry.model = perm.model;
   if (perm.codexOriginator) focusEntry.codexOriginator = perm.codexOriginator;
   if (perm.codexSource) focusEntry.codexSource = perm.codexSource;
+  // An approval can arrive before the session lifecycle event, so the fallback
+  // entry needs the carrier to remain jumpable to the desktop app window.
+  if (perm.dshCarrier) focusEntry.dshCarrier = perm.dshCarrier;
   return focusEntry;
 }
 
@@ -3183,6 +3186,11 @@ function buildRemoteApprovalPayload(permEntry) {
     detail,
     fields,
   };
+  // A capability flag, not an identity: the Feishu card switches to its
+  // structured layout as soon as it sees a top-level agentId, which would drop
+  // this payload's detail and reminder lines for every agent. This flag only
+  // removes an action DSH has no native terminal for.
+  if (agentId === "deepseek-harness") payload.canOfferTerminal = false;
   if (suggestionButtons.length > 0) payload.suggestions = suggestionButtons;
   return payload;
 }
@@ -5458,4 +5466,5 @@ module.exports.__test = {
   stackHeightForSizes,
   computeQueueCommitDeadline,
   queueAgentLabel,
+  buildPermissionFocusEntry,
 };

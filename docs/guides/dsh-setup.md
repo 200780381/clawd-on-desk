@@ -512,8 +512,23 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
 - Linux, WSL, remote SSH, macOS packaging, and ARM64 packaging remain
   unverified; so do approvals in the Windows desktop app, the Electron UI on
   Windows, and the HTTP 204/cancellation hand-back.
-- There is no terminal-focus action for either carrier: DSH web is a browser
-  surface and the desktop app does not expose a focusable terminal.
+- Clicking a desktop-app session opens the DeepSeek Harness desktop window
+  (via `dsh://open`, falling back to launching the app when the protocol is not
+  handled). This is supported on macOS and Windows only. On 2026-10-05 it was
+  verified from source on macOS 26.6.2 and on Windows 11 x64 with the desktop app
+  `0.2.0-rc.2`: clicking a desktop session brought the window to the front
+  through `dsh://open` with another app in front, when the window was minimized,
+  and after it was closed. The launch fallback (used when the protocol cannot be
+  opened) is covered by unit tests only. It does not switch to that specific
+  conversation: DSH has no external session-navigation entry point, so the
+  window shows whatever it was already on. Web sessions remain unfocusable.
+  The launch fallback refuses to start when discovery is not a single verified
+  install: two valid installs at different real paths are ambiguous (for example
+  a system-wide and a per-user copy), and any candidate it cannot verify also
+  blocks an automatic launch. Two symlinked locations that resolve to the same
+  bundle count as one install.
+- The bridge reports the desktop carrier, so the desktop app needs one restart
+  after a plugin update before its sessions become clickable.
 - Closing the local bubble does not deny the request. If a configured Telegram
   or Feishu/Lark remote channel takes it, that channel may decide; otherwise DSH
   receives no Clawd decision and continues its native flow.

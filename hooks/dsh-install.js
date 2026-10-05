@@ -1999,12 +1999,38 @@ function discoverDshDesktopSync(options = {}) {
       path.join("/", "Applications", DSH_DESKTOP_APP_NAME),
       path.join(homeDir, "Applications", DSH_DESKTOP_APP_NAME),
     ];
+  // Installer callers only need "is it installed", so they keep the first-hit
+  // behavior. A caller that is about to launch the app needs to know whether
+  // that hit is the only install, hence the opt-in uniqueness check.
+  const requireUniqueApp = options.requireUniqueApp === true;
   const checkedPaths = [];
+  const found = [];
+  const seenRoots = new Set();
   let unconfirmedReason = null;
   for (const appRoot of appPaths) {
     checkedPaths.push(appRoot);
+    // A symlinked second location can point at the same bundle; the uniqueness
+    // check dedupes by the real path when the fs exposes it, otherwise by the
+    // lexical one. Only the uniqueness caller pays for the extra syscall.
+    let rootKey = path.resolve(appRoot);
+    if (requireUniqueApp && typeof fsImpl.realpathSync === "function") {
+      try { rootKey = fsImpl.realpathSync(appRoot); } catch { /* keep the resolved path */ }
+    }
+    if (seenRoots.has(rootKey)) continue;
+    seenRoots.add(rootKey);
     let dirStat;
-    try { dirStat = fsImpl.statSync(appRoot); } catch { continue; }
+    try {
+      dirStat = fsImpl.statSync(appRoot);
+    } catch (err) {
+      // A path that plainly does not exist is not a candidate. Any other stat
+      // failure (e.g. EACCES) may still be a DSH install we cannot verify, so
+      // the uniqueness caller must not treat it as absent.
+      const code = err && err.code;
+      if (requireUniqueApp && code !== "ENOENT" && code !== "ENOTDIR") {
+        if (!unconfirmedReason) unconfirmedReason = DESKTOP_DISCOVERY_UNCONFIRMED_REASON;
+      }
+      continue;
+    }
     if (!dirStat.isDirectory()) continue;
     const bundle = readDesktopBundleSync(fsImpl, appRoot);
     if (!bundle.ok) {
@@ -2018,17 +2044,33 @@ function discoverDshDesktopSync(options = {}) {
       }
       continue;
     }
-    return {
-      status: "found",
+    const match = {
       appRoot,
       launcherPath: bundle.launcherPath,
       staticVersion: bundle.staticVersion,
+    };
+    if (!requireUniqueApp) {
+      return { status: "found", ...match, checkedPaths, reason: null };
+    }
+    found.push(match);
+  }
+  if (requireUniqueApp && found.length > 1) {
+    return {
+      status: "ambiguous",
+      ...empty,
       checkedPaths,
-      reason: null,
+      candidates: found,
+      reason: DESKTOP_DISCOVERY_AMBIGUOUS_REASON,
     };
   }
+  // A single confirmed install is only unique when nothing else is unresolved:
+  // another candidate that cannot be verified may also be DSH, so an unknown
+  // candidate outranks the lone found result and blocks an automatic launch.
   if (unconfirmedReason) {
     return { status: "unknown", ...empty, checkedPaths, reason: unconfirmedReason };
+  }
+  if (requireUniqueApp && found.length === 1) {
+    return { status: "found", ...found[0], checkedPaths, reason: null };
   }
   return { status: "not-found", ...empty, checkedPaths, reason: null };
 }

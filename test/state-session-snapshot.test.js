@@ -793,6 +793,43 @@ describe("state-session-snapshot builder", () => {
     assert.strictEqual(byId.get(scopedCodexSessionId).codexSource, "vscode");
   });
 
+  it("exposes the DSH desktop carrier and moves the signature when it changes", () => {
+    const carrierSession = session("working", {
+      agentId: "deepseek-harness",
+      dshCarrier: "desktop",
+    });
+    const snapshot = buildSessionSnapshot(new Map([["dsh", carrierSession]]), {
+      focusHostPlatform: "darwin",
+    });
+    const entry = snapshot.sessions.find((item) => item.id === "dsh");
+    assert.strictEqual(entry.dshCarrier, "desktop");
+    assert.strictEqual(entry.canFocus, true);
+    assert.deepStrictEqual(entry.focusTarget, { type: "dsh-desktop", url: "dsh://open" });
+
+    const withoutCarrier = buildSessionSnapshot(new Map([[
+      "dsh",
+      session("working", { agentId: "deepseek-harness" }),
+    ]]), { focusHostPlatform: "darwin" });
+    assert.strictEqual(withoutCarrier.sessions[0].dshCarrier, null);
+    assert.strictEqual(withoutCarrier.sessions[0].canFocus, false);
+    assert.notStrictEqual(sessionSnapshotSignature(snapshot), sessionSnapshotSignature(withoutCarrier));
+  });
+
+  it("moves the snapshot signature when only the DSH carrier differs", () => {
+    // On Linux the carrier grants no focus target, so canFocus and focusTarget
+    // are identical in both snapshots; only the raw dshCarrier field differs.
+    const withCarrier = buildSessionSnapshot(new Map([
+      ["dsh", session("working", { agentId: "deepseek-harness", dshCarrier: "desktop" })],
+    ]), { focusHostPlatform: "linux" });
+    const withoutCarrier = buildSessionSnapshot(new Map([
+      ["dsh", session("working", { agentId: "deepseek-harness" })],
+    ]), { focusHostPlatform: "linux" });
+
+    assert.strictEqual(withCarrier.sessions[0].canFocus, withoutCarrier.sessions[0].canFocus);
+    assert.deepStrictEqual(withCarrier.sessions[0].focusTarget, withoutCarrier.sessions[0].focusTarget);
+    assert.notStrictEqual(sessionSnapshotSignature(withCarrier), sessionSnapshotSignature(withoutCarrier));
+  });
+
   it("exposes Codex Desktop thread focus targets on Windows snapshots", () => {
     const snapshot = buildSessionSnapshot(new Map([
       ["codex:019e115a-4df2-7ed0-b90e-8e6345aca777", session("working", {
