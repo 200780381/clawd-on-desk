@@ -1,6 +1,4 @@
 "use strict";
-const { validateQuietHours } = require("./quiet-hours");
-const { validateProjectBookmarks } = require("./project-bookmarks");
 
 // ── Settings actions (transport-agnostic) ──
 //
@@ -432,14 +430,6 @@ const updateRegistry = {
       && value.every((n) => Number.isInteger(n) && n >= 1 && n <= 99)
       ? { status: "ok" }
       : { status: "error", message: "Choose 1–5 different remaining-percent thresholds (1–99)." };
-  },
-  quietHours(value) {
-    const result = validateQuietHours(value);
-    return result.ok ? { status: "ok" } : { status: "error", message: result.message };
-  },
-  projectBookmarks(value) {
-    const result = validateProjectBookmarks(value);
-    return result.ok ? { status: "ok" } : { status: "error", message: result.message };
   },
   // Shape only — the entries are provider keys, and deliberately not checked
   // against the ring's provider list here (see prefs.js: rejecting an

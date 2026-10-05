@@ -51,8 +51,6 @@ const {
   MAX_AUTO_CLOSE_SECONDS,
 } = require("./bubble-policy");
 const { normalizeSessionAliases } = require("./session-alias");
-const { normalizeQuietHours } = require("./quiet-hours");
-const { normalizeProjectBookmarks } = require("./project-bookmarks");
 const { normalizeQuotaAlertThresholds } = require("./quota-alerts");
 const {
   TEXT_SCALE_MIN,
@@ -201,8 +199,6 @@ const SCHEMA = {
   quotaAlertsEnabled: { type: "boolean", default: false },
   quotaAlertThresholds: { type: "array", defaultFactory: () => [20, 10], normalize: normalizeQuotaAlertThresholds },
   quotaRecoveryAlertsEnabled: { type: "boolean", default: true },
-  quietHours: { type: "object", defaultFactory: () => normalizeQuietHours(null), normalize: normalizeQuietHours },
-  projectBookmarks: { type: "array", defaultFactory: () => [], normalize: normalizeProjectBookmarks },
   // Empty by default, i.e. every connected provider draws — matching the
   // behaviour before this preference existed. Storing what is HIDDEN rather
   // than what is shown is the reason a newly connected provider appears on its

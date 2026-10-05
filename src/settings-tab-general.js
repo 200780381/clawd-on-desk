@@ -22,6 +22,9 @@
     "sessionHudShowContextUsage",
     "sessionHudShowQuota",
     "quotaRingDisplayMode",
+    "quotaAlertsEnabled",
+    "quotaAlertThresholds",
+    "quotaRecoveryAlertsEnabled",
     "permissionAutomationMode",
     "permissionAutomationAutoToolsWarningDismissed",
     "permissionAutomationUnattendedWarningDismissed",
@@ -886,6 +889,19 @@
       displayModeRow,
       providersBlock.element,
       mergeRow,
+      helpers.buildSwitchRow({
+        key: "quotaAlertsEnabled",
+        labelKey: "quotaEnabled",
+        descKey: "quotaDescription",
+        descExtraKey: "quotaCollectionHelp",
+      }),
+      buildQuotaAlertThresholdsRow(),
+      helpers.buildSwitchRow({
+        key: "quotaRecoveryAlertsEnabled",
+        labelKey: "quotaRecovery",
+        disabled: !(state.snapshot && state.snapshot.quotaAlertsEnabled === true),
+      }),
+      buildQuotaNotificationTestRow(),
     ]);
     const group = helpers.buildCollapsibleGroup({
       id: "general:quota-ring",
@@ -1072,6 +1088,98 @@
     controlWrap.appendChild(control.element);
     row.append(text, controlWrap);
     state.mountedControls.quotaRingDisplayMode = control;
+    return row;
+  }
+
+  function buildQuotaAlertThresholdsRow() {
+    const row = document.createElement("div");
+    row.className = "row quota-alert-thresholds-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("quotaThresholds");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("quotaThresholdHelp");
+    text.append(label, desc);
+    const host = document.createElement("div");
+    host.className = "row-control quota-alert-thresholds-control";
+    const controls = [];
+    let pending = false;
+    function readValues() {
+      const values = state.snapshot && state.snapshot.quotaAlertThresholds;
+      return Array.isArray(values) && values.length ? values : [20, 10];
+    }
+    function syncFromSnapshot() {
+      const values = readValues();
+      for (let index = 0; index < controls.length; index++) {
+        controls[index].setValue(String(values[index] || 0));
+        controls[index].setDisabled(pending || !(state.snapshot && state.snapshot.quotaAlertsEnabled === true));
+      }
+    }
+    async function save(index, next) {
+      if (pending) return false;
+      const slots = Array.from({ length: 5 }, (_, i) => readValues()[i] || 0);
+      slots[index] = Number(next);
+      const values = slots.filter((value) => value > 0);
+      if (!values.length || new Set(values).size !== values.length) {
+        ops.showToast(t("invalidThresholds"), { error: true });
+        return false;
+      }
+      pending = true;
+      for (const control of controls) control.setDisabled(true);
+      try {
+        const result = await window.settingsAPI.update("quotaAlertThresholds", values.sort((a, b) => b - a));
+        if (!result || result.status !== "ok") throw new Error((result && result.message) || "unknown error");
+        const changes = { quotaAlertThresholds: result.snapshot ? result.snapshot.quotaAlertThresholds : values };
+        ops.applyChanges({ changes, ...(result.snapshot ? { snapshot: result.snapshot } : {}) });
+        return true;
+      } catch (err) {
+        ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+        return false;
+      } finally {
+        pending = false;
+        syncFromSnapshot();
+      }
+    }
+    const options = [{ value: "0", label: t("valueDisabled") },
+      ...Array.from({ length: 99 }, (_, i) => ({ value: String(i + 1), label: `${i + 1}%` }))];
+    for (let index = 0; index < 5; index++) {
+      const control = helpers.buildSettingsSelect({
+        value: String(readValues()[index] || 0),
+        options,
+        ariaLabel: t("quotaThresholdSlot").replace("{n}", String(index + 1)),
+        onChange: (next) => save(index, next),
+      });
+      control.element.dataset.quotaThresholdSlot = String(index);
+      controls.push(control);
+      host.appendChild(control.element);
+    }
+    row.append(text, host);
+    state.mountedControls.quotaAlertThresholds = { row, syncFromSnapshot };
+    syncFromSnapshot();
+    return row;
+  }
+
+  function buildQuotaNotificationTestRow() {
+    const row = document.createElement("div");
+    row.className = "row quota-notification-test-row";
+    const button = helpers.buildButton({ labelKey: "notificationTest", size: "compact" });
+    button.addEventListener("click", async () => {
+      if (button.disabled) return;
+      helpers.setButtonState(button, { pending: true });
+      try {
+        const result = await window.settingsAPI.testQuotaNotification();
+        ops.showToast(t(result && result.ok === true ? "notificationTestSent" : "notificationTestFailed"),
+          { error: !(result && result.ok === true) });
+      } catch {
+        ops.showToast(t("notificationTestFailed"), { error: true });
+      } finally {
+        helpers.setButtonState(button, { pending: false });
+      }
+    });
+    row.appendChild(button);
     return row;
   }
 
@@ -2478,6 +2586,10 @@
       const control = state.mountedControls.quotaRingDisplayMode;
       if (!control || !document.body.contains(control.element)) return false;
     }
+    if (keys.includes("quotaAlertThresholds") || keys.includes("quotaAlertsEnabled")) {
+      const control = state.mountedControls.quotaAlertThresholds;
+      if (!control || !document.body.contains(control.row)) return false;
+    }
     if (keys.includes("permissionAutomationMode")) {
       const control = state.mountedControls.permissionAutomationMode;
       if (!control || !document.body.contains(control.element)) return false;
@@ -2507,6 +2619,7 @@
     for (const key of keys) {
       if (key === "size" || key === "soundVolume" || key === "textScale" || key === "textScaleByDisplay") continue;
       if (key === "quotaRingDisplayMode") continue;
+      if (key === "quotaAlertThresholds") continue;
       if (key === "permissionAutomationMode"
         || key === "permissionAutomationAutoToolsWarningDismissed"
         || key === "permissionAutomationUnattendedWarningDismissed") continue;
@@ -2524,6 +2637,7 @@
     }
     for (const key of keys) {
       if (key === "size") continue;
+      if (key === "quotaAlertThresholds") continue;
       if (key === "quotaRingDisplayMode") {
         state.mountedControls.quotaRingDisplayMode.setValue(
           state.snapshot && state.snapshot.quotaRingDisplayMode
@@ -2585,6 +2699,10 @@
       && state.mountedControls.soundSummary
       && document.body.contains(state.mountedControls.soundSummary.element)) {
       state.mountedControls.soundSummary.syncFromSnapshot();
+    }
+    if (keys.includes("quotaAlertThresholds") || keys.includes("quotaAlertsEnabled")) {
+      state.mountedControls.quotaAlertThresholds.syncFromSnapshot();
+      setGeneralSwitchDisabled("quotaRecoveryAlertsEnabled", !(state.snapshot && state.snapshot.quotaAlertsEnabled === true));
     }
     return true;
   }

@@ -496,7 +496,14 @@ DND remains an interaction/visual gate and does not stop recap or coverage. Susp
 | 双窗口与浮层 | `src/pet-window-runtime.js` 创建/定位 render + hit window；`src/floating-window-runtime.js` / `src/topmost-runtime.js` 管浮层重排与 z-order |
 | Settings 写入与副作用 | `settings-controller` 是唯一写入者；`settings-actions*` 是 pre-commit gates；`settings-effect-router` 是 post-commit runtime effects |
 | Settings UI | `settings-ui-core` 持有 shared UI state，`settings-renderer` 是侧栏/tab shell，业务页在 `settings-tab-*` |
+| Quota reminders | `quota-alerts-runtime` reads source-separated account snapshots; `quota-alerts` owns bounded hashed dedup history; `quota-notifications` acknowledges native delivery. Controls live in General's Quota ring and use the Settings controller. |
 | Theme | `theme-loader` 是 stateless loader；`theme-runtime` 是唯一 active-theme owner |
+
+Quota reminders remain disabled until explicitly enabled. They use existing quota collection,
+require fresh per-window confirmation after startup, and never make account requests.
+DND or failed notification delivery preserves eligibility. The settings-only test notification
+is owner-gated, does not mutate quota/history, and uses the same settings i18n as native alerts.
+See `docs/guides/quota-reminders.md` for thresholds, recovery and retention.
 
 `state.js` 的 session snapshot 是共享 schema：Dashboard、Session HUD（含 Orbit quota ring）以及可选 Telegram completion、Discord presence、LAN PWA 等 consumer 都会读取它。新增、重命名或删除字段时必须检查全部 consumer，不能只看 Dashboard/HUD。
 

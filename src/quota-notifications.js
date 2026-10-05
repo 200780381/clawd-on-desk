@@ -1,8 +1,12 @@
 "use strict";
-const { getProductivityStrings } = require("./productivity-strings");
+// Settings copy remains in its browser bundle; load that same static catalog
+// in main so native notifications use the identical seven translations.
+require("./settings-i18n");
+const { STRINGS } = globalThis.ClawdSettingsI18n;
+function getQuotaStrings(lang) { return STRINGS[lang] || STRINGS.en; }
 
 function formatQuotaAlert(event, lang) {
-  const strings = getProductivityStrings(lang);
+  const strings = getQuotaStrings(lang);
   const provider = ({ claudeQuota: "Claude Code", codexQuota: "Codex", codexSparkQuota: "Codex Spark",
     kimiQuota: "Kimi", antigravityQuota: "Antigravity" })[event.providerKey] || event.providerKey;
   const n = event.windowMinutes;
@@ -64,7 +68,7 @@ function createQuotaNotificationPresenter(options) {
   return {
     show: (event) => showMessage(formatQuotaAlert(event, options.getLang())),
     test: () => {
-      const strings = getProductivityStrings(options.getLang());
+      const strings = getQuotaStrings(options.getLang());
       return showMessage({ title: strings.notificationTestTitle, body: strings.notificationTestBody });
     },
     dispose() { disposed = true; for (const cleanup of [...live]) cleanup.close(); },
