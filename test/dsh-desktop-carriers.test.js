@@ -58,6 +58,54 @@ function winFs(files) {
   };
 }
 
+const MAC_PLIST = [
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+  "<plist version=\"1.0\"><dict>",
+  "<key>CFBundleIdentifier</key><string>com.deepseek.dsh</string>",
+  "<key>CFBundleShortVersionString</key><string>0.2.0-rc.2</string>",
+  "</dict></plist>",
+].join("");
+
+// macOS fake fs: each appRoot is a directory with a valid bundle id and the
+// bundled launcher, matching what discoverDshDesktopSync verifies. An optional
+// realpath map makes a symlinked location resolve onto its real bundle.
+function macFs(appRoots, options = {}) {
+  const dirs = new Set(appRoots.map((root) => path.resolve(root)));
+  const files = new Map();
+  for (const root of appRoots) {
+    files.set(path.resolve(path.join(root, "Contents", "Info.plist")), MAC_PLIST);
+    files.set(
+      path.resolve(path.join(root, "Contents", "Resources", "runtime", "cli", "bin", "dsh")),
+      "launcher"
+    );
+  }
+  const missing = () => {
+    const err = new Error("ENOENT");
+    err.code = "ENOENT";
+    return err;
+  };
+  const fsImpl = {
+    statSync(filePath) {
+      const key = path.resolve(String(filePath));
+      if (dirs.has(key)) return { isDirectory: () => true, isFile: () => false };
+      if (files.has(key)) return { isDirectory: () => false, isFile: () => true };
+      throw missing();
+    },
+    readFileSync(filePath) {
+      const key = path.resolve(String(filePath));
+      if (files.has(key)) return files.get(key);
+      throw missing();
+    },
+  };
+  if (options.realpath instanceof Map) {
+    fsImpl.realpathSync = (filePath) => {
+      const key = path.resolve(String(filePath));
+      return options.realpath.has(key) ? options.realpath.get(key) : key;
+    };
+  }
+  return fsImpl;
+}
+
 function winDesktopFiles(root) {
   return {
     [path.win32.join(root, "DeepSeek Harness.exe")]: "exe",
@@ -706,6 +754,67 @@ test("an unreadable registry is unknown and does not guess the default directory
   });
   assert.strictEqual(result.status, "unknown");
   assert.strictEqual(result.reason, "registry-unreadable");
+});
+
+// ---------------------------------------------------------------------------
+// macOS discovery uniqueness
+// ---------------------------------------------------------------------------
+
+test("macOS returns the first valid install by default, ignoring later candidates", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const second = "/Users/me/Applications/DeepSeek Harness.app";
+  const result = discoverDshDesktopSync({
+    platform: "darwin",
+    fs: macFs([first, second]),
+    desktopAppPaths: [first, second],
+  });
+  assert.strictEqual(result.status, "found");
+  assert.strictEqual(result.appRoot, first);
+  assert.deepStrictEqual(result.checkedPaths, [first]);
+});
+
+test("macOS requireUniqueApp reports two valid installs as ambiguous", () => {
+  const first = "/Applications/DeepSeek Harness.app";
+  const second = "/Users/me/Applications/DeepSeek Harness.app";
+  const result = discoverDshDesktopSync({
+    platform: "darwin",
+    fs: macFs([first, second]),
+    desktopAppPaths: [first, second],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(result.status, "ambiguous");
+  assert.strictEqual(result.reason, "multiple-desktop-installs");
+  assert.strictEqual(result.appRoot, null);
+  assert.strictEqual(result.candidates.length, 2);
+  assert.deepStrictEqual(result.checkedPaths, [first, second]);
+});
+
+test("a macOS install symlinked into both locations is still one install", () => {
+  const real = "/Applications/DeepSeek Harness.app";
+  const link = "/Users/me/Applications/DeepSeek Harness.app";
+  const result = discoverDshDesktopSync({
+    platform: "darwin",
+    fs: macFs([real, link], {
+      realpath: new Map([[path.resolve(link), path.resolve(real)]]),
+    }),
+    desktopAppPaths: [real, link],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(result.status, "found");
+  assert.strictEqual(result.appRoot, real);
+});
+
+test("macOS requireUniqueApp still finds a single valid install", () => {
+  const root = "/Applications/DeepSeek Harness.app";
+  const result = discoverDshDesktopSync({
+    platform: "darwin",
+    fs: macFs([root]),
+    desktopAppPaths: [root],
+    requireUniqueApp: true,
+  });
+  assert.strictEqual(result.status, "found");
+  assert.strictEqual(result.appRoot, root);
+  assert.strictEqual(result.reason, null);
 });
 
 test("the registry read runs the encoded PowerShell script with a 10s timeout", async () => {

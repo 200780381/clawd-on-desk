@@ -514,9 +514,13 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
   Windows, and the HTTP 204/cancellation hand-back.
 - Clicking a desktop-app session opens the DeepSeek Harness desktop window
   (via `dsh://open`, falling back to launching the app when the protocol is not
-  handled). It does not switch to that specific conversation: DSH has no
-  external session-navigation entry point, so the window shows whatever it was
-  already on. Web sessions remain unfocusable.
+  handled). This is supported on macOS and Windows only, and has **not been
+  verified on a real machine yet**. It does not switch to that specific
+  conversation: DSH has no external session-navigation entry point, so the
+  window shows whatever it was already on. Web sessions remain unfocusable.
+  The launch fallback refuses to start when discovery reports more than one
+  valid install (for example the same app under both `/Applications` and
+  `~/Applications`).
 - The bridge reports the desktop carrier, so the desktop app needs one restart
   after a plugin update before its sessions become clickable.
 - Closing the local bubble does not deny the request. If a configured Telegram

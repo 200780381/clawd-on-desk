@@ -6,9 +6,16 @@ const assert = require("node:assert");
 const initPermission = require("../src/permission");
 const { classifyPermissionInteraction } = require("../src/permission-automation-policy");
 const { getSessionFocusTarget } = require("../src/session-focus");
+const { buildApprovalCard } = require("../src/feishu-approval-client");
 
 function flushAsync() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function cardActionButtons(card) {
+  return card.elements
+    .filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
 }
 
 function createMockResponse() {
@@ -185,5 +192,61 @@ describe("DSH permission response contract", () => {
       type: null,
       url: null,
     });
+  });
+
+  async function captureRemotePayload(entry) {
+    const captured = [];
+    const client = {
+      requestApproval: async (payload) => {
+        captured.push(payload);
+        return null;
+      },
+    };
+    const perm = initPermission(makeCtx({
+      getRemoteApprovalClients: () => [{ name: "feishu", client }],
+    }));
+    perm.pendingPermissions.push(entry);
+    assert.strictEqual(perm.maybeStartRemoteApproval(entry), true);
+    await flushAsync();
+    assert.strictEqual(captured.length, 1);
+    return captured[0];
+  }
+
+  for (const label of ["desktop", "web"]) {
+    it(`the real DSH ${label} remote payload renders a Feishu card without a terminal action`, async () => {
+      const payload = await captureRemotePayload(makeEntry({
+        remoteOnly: true,
+        ...(label === "desktop" ? { dshCarrier: "desktop" } : {}),
+      }));
+
+      assert.strictEqual(payload.canOfferTerminal, false);
+      assert.strictEqual(Object.hasOwn(payload, "agentId"), false);
+      const actions = cardActionButtons(buildApprovalCard(payload, { requestId: "r" }));
+      assert.deepStrictEqual(actions.map((button) => button.value.decision), ["allow", "deny"]);
+      assert.ok(!actions.some((button) => button.text.content === "Go to terminal"));
+    });
+  }
+
+  it("a claude-code remote payload keeps its detail and the Feishu terminal action", async () => {
+    const payload = await captureRemotePayload(makeEntry({
+      remoteOnly: true,
+      agentId: "claude-code",
+      interaction: classifyPermissionInteraction({ agentId: "claude-code", toolName: "bash" }),
+    }));
+
+    assert.strictEqual(payload.canOfferTerminal, undefined);
+    assert.strictEqual(Object.hasOwn(payload, "agentId"), false);
+
+    const card = buildApprovalCard(payload, { requestId: "r" });
+    assert.ok(cardActionButtons(card).some((button) => button.text.content === "Go to terminal"));
+    // The card must stay byte-for-byte what the payload produced before the
+    // DSH capability flag existed: no structured layout, title and body intact.
+    const baseline = buildApprovalCard({
+      title: payload.title,
+      detail: payload.detail,
+      fields: payload.fields,
+    }, { requestId: "r" });
+    assert.deepStrictEqual(card, baseline);
+    assert.match(card.elements[0].text.content, /Summary: /);
   });
 });

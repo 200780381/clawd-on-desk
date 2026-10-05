@@ -1999,10 +1999,25 @@ function discoverDshDesktopSync(options = {}) {
       path.join("/", "Applications", DSH_DESKTOP_APP_NAME),
       path.join(homeDir, "Applications", DSH_DESKTOP_APP_NAME),
     ];
+  // Installer callers only need "is it installed", so they keep the first-hit
+  // behavior. A caller that is about to launch the app needs to know whether
+  // that hit is the only install, hence the opt-in uniqueness check.
+  const requireUniqueApp = options.requireUniqueApp === true;
   const checkedPaths = [];
+  const found = [];
+  const seenRoots = new Set();
   let unconfirmedReason = null;
   for (const appRoot of appPaths) {
     checkedPaths.push(appRoot);
+    // A symlinked second location can point at the same bundle; the uniqueness
+    // check dedupes by the real path when the fs exposes it, otherwise by the
+    // lexical one. Only the uniqueness caller pays for the extra syscall.
+    let rootKey = path.resolve(appRoot);
+    if (requireUniqueApp && typeof fsImpl.realpathSync === "function") {
+      try { rootKey = fsImpl.realpathSync(appRoot); } catch { /* keep the resolved path */ }
+    }
+    if (seenRoots.has(rootKey)) continue;
+    seenRoots.add(rootKey);
     let dirStat;
     try { dirStat = fsImpl.statSync(appRoot); } catch { continue; }
     if (!dirStat.isDirectory()) continue;
@@ -2018,14 +2033,27 @@ function discoverDshDesktopSync(options = {}) {
       }
       continue;
     }
-    return {
-      status: "found",
+    const match = {
       appRoot,
       launcherPath: bundle.launcherPath,
       staticVersion: bundle.staticVersion,
-      checkedPaths,
-      reason: null,
     };
+    if (!requireUniqueApp) {
+      return { status: "found", ...match, checkedPaths, reason: null };
+    }
+    found.push(match);
+  }
+  if (requireUniqueApp && found.length > 1) {
+    return {
+      status: "ambiguous",
+      ...empty,
+      checkedPaths,
+      candidates: found,
+      reason: DESKTOP_DISCOVERY_AMBIGUOUS_REASON,
+    };
+  }
+  if (requireUniqueApp && found.length === 1) {
+    return { status: "found", ...found[0], checkedPaths, reason: null };
   }
   if (unconfirmedReason) {
     return { status: "unknown", ...empty, checkedPaths, reason: unconfirmedReason };

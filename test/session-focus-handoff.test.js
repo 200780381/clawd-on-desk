@@ -2,6 +2,8 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const { EventEmitter } = require("node:events");
+const path = require("node:path");
 
 const {
   focusCodexThreadTarget,
@@ -10,6 +12,53 @@ const {
   sanitizeFocusError,
   stripElectronLaunchEnv,
 } = require("../src/session-focus-handoff");
+const { discoverDshDesktopSync } = require("../hooks/dsh-install");
+
+const DSH_PLIST = [
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+  "<plist version=\"1.0\"><dict>",
+  "<key>CFBundleIdentifier</key><string>com.deepseek.dsh</string>",
+  "<key>CFBundleShortVersionString</key><string>0.2.0-rc.2</string>",
+  "</dict></plist>",
+].join("");
+
+// A macOS-only fake fs: each appRoot is a directory with a valid Info.plist and
+// the bundled launcher, matching what discoverDshDesktopSync verifies.
+function macFs(appRoots) {
+  const dirs = new Set(appRoots.map((root) => path.resolve(root)));
+  const files = new Map();
+  for (const root of appRoots) {
+    files.set(path.resolve(path.join(root, "Contents", "Info.plist")), DSH_PLIST);
+    files.set(
+      path.resolve(path.join(root, "Contents", "Resources", "runtime", "cli", "bin", "dsh")),
+      "launcher"
+    );
+  }
+  const missing = () => {
+    const err = new Error("ENOENT");
+    err.code = "ENOENT";
+    return err;
+  };
+  return {
+    statSync(filePath) {
+      const key = path.resolve(String(filePath));
+      if (dirs.has(key)) return { isDirectory: () => true, isFile: () => false };
+      if (files.has(key)) return { isDirectory: () => false, isFile: () => true };
+      throw missing();
+    },
+    readFileSync(filePath) {
+      const key = path.resolve(String(filePath));
+      if (files.has(key)) return files.get(key);
+      throw missing();
+    },
+  };
+}
+
+function eventedChild() {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  return child;
+}
 
 describe("session focus handoff", () => {
   it("opens Codex Desktop thread URLs and logs success", async () => {
@@ -178,8 +227,11 @@ describe("session focus handoff", () => {
     const spawned = [];
     const logs = [];
     const spawnImpl = (command, args, options) => {
-      const child = { unrefed: false, unref() { this.unrefed = true; } };
+      const child = eventedChild();
+      const unref = child.unref;
+      child.unref = () => { child.unrefed = true; unref(); };
       spawned.push({ command, args, options, child });
+      setImmediate(() => child.emit("exit", 0));
       return child;
     };
 
@@ -205,14 +257,16 @@ describe("session focus handoff", () => {
     assert.ok(logs.some((line) => line.includes("reason=launched")));
   });
 
-  it("launches the Windows executable as a GUI without Electron/Node environment", () => {
+  it("launches the Windows executable as a GUI without Electron/Node environment", async () => {
     const spawned = [];
-    const result = launchDshDesktopApp({
+    const child = eventedChild();
+    setImmediate(() => child.emit("spawn"));
+    const result = await launchDshDesktopApp({
       osPlatform: "win32",
       discoverDesktop: () => ({ status: "found", appRoot: "C:\\Users\\me\\AppData\\Local\\Programs\\DeepSeek Harness" }),
       spawnImpl: (command, args, options) => {
         spawned.push({ command, args, options });
-        return { unref() {} };
+        return child;
       },
       env: {
         ELECTRON_RUN_AS_NODE: "1",
@@ -235,39 +289,157 @@ describe("session focus handoff", () => {
     assert.strictEqual(spawned[0].options.env.PATH, "C:\\Windows");
   });
 
-  it("does not launch anything when no single desktop install is verified", () => {
+  it("reports an asynchronous child error without leaking it", async () => {
+    const child = eventedChild();
+    setImmediate(() => child.emit("error", Object.assign(new Error("spawn EACCES"), { code: "EACCES" })));
+
+    const result = await launchDshDesktopApp({
+      osPlatform: "darwin",
+      discoverDesktop: () => ({ status: "found", appRoot: "/Applications/DeepSeek Harness.app" }),
+      spawnImpl: () => child,
+      env: {},
+    });
+
+    assert.deepStrictEqual(result, {
+      launched: false,
+      reason: "launch-failed",
+      error: "spawn EACCES",
+      errorCode: "EACCES",
+    });
+  });
+
+  for (const [code, reason] of [[0, "launched"], [1, "launch-failed"]]) {
+    it(`settles macOS open exit code ${code} as ${reason}`, async () => {
+      const child = eventedChild();
+      setImmediate(() => child.emit("exit", code));
+
+      const result = await launchDshDesktopApp({
+        osPlatform: "darwin",
+        discoverDesktop: () => ({ status: "found", appRoot: "/Applications/DeepSeek Harness.app" }),
+        spawnImpl: () => child,
+        env: {},
+      });
+
+      assert.strictEqual(result.reason, reason);
+      if (code === 0) assert.strictEqual(result.launched, true);
+      else assert.strictEqual(result.exitCode, code);
+    });
+  }
+
+  it("settles a child that errors then exits only once", async () => {
+    const child = eventedChild();
+    setImmediate(() => {
+      child.emit("error", Object.assign(new Error("boom"), { code: "ENOENT" }));
+      child.emit("exit", 0);
+    });
+
+    const result = await launchDshDesktopApp({
+      osPlatform: "darwin",
+      discoverDesktop: () => ({ status: "found", appRoot: "/Applications/DeepSeek Harness.app" }),
+      spawnImpl: () => child,
+      env: {},
+    });
+
+    assert.strictEqual(result.reason, "launch-failed");
+    assert.strictEqual(result.errorCode, "ENOENT");
+  });
+
+  it("settles a silent child as launch-unconfirmed after the safety timeout", async () => {
+    const child = eventedChild();
+
+    const result = await launchDshDesktopApp({
+      osPlatform: "darwin",
+      discoverDesktop: () => ({ status: "found", appRoot: "/Applications/DeepSeek Harness.app" }),
+      spawnImpl: () => child,
+      env: {},
+      launchTimeoutMs: 5,
+    });
+
+    assert.strictEqual(result.reason, "launch-unconfirmed");
+  });
+
+  it("does not launch anything when no single desktop install is verified", async () => {
     const spawned = [];
-    const spawnImpl = () => { spawned.push(1); return { unref() {} }; };
+    const spawnImpl = () => { spawned.push(1); return eventedChild(); };
 
     assert.strictEqual(
-      launchDshDesktopApp({ osPlatform: "darwin", discoverDesktop: () => ({ status: "not-found" }), spawnImpl }).reason,
+      (await launchDshDesktopApp({ osPlatform: "darwin", discoverDesktop: () => ({ status: "not-found" }), spawnImpl })).reason,
       "desktop-not-found"
     );
     assert.strictEqual(
-      launchDshDesktopApp({ osPlatform: "darwin", discoverDesktop: () => ({ status: "ambiguous" }), spawnImpl }).reason,
+      (await launchDshDesktopApp({ osPlatform: "darwin", discoverDesktop: () => ({ status: "ambiguous" }), spawnImpl })).reason,
       "desktop-ambiguous"
     );
     assert.strictEqual(
-      launchDshDesktopApp({
+      (await launchDshDesktopApp({
         osPlatform: "darwin",
         discoverDesktop: () => { throw new Error("registry read failed"); },
         spawnImpl,
-      }).reason,
+      })).reason,
       "desktop-not-found"
     );
     assert.strictEqual(
-      launchDshDesktopApp({ osPlatform: "linux", discoverDesktop: () => ({ status: "found", appRoot: "/opt/dsh" }), spawnImpl }).reason,
+      (await launchDshDesktopApp({ osPlatform: "linux", discoverDesktop: () => ({ status: "found", appRoot: "/opt/dsh" }), spawnImpl })).reason,
       "desktop-not-found"
     );
     assert.strictEqual(
-      launchDshDesktopApp({
+      (await launchDshDesktopApp({
         osPlatform: "darwin",
         discoverDesktop: () => ({ status: "found", appRoot: "/Applications/DeepSeek Harness.app" }),
         spawnImpl: () => { throw new Error("spawn refused"); },
-      }).reason,
+      })).reason,
       "launch-failed"
     );
     assert.deepStrictEqual(spawned, []);
+  });
+
+  it("does not start anything when real discovery reports two valid macOS installs", async () => {
+    const first = "/Applications/DeepSeek Harness.app";
+    const second = "/Users/me/Applications/DeepSeek Harness.app";
+    const spawned = [];
+    const logs = [];
+
+    await focusDshDesktopTarget({
+      shell: { openExternal: async () => { throw new Error("no protocol handler"); } },
+      focusEntry: { id: "deepseek-harness:s1", agentId: "deepseek-harness" },
+      sessionId: "deepseek-harness:s1",
+      url: "dsh://open",
+      focusLog: (line) => logs.push(line),
+      // The real discovery function, not a pre-built ambiguous result.
+      discoverDesktop: (options) => discoverDshDesktopSync({
+        ...options,
+        fs: macFs([first, second]),
+        desktopAppPaths: [first, second],
+      }),
+      osPlatform: "darwin",
+      spawnImpl: () => { spawned.push(1); return eventedChild(); },
+      env: {},
+    });
+
+    assert.deepStrictEqual(spawned, []);
+    assert.ok(logs.some((line) => line.includes("reason=desktop-ambiguous")));
+    assert.ok(!logs.some((line) => line.includes("reason=launched")));
+  });
+
+  it("logs a launch failure with the child error code", async () => {
+    const child = eventedChild();
+    setImmediate(() => child.emit("error", Object.assign(new Error("spawn EACCES"), { code: "EACCES" })));
+    const logs = [];
+
+    await focusDshDesktopTarget({
+      shell: { openExternal: async () => { throw new Error("no protocol handler"); } },
+      focusEntry: { id: "deepseek-harness:s1", agentId: "deepseek-harness" },
+      sessionId: "deepseek-harness:s1",
+      url: "dsh://open",
+      focusLog: (line) => logs.push(line),
+      discoverDesktop: () => ({ status: "found", appRoot: "/Applications/DeepSeek Harness.app" }),
+      osPlatform: "darwin",
+      spawnImpl: () => child,
+      env: {},
+    });
+
+    assert.ok(logs.some((line) => line.includes("reason=launch-failed") && line.includes("code=EACCES")));
+    assert.ok(!logs.some((line) => line.includes("reason=opened")));
   });
 
   it("logs the fallback reason when the URL handler and the app launch both fail", async () => {
