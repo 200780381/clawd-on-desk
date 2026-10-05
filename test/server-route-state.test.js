@@ -298,6 +298,26 @@ describe("server-route-state POST", () => {
     } finally { api.cleanup(); }
   });
 
+  it("does not match a retired Claude result to a newer request by repeated input fingerprint", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const sid = localSessionKey("retired-fingerprint");
+    try {
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "old" });
+      api.updateSession(sid, "working", "PreToolUse", { agentId: "claude-code", claudePromptId: "old", toolUseId: "old-tool" });
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "new" });
+      const newerRequest = { res: {}, sessionId: sid, agentId: "claude-code", toolName: "Bash",
+        toolInputFingerprint: "repeated-input" };
+      const res = await callStatePost(JSON.stringify({ agent_id: "claude-code", session_id: "retired-fingerprint",
+        state: "working", event: "PostToolUse", prompt_id: "old", tool_use_id: "old-tool",
+        tool_name: "Bash", tool_input_fingerprint: "repeated-input" }), { ctx: {
+        sessions: api.sessions, pendingPermissions: [newerRequest],
+        observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      assert.equal(res.calls.resolved.length, 0);
+      assert.equal(api.sessions.get(sid).state, "thinking");
+    } finally { api.cleanup(); }
+  });
+
   it("does not promote a retired Claude prompt fallback into a formal metadata title", async () => {
     const api = makeClaudePhaseStateRuntime();
     const sid = localSessionKey("retired-prompt-title");

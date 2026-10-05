@@ -988,7 +988,7 @@ function handleStatePost(req, res, options) {
             subagentId,
             toolName,
             toolUseId,
-            toolInputFingerprint,
+            toolInputFingerprint: isRetiredClaudePhase ? null : toolInputFingerprint,
             allowSingletonFallback: event === "Stop" && !isRetiredClaudePhase,
           });
           if (perm) {
