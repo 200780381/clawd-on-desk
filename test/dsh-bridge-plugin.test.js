@@ -44,6 +44,41 @@ test("DSH bridge maps only public session events and never copies tool arguments
   assert.strictEqual(JSON.stringify(payload).includes("never"), false);
 });
 
+test("DSH bridge flags a failed tool result from the message or its content items", async () => {
+  const { mapSessionEvent } = await bridge();
+  const failure = { event: "PostToolUseFailure", state: "error" };
+  const success = { event: "PostToolUse", state: "working" };
+  assert.deepStrictEqual(mapSessionEvent({
+    type: "tool/result",
+    data: {
+      turn: 3,
+      step: 1,
+      message: {
+        role: "tool",
+        toolCallId: "call-1",
+        content: [{ type: "text", text: "Error: the user rejected escalating this command" }],
+        isError: true,
+      },
+    },
+  }), failure);
+  assert.deepStrictEqual(mapSessionEvent({
+    type: "tool/result",
+    data: { message: { content: [{ type: "tool_result", isError: true }], isError: false } },
+  }), failure);
+  assert.deepStrictEqual(mapSessionEvent({
+    type: "tool/result",
+    data: { message: { content: [{ type: "text", text: "ok" }], isError: "true" } },
+  }), success);
+  assert.deepStrictEqual(mapSessionEvent({
+    type: "tool/result",
+    data: { message: { content: [{ type: "text", text: "ok" }] } },
+  }), success);
+  assert.deepStrictEqual(mapSessionEvent({
+    type: "tool/result",
+    data: { message: { content: [{ type: "text", text: "aborted" }] }, error: { name: "AbortError" } },
+  }), failure);
+});
+
 test("DSH projection metadata uses the same context occupancy as DSH and keeps titles bounded", async () => {
   const { contextUsageFromPressure, metadataPayload, statePayload } = await bridge();
   const pressure = { pressureTokens: 70, projectedTokens: 78, contextWindow: 100 };
@@ -80,6 +115,73 @@ test("DSH projection metadata uses the same context occupancy as DSH and keeps t
   assert.strictEqual(statePayload(session, {
     event: "SessionStart", state: "idle", title: "Restored", contextUsage: metadata.context_usage,
   }).context_usage.percent, 78);
+});
+
+test("DSH bridge reports the desktop carrier only from an exact desktop profile context", async () => {
+  const {
+    resolveProfileCarrier,
+    statePayload,
+    buildApprovalPayload,
+    metadataPayload,
+    mapSessionEvent,
+  } = await bridge();
+
+  assert.strictEqual(resolveProfileCarrier({ profileContext: { name: "desktop" } }), "desktop");
+  assert.strictEqual(resolveProfileCarrier({ profileContext: { name: "web" } }), null);
+  assert.strictEqual(resolveProfileCarrier({ profileContext: { name: "Desktop" } }), null);
+  assert.strictEqual(resolveProfileCarrier({ profileContext: { name: 7 } }), null);
+  assert.strictEqual(resolveProfileCarrier({}), null);
+  assert.strictEqual(resolveProfileCarrier(null), null);
+  assert.strictEqual(resolveProfileCarrier({
+    profileContext: { get name() { throw new Error("context read failed"); } },
+  }), null);
+
+  const session = { id: "s1", header: { cwd: "/repo" } };
+  const mapping = mapSessionEvent({ type: "turn/start" });
+  assert.strictEqual(statePayload(session, mapping, {}, "desktop").dsh_carrier, "desktop");
+  assert.strictEqual(Object.hasOwn(statePayload(session, mapping, {}, "web"), "dsh_carrier"), false);
+  assert.strictEqual(Object.hasOwn(statePayload(session, mapping), "dsh_carrier"), false);
+  assert.strictEqual(buildApprovalPayload({ agent: { session } }, "desktop").dsh_carrier, "desktop");
+  assert.strictEqual(Object.hasOwn(buildApprovalPayload({ agent: { session } }), "dsh_carrier"), false);
+  const metadata = metadataPayload(session, { title: "Fix DSH" });
+  assert.strictEqual(Object.hasOwn(metadata, "dsh_carrier"), false);
+});
+
+test("DSH observers attach the carrier to lifecycle and approval payloads but never metadata", async () => {
+  const { createSessionObservers } = await bridge();
+  const posted = [];
+  const sender = { enqueue: (payload) => { posted.push(payload); return true; } };
+  let approvalPayload = null;
+  const observers = createSessionObservers(sender, {
+    carrier: "desktop",
+    requestPermissionImpl: async (payload) => {
+      approvalPayload = payload;
+      return { kind: "no-decision" };
+    },
+  });
+  const session = { id: "s1", header: { cwd: "/repo" } };
+  observers.handleSessionCreated(session);
+  observers.handleSessionEvent(session, { type: "turn/start" });
+  observers.handleSessionDisposed(session);
+  assert.ok(posted.length >= 3);
+  assert.ok(posted.filter((payload) => !payload.metadata_only)
+    .every((payload) => payload.dsh_carrier === "desktop"));
+  assert.ok(posted.filter((payload) => payload.metadata_only)
+    .every((payload) => !Object.hasOwn(payload, "dsh_carrier")));
+
+  let approvalHandler = null;
+  observers.attachApproval({ on(name, handler) { approvalHandler = handler; } });
+  assert.strictEqual(typeof approvalHandler, "function");
+  await approvalHandler({ agent: { session }, toolName: "bash" }, async () => "native");
+  assert.strictEqual(approvalPayload.dsh_carrier, "desktop");
+
+  const webPosted = [];
+  const webObservers = createSessionObservers(
+    { enqueue: (payload) => { webPosted.push(payload); return true; } },
+    { carrier: "web" },
+  );
+  webObservers.handleSessionCreated(session);
+  assert.ok(webPosted.every((payload) => !Object.hasOwn(payload, "dsh_carrier")));
 });
 
 test("DSH approval payload uses only ApprovalRequest public fields", async () => {

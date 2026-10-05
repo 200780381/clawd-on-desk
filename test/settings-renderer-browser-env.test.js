@@ -405,6 +405,10 @@ function collectText(el) {
   return parts.join(" ");
 }
 
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 class FakeElement {
   constructor(tagName) {
     this.tagName = String(tagName || "").toUpperCase();
@@ -787,6 +791,7 @@ function loadSharedLanguagePickerForTest({
   transitionDelay = "0s",
   lockWhilePending = false,
   viewportPlacement = null,
+  revealWhenClosed,
   innerWidth = 1000,
   textZoom = 1,
 } = {}) {
@@ -880,6 +885,7 @@ function loadSharedLanguagePickerForTest({
     onChange,
     lockWhilePending,
     viewportPlacement,
+    revealWhenClosed,
   });
   boundary.appendChild(control.element);
 
@@ -1539,6 +1545,7 @@ function loadAgentsTabForTest({
   collapsedGroups = {},
   settingsAPI = {},
   doctor = null,
+  navigator: navigatorOverrides = {},
 } = {}) {
   const raf = createQueuedRaf();
   const body = new FakeElement("body");
@@ -1555,13 +1562,18 @@ function loadAgentsTabForTest({
     createElement: (tagName) => new FakeElement(tagName),
     getElementById(id) {
       if (id === "content") return content;
+      if (id === "toastStack") return toastStack;
       return null;
     },
   };
+  const toastStack = new FakeElement("div");
+  toastStack.id = "toastStack";
+  body.appendChild(toastStack);
 
+  const windowListeners = {};
   const context = {
     console,
-    navigator: { platform: "Win32" },
+    navigator: { platform: "Win32", ...navigatorOverrides },
     localStorage: {
       getItem: (key) => (Object.prototype.hasOwnProperty.call(localStorageData, key) ? localStorageData[key] : null),
       setItem: (key, value) => {
@@ -1631,6 +1643,19 @@ function loadAgentsTabForTest({
           badgePermissionBubble: "Permission bubble",
           traecodeEnableHint: "Enable hooks in Trae before they fire.",
           minimaxEnableHint: "Enable the Clawd plugin in MiniMax Code before hooks fire.",
+          dshNoticeProfileWeb: "Web",
+          dshNoticeProfileDesktop: "Desktop",
+          dshNoticeLine: "{profile}: {text}",
+          dshNoticeRestartRequired: "The Clawd plugin was updated. Restart DeepSeek Harness desktop to load it.",
+          dshNoticeFirstInstall: "Installed in DeepSeek Harness desktop. It loads automatically while the app is open; no restart needed.",
+          dshNoticeManualCommand: "Run this in a terminal to finish. Clawd will not run it for you:",
+          dshNoticeInstallFailed: "Not installed: {message}",
+          dshNoticeUninstallFailed: "Not fully removed: {message}",
+          dshNoticeOpenDoctor: "Open Doctor and click {fix}.",
+          doctorFix: "Repair Now",
+          dshNoticeAcknowledge: "Got it",
+          dshNoticeCopy: "Copy",
+          dshNoticeCopied: "Copied",
           eventSourceHook: "Hook",
           eventSourceLogPoll: "Log poll",
           eventSourcePlugin: "Plugin",
@@ -1674,6 +1699,20 @@ function loadAgentsTabForTest({
   };
   context.window = context;
   context.globalThis = context;
+  context.addEventListener = (type, cb) => {
+    if (typeof cb !== "function") return;
+    if (!windowListeners[type]) windowListeners[type] = [];
+    windowListeners[type].push(cb);
+  };
+  context.removeEventListener = (type, cb) => {
+    const listeners = windowListeners[type];
+    if (!listeners) return;
+    const index = listeners.indexOf(cb);
+    if (index !== -1) listeners.splice(index, 1);
+  };
+  context.dispatchWindowEvent = (type) => {
+    for (const cb of [...(windowListeners[type] || [])]) cb({ type });
+  };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_ANIM_OVERRIDES_MERGE, "utf8"), context);
@@ -1701,6 +1740,7 @@ function loadAgentsTabForTest({
     content,
     raf,
     getContentRenderCount: () => contentRenderCount,
+    dispatchWindowEvent: (type) => context.dispatchWindowEvent(type),
   };
 }
 
@@ -10081,6 +10121,26 @@ describe("settings renderer browser environment", () => {
     }
   });
 
+  it("can preserve a closed Dashboard picker's scroll without changing tutorial reveal defaults", () => {
+    for (const revealWhenClosed of [false, undefined]) {
+      const harness = loadSharedLanguagePickerForTest({ revealWhenClosed });
+      harness.boundary.getBoundingClientRect = () => ({ top: 50, bottom: 300 });
+      harness.trigger.getBoundingClientRect = () => ({
+        top: 500 - harness.boundary.scrollTop, bottom: 526 - harness.boundary.scrollTop,
+      });
+      harness.dispatchWindowEvent("resize");
+      harness.flushAnimationFrames();
+      if (revealWhenClosed === false) assert.strictEqual(harness.boundary.scrollTop, 0);
+      else assert.ok(harness.boundary.scrollTop > 0);
+      harness.boundary.scrollTop = 0;
+      harness.trigger.dispatchEvent({ type: "click" });
+      harness.dispatchWindowEvent("resize");
+      harness.flushAnimationFrames();
+      assert.ok(harness.boundary.scrollTop > 0, "open menus still reveal their trigger");
+      harness.control.dispose();
+    }
+  });
+
   it("reflows an open tutorial picker after the window is resized", () => {
     const harness = loadSharedLanguagePickerForTest({
       options: ["en", "zh", "zh-TW", "ko", "ja"],
@@ -12251,6 +12311,225 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.content.querySelector(".agent-minimax-hint"), null);
   });
 
+  function loadDshNoticesHarness({ notices = [], settingsAPI = {}, navigator: navigatorOverrides } = {}) {
+    return loadAgentsTabForTest({
+      snapshot: { agents: { "deepseek-harness": { integrationInstalled: true, enabled: true } } },
+      agentMetadata: [
+        { id: "deepseek-harness", name: "DeepSeek Harness (experimental)", eventSource: "plugin-event", capabilities: {} },
+      ],
+      navigator: navigatorOverrides,
+      settingsAPI: {
+        getDshNotices: () => Promise.resolve({ notices }),
+        acknowledgeDshNotice: () => Promise.resolve({ status: "ok", found: true }),
+        ...settingsAPI,
+      },
+    });
+  }
+
+  it("renders the DeepSeek Harness notices with per-kind wording and prefixes", async () => {
+    const harness = loadDshNoticesHarness({
+      notices: [
+        { id: "r", profile: "desktop", kind: "restart-required" },
+        { id: "f1", profile: "web", kind: "failed-target", operation: "install", reason: "plugin-disabled-in-dsh", message: "disabled" },
+        { id: "f2", profile: "web", kind: "failed-target", operation: "uninstall", reason: "version-unsupported", message: "bad version" },
+        { id: "m", profile: "web", kind: "manual-command", commands: ["line1", "line2"] },
+        { id: "d", profile: "desktop", kind: "first-install" },
+      ],
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.deepStrictEqual(rows.map((row) => row.getAttribute("data-kind")), [
+      "restart-required",
+      "failed-target",
+      "failed-target",
+      "manual-command",
+      "first-install",
+    ]);
+    assert.match(collectText(rows[0]), /Desktop: The Clawd plugin was updated\./);
+    assert.match(collectText(rows[1]), /Web: Not installed: disabled Open Doctor and click Repair Now\./);
+    assert.match(collectText(rows[2]), /Web: Not fully removed: bad version/);
+    assert.doesNotMatch(collectText(rows[2]), /Open Doctor/);
+    assert.match(collectText(rows[3]), /Web: Run this in a terminal to finish\./);
+    assert.match(collectText(rows[3].querySelector(".agent-dsh-notice-commands")), /line1\s*\n\s*line2/);
+    assert.match(collectText(rows[4]), /Desktop: Installed in DeepSeek Harness desktop\./);
+  });
+
+  it("copies every manual command line from a DeepSeek Harness notice", async () => {
+    const copied = [];
+    const harness = loadDshNoticesHarness({
+      notices: [{ id: "m", profile: "web", kind: "manual-command", commands: ["cmd one", "cmd two"] }],
+      navigator: { clipboard: { writeText: (value) => { copied.push(value); return Promise.resolve(); } } },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    harness.content.querySelector(".agent-dsh-notice-copy").click();
+    await flushAsync();
+
+    assert.deepStrictEqual(copied, ["cmd one\ncmd two"]);
+  });
+
+  it("acknowledges the clicked DeepSeek Harness notice and refetches", async () => {
+    const acks = [];
+    let notices = [
+      { id: "one", profile: "web", kind: "manual-command", commands: ["a"] },
+      { id: "two", profile: "desktop", kind: "first-install" },
+    ];
+    const harness = loadDshNoticesHarness({
+      settingsAPI: {
+        getDshNotices: () => Promise.resolve({ notices: notices.map((notice) => ({ ...notice })) }),
+        acknowledgeDshNotice: (profile, id) => {
+          acks.push([profile, id]);
+          notices = notices.filter((notice) => !(notice.profile === profile && notice.id === id));
+          return Promise.resolve({ status: "ok", found: true });
+        },
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const buttons = harness.content.querySelectorAll(".agent-dsh-notice-ack");
+    assert.strictEqual(buttons.length, 2);
+    buttons[1].click();
+    await flushAsync();
+    await flushAsync();
+
+    assert.deepStrictEqual(acks, [["desktop", "two"]]);
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.deepStrictEqual(rows.map((row) => row.getAttribute("data-profile")), ["web"]);
+  });
+
+  it("re-enables the acknowledge button and keeps the notice when acknowledgement fails", async () => {
+    const harness = loadDshNoticesHarness({
+      notices: [{ id: "m", profile: "web", kind: "manual-command", commands: ["a"] }],
+      settingsAPI: {
+        acknowledgeDshNotice: () => Promise.resolve({ status: "error", message: "nope" }),
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const button = harness.content.querySelector(".agent-dsh-notice-ack");
+    button.click();
+    await flushAsync();
+
+    const toasts = harness.content.parentNode.querySelectorAll(".toast");
+    assert.ok(toasts.some((toast) => collectText(toast).includes("nope")), "a failure toast should appear");
+    assert.strictEqual(button.disabled, false, "the acknowledge button must be clickable again");
+    assert.strictEqual(button.classList.contains("pending"), false);
+    assert.strictEqual(harness.content.querySelectorAll(".agent-dsh-notice").length, 1, "the notice stays");
+  });
+
+  it("keeps DeepSeek Harness notice buttons from toggling the row", async () => {
+    const commands = [];
+    const harness = loadAgentsTabForTest({
+      snapshot: { agents: { "deepseek-harness": { integrationInstalled: true, enabled: true } } },
+      agentMetadata: [
+        { id: "deepseek-harness", name: "DeepSeek Harness (experimental)", eventSource: "plugin-event", capabilities: { permissionApproval: true } },
+      ],
+      navigator: { clipboard: { writeText: () => Promise.resolve() } },
+      settingsAPI: {
+        command: (action, payload) => { commands.push([action, payload]); return Promise.resolve({ status: "ok" }); },
+        getDshNotices: () => Promise.resolve({ notices: [{ id: "m", profile: "web", kind: "manual-command", commands: ["a"] }] }),
+        acknowledgeDshNotice: () => Promise.resolve({ status: "ok", found: true }),
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const disclosure = harness.content.querySelector(".settings-disclosure-trigger");
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false");
+
+    // The group header toggles on click, so the notice buttons must stop the
+    // event before it reaches it. Assert after each click so one button
+    // expanding and the next collapsing cannot mask the bug.
+    harness.content.querySelector(".agent-dsh-notice-ack").dispatchEvent({ type: "click", bubbles: true });
+    harness.raf.flushFrame();
+    await flushAsync();
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false", "acknowledge must not expand the group");
+
+    harness.content.querySelector(".agent-dsh-notice-copy").dispatchEvent({ type: "click", bubbles: true });
+    harness.raf.flushFrame();
+    await flushAsync();
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false", "copy must not expand the group");
+    assert.deepStrictEqual(commands, []);
+  });
+
+  it("refetches DeepSeek Harness notices after an install result and on window focus", async () => {
+    let getCalls = 0;
+    const harness = loadDshNoticesHarness({
+      settingsAPI: {
+        command: () => Promise.resolve({ status: "ok" }),
+        getDshNotices: () => { getCalls += 1; return Promise.resolve({ notices: [] }); },
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const afterRender = getCalls;
+
+    harness.content.querySelector(".agent-integration-action").click();
+    await flushAsync();
+    await flushAsync();
+    const afterInstall = getCalls;
+    assert.ok(afterInstall > afterRender, "an install/uninstall result must refetch notices");
+
+    harness.dispatchWindowEvent("focus");
+    await flushAsync();
+    assert.ok(getCalls > afterInstall, "focusing the window must refetch notices");
+  });
+
+  it("drops stale DeepSeek Harness notice responses", async () => {
+    const pending = [];
+    const harness = loadDshNoticesHarness({
+      settingsAPI: {
+        getDshNotices: () => new Promise((resolve) => { pending.push(resolve); }),
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    assert.strictEqual(pending.length, 1);
+
+    harness.dispatchWindowEvent("focus");
+    await flushAsync();
+    assert.strictEqual(pending.length, 2);
+
+    pending[1]({ notices: [{ id: "new", profile: "web", kind: "first-install" }] });
+    await flushAsync();
+    pending[0]({ notices: [{ id: "old", profile: "web", kind: "restart-required" }] });
+    await flushAsync();
+
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.deepStrictEqual(rows.map((row) => row.getAttribute("data-kind")), ["first-install"]);
+  });
+
+  it("leaves the DeepSeek Harness notice container empty and others without one", async () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: {
+          "deepseek-harness": { integrationInstalled: true, enabled: true },
+          codex: { integrationInstalled: true, enabled: true },
+        },
+      },
+      agentMetadata: [
+        { id: "deepseek-harness", name: "DeepSeek Harness (experimental)", eventSource: "plugin-event", capabilities: {} },
+        { id: "codex", name: "Codex", eventSource: "hook", capabilities: {} },
+      ],
+      settingsAPI: { getDshNotices: () => Promise.resolve({ notices: [] }) },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+
+    const containers = harness.content.querySelectorAll(".agent-dsh-notices");
+    assert.strictEqual(containers.length, 1);
+    assert.strictEqual(containers[0].querySelectorAll(".agent-dsh-notice").length, 0);
+  });
+
   it("keeps Start with Codex independent and commits through the preference API", async () => {
     const updates = [];
     const harness = loadAgentsTabForTest({
@@ -13052,6 +13331,70 @@ describe("settings renderer browser environment", () => {
     );
   });
 
+  it("keeps a local theme in the user section when the confirmed catalog never listed its id", () => {
+    const { content } = loadThemeTabForTest({
+      themes: [
+        { id: "clawd", name: "Clawd", builtin: true, active: true },
+        { id: "hash-sage", name: "My Local Sage", builtin: false, active: false },
+      ],
+      officialThemes: [
+        { id: "whale-chan", name: "Whale-chan", officialTheme: true, active: false, officialThemeState: "available" },
+      ],
+      officialCatalogStatus: "ok",
+    });
+
+    const sections = content.querySelectorAll(".theme-section");
+    const userSection = sections.find(
+      (section) => section.querySelector(".theme-section-title").textContent === "User Themes"
+    );
+    assert.ok(userSection, "the local theme must stay in the user section");
+    assert.strictEqual(userSection.querySelectorAll(".theme-card").length, 1);
+    assert.ok(collectText(userSection.querySelector(".theme-card")).includes("My Local Sage"));
+    assert.strictEqual(userSection.querySelector(".theme-card-footer-official"), null);
+  });
+
+  it("returns a stale official local theme to the user section once the catalog drops its id", async () => {
+    const { content, commands } = loadThemeTabForTest({
+      themes: [
+        { id: "clawd", name: "Clawd", builtin: true, active: true },
+        {
+          id: "hash-sage",
+          name: "My Local Sage",
+          builtin: false,
+          active: false,
+          // Decoration left behind by the catalog version that still listed this id.
+          officialTheme: true,
+          officialThemeState: "conflict",
+          officialThemeConflict: true,
+          officialThemeCanUninstall: false,
+        },
+      ],
+      officialThemes: [
+        { id: "whale-chan", name: "Whale-chan", officialTheme: true, active: false, officialThemeState: "available" },
+      ],
+      officialCatalogStatus: "ok",
+    });
+
+    const sections = content.querySelectorAll(".theme-section");
+    const userSection = sections.find(
+      (section) => section.querySelector(".theme-section-title").textContent === "User Themes"
+    );
+    assert.ok(userSection, "the withdrawn local theme must return to the user section");
+    const cards = userSection.querySelectorAll(".theme-card");
+    assert.strictEqual(cards.length, 1);
+    assert.ok(collectText(cards[0]).includes("My Local Sage"));
+    assert.strictEqual(cards[0].querySelector(".theme-card-footer-official"), null);
+    assert.ok(cards[0].querySelector(".theme-delete-btn"), "plain user themes offer delete");
+
+    cards[0].dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(commands)),
+      [{ name: "setThemeSelection", payload: { themeId: "hash-sage" } }],
+    );
+  });
+
   it("shows official download, progress and uninstall affordances", async () => {
     const installCalls = [];
     const cancelCalls = [];
@@ -13152,7 +13495,88 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(retry.getAttribute("data-settings-focus-key"), "official-retry:hash-sage");
   });
 
-  it("shows a list-level offline note without hiding installed official cards", () => {
+  it("uses the localized catalog-unavailable copy for that install failure code", async () => {
+    const toasts = [];
+    const harness = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        active: false,
+        officialThemeState: "available",
+        officialThemeBytes: 5 * 1024 * 1024,
+      }],
+      settingsAPI: {
+        installOfficialTheme: () => Promise.resolve({
+          status: "error",
+          code: "OFFICIAL_THEME_CATALOG_UNAVAILABLE",
+          message: "official theme catalog is unavailable",
+        }),
+      },
+    });
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    harness.content.querySelector(".theme-official-download-btn").dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.strictEqual(toasts.length, 1);
+    assert.strictEqual(toasts[0].message, harness.core.helpers.t("toastOfficialThemeCatalogUnavailable"));
+    assert.ok(!toasts[0].message.includes("official theme catalog is unavailable"));
+    assert.strictEqual(toasts[0].options.error, true);
+  });
+
+  it("keeps the generic install-failure copy for other error codes", async () => {
+    const toasts = [];
+    const harness = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        active: false,
+        officialThemeState: "available",
+        officialThemeBytes: 5 * 1024 * 1024,
+      }],
+      settingsAPI: {
+        installOfficialTheme: () => Promise.resolve({
+          status: "error",
+          code: "OFFICIAL_THEME_INSTALL_FAILED",
+          message: "boom",
+        }),
+      },
+    });
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    harness.content.querySelector(".theme-official-download-btn").dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.strictEqual(toasts.length, 1);
+    assert.strictEqual(toasts[0].message, harness.core.helpers.t("toastOfficialThemeInstallFailed")("boom"));
+  });
+
+  it("localizes a catalog-unavailable card error instead of showing the English message", () => {
+    const { content, core } = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        active: false,
+        officialThemeState: "error",
+        officialThemeError: {
+          code: "OFFICIAL_THEME_CATALOG_UNAVAILABLE",
+          message: "official theme catalog is unavailable",
+        },
+      }],
+    });
+    const note = content.querySelector(".theme-official-note");
+    assert.ok(note);
+    assert.strictEqual(note.textContent, core.helpers.t("toastOfficialThemeCatalogUnavailable"));
+    assert.ok(!collectText(content).includes("official theme catalog is unavailable"));
+  });
+
+  it("shows a retry banner when the official catalog is offline without hiding installed cards", () => {
     const { content } = loadThemeTabForTest({
       themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
       officialCatalogStatus: "offline",
@@ -13168,8 +13592,29 @@ describe("settings renderer browser environment", () => {
         },
       ],
     });
-    assert.ok(content.querySelector(".theme-official-offline-note"));
+    const banner = content.querySelector(".theme-official-offline-banner");
+    assert.ok(banner);
+    assert.ok(content.querySelector(".theme-official-offline-retry"));
     assert.ok(content.querySelector(".theme-uninstall-btn"));
+    assert.strictEqual(content.querySelector(".theme-official-offline-note"), null);
+  });
+
+  it("keeps the official section with a no-list banner when the offline catalog returned nothing", () => {
+    const { content, core } = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialCatalogStatus: "invalid",
+      officialThemes: [],
+    });
+    const banner = content.querySelector(".theme-official-offline-banner");
+    assert.ok(banner);
+    assert.strictEqual(
+      content.querySelector(".theme-official-offline-retry").textContent,
+      core.helpers.t("themeOfficialRetry"),
+    );
+    assert.strictEqual(
+      content.querySelector(".theme-official-offline-message").textContent,
+      core.helpers.t("themeOfficialOfflineNoList"),
+    );
   });
 
   it("renders Codex Pet atlas previews with V1, V2, and legacy grid ratios", () => {    const { content } = loadThemeTabForTest({

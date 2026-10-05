@@ -729,6 +729,9 @@ function buildPermissionFocusEntry(perm) {
   if (perm.model) focusEntry.model = perm.model;
   if (perm.codexOriginator) focusEntry.codexOriginator = perm.codexOriginator;
   if (perm.codexSource) focusEntry.codexSource = perm.codexSource;
+  // An approval can arrive before the session lifecycle event, so the fallback
+  // entry needs the carrier to remain jumpable to the desktop app window.
+  if (perm.dshCarrier) focusEntry.dshCarrier = perm.dshCarrier;
   return focusEntry;
 }
 
@@ -782,6 +785,23 @@ function computeQueueCommitDeadline(existingDeadline, now, timeoutMs = QUEUE_COM
   const startedAt = Number.isFinite(Number(now)) ? Number(now) : Date.now();
   const timeout = Math.max(1, Number(timeoutMs) || QUEUE_COMMIT_TIMEOUT_MS);
   return startedAt + timeout;
+}
+
+// Only the permission queue payload (buildQueuePayload) uses this to label a
+// session; it lives at module scope so the __test export can reach it.
+function queueAgentLabel(entry) {
+  const id = String((entry && entry.agentId) || "claude-code");
+  const labels = {
+    "claude-code": "Claude Code",
+    codebuddy: "CodeBuddy",
+    codex: "Codex",
+    "qwen-code": "Qwen Code",
+    zcode: "ZCode",
+    "copilot-cli": "Copilot CLI",
+    hermes: "Hermes",
+    "deepseek-harness": "DeepSeek Harness",
+  };
+  return labels[id] || id;
 }
 
 module.exports = function initPermission(ctx) {
@@ -1499,21 +1519,6 @@ function queueSessionLabel(entry) {
   if (folder) return truncate(folder, 80);
   const id = String((entry && entry.sessionId) || "");
   return id ? `#${id.slice(-3)}` : "";
-}
-
-function queueAgentLabel(entry) {
-  const id = String((entry && entry.agentId) || "claude-code");
-  const labels = {
-    "claude-code": "Claude Code",
-    codebuddy: "CodeBuddy",
-    codex: "Codex",
-    "qwen-code": "Qwen Code",
-    zcode: "ZCode",
-    "copilot-cli": "Copilot CLI",
-    hermes: "Hermes",
-    dsh: "DeepSeek Harness",
-  };
-  return labels[id] || id;
 }
 
 function isSwitchingLocked() {
@@ -2535,10 +2540,14 @@ function showPermissionBubble(permEntry) {
       const idx = pendingPermissions.indexOf(permEntry);
       if (idx !== -1) {
         // Codex + Qwen + Copilot + ZCode + DSH can hand no-decision back to
-        // their native flow. Hermes has no native permission UI, so its opt-in
-        // plugin gate treats this as a retryable block. In every case we avoid
-        // fabricating a user denial. CC/CodeBuddy still get an explicit deny for
-        // this user-close action.
+        // their native flow. opencode-family entries do the same: OpenCode v2
+        // answers 204 on its blocking evaluate hook so the native ask UI takes
+        // over, while OpenCode v1 / MiMo silently drop the request so their
+        // built-in terminal or Desktop prompt wins. Hermes has no native
+        // permission UI, so its opt-in plugin gate treats this as a retryable
+        // block. In every case we avoid fabricating a user denial.
+        // Claude Code / CodeBuddy still get an explicit deny for this user-close
+        // action.
         const behavior = (
           permEntry.isCodex
           || permEntry.isQwenCode
@@ -2546,6 +2555,7 @@ function showPermissionBubble(permEntry) {
           || permEntry.isHermes
           || permEntry.isZcode
           || permEntry.isDsh
+          || isOpencodeFamilyEntry(permEntry)
         ) ? "no-decision" : "deny";
         resolvePermissionEntry(permEntry, behavior, "Bubble window closed by user");
       }
@@ -3176,6 +3186,11 @@ function buildRemoteApprovalPayload(permEntry) {
     detail,
     fields,
   };
+  // A capability flag, not an identity: the Feishu card switches to its
+  // structured layout as soon as it sees a top-level agentId, which would drop
+  // this payload's detail and reminder lines for every agent. This flag only
+  // removes an action DSH has no native terminal for.
+  if (agentId === "deepseek-harness") payload.canOfferTerminal = false;
   if (suggestionButtons.length > 0) payload.suggestions = suggestionButtons;
   return payload;
 }
@@ -5450,4 +5465,6 @@ module.exports.__test = {
   areBubbleBoundsSafe,
   stackHeightForSizes,
   computeQueueCommitDeadline,
+  queueAgentLabel,
+  buildPermissionFocusEntry,
 };

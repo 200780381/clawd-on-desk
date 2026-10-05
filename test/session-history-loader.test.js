@@ -57,7 +57,7 @@ describe("session history loader", () => {
       cwd: projectCwd,
       session_title: `Session ${sessionId}`,
       ...overrides,
-    }, { historyDir, eventAt, uptime: () => (eventAt - boot) / 1000, ...historyOptions });
+    }, { historyDir, eventAt, uptime: () => (eventAt - boot) / 1000, env: {}, ...historyOptions });
   }
 
   function writeTranscript(sessionId, cwd = projectCwd) {
@@ -451,6 +451,181 @@ describe("session history loader", () => {
       assert.equal(rows.length, 1);
       assert.equal(rows[0].transcriptPresent, null);
       assert.equal(rows[0].group, "other");
+    });
+
+    it("names a confirmed row from a transcript found under another project directory", () => {
+      // The cwd still exists (so the row leads the list), but the transcript
+      // only lives under the worktree's project directory. The title must come
+      // from the file the probe actually located, not from the cwd's own path.
+      fs.mkdirSync(path.join(root, "old-checkout"));
+      record("moved", T0, BOOT_A, {
+        cwd: path.join(root, "old-checkout"),
+        session_title: "",
+      });
+      writeTranscriptLines("moved", [
+        { type: "user", message: { role: "user", content: "Rework the moved worktree" } },
+      ], path.join(root, "worktree"));
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.transcriptPresent, true);
+      assert.equal(row.group, "confirmed");
+      assert.equal(row.title, "Rework the moved worktree");
+    });
+
+    it("names a folded row from a transcript found under another project directory", () => {
+      // The checkout is gone, so the row cannot lead the list — but its
+      // transcript survives elsewhere and the folded row is still named.
+      record("moved", T0, BOOT_A, {
+        cwd: path.join(root, "old-checkout"),
+        session_title: "",
+      });
+      writeTranscriptLines("moved", [
+        { type: "user", message: { role: "user", content: "Recovered from the worktree" } },
+      ], path.join(root, "worktree"));
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.transcriptPresent, true);
+      assert.equal(row.group, "other");
+      assert.equal(row.title, "Recovered from the worktree");
+    });
+
+    it("does not read transcripts for confirmed rows beyond the limit", (t) => {
+      const limit = 3;
+      for (let i = 0; i < limit + 2; i++) {
+        record(`s-${i}`, T0 + i * 1000, BOOT_A, { session_title: "" });
+        writeTranscriptLines(`s-${i}`, [
+          { type: "user", message: { role: "user", content: `Prompt ${i}` } },
+        ]);
+      }
+      const dir = path.join(claudeProjectsDir, encodeClaudeProjectDir(projectCwd));
+      const transcriptPath = (id) => path.join(dir, `${id}.jsonl`);
+      const opened = new Set();
+      const realOpen = fs.openSync;
+      t.mock.method(fs, "openSync", (file, ...args) => {
+        opened.add(String(file));
+        return realOpen(file, ...args);
+      });
+
+      const rows = loadResumableSessionHistory(loadOpts({ limit }));
+      assert.equal(rows.filter((row) => row.group === "confirmed").length, limit);
+      // The newest limit rows stay; the two older ones are cut, so their
+      // transcripts must never be opened.
+      for (let i = limit + 1; i >= 2; i--) {
+        assert.ok(opened.has(transcriptPath(`s-${i}`)), `s-${i} should have been read`);
+      }
+      for (let i = 0; i < 2; i++) {
+        assert.ok(!opened.has(transcriptPath(`s-${i}`)), `s-${i} must stay unread`);
+      }
+    });
+
+    it("closes the transcript file when a read fails, without dropping other rows", (t) => {
+      record("bad-read", T0, BOOT_A, { session_title: "" });
+      record("good-read", T0 + 1000, BOOT_A, { session_title: "" });
+      const dir = path.join(claudeProjectsDir, encodeClaudeProjectDir(projectCwd));
+      const badPath = path.join(dir, "bad-read.jsonl");
+      writeTranscriptLines("bad-read", [
+        { type: "user", message: { role: "user", content: "never surfaces" } },
+      ]);
+      writeTranscriptLines("good-read", [
+        { type: "user", message: { role: "user", content: "still named" } },
+      ]);
+      const realOpen = fs.openSync;
+      const realRead = fs.readSync;
+      const realClose = fs.closeSync;
+      const badFd = 987654;
+      const closed = [];
+      t.mock.method(fs, "openSync", (file, ...args) => (
+        String(file) === badPath ? badFd : realOpen(file, ...args)
+      ));
+      t.mock.method(fs, "readSync", (fd, ...args) => {
+        if (fd === badFd) throw Object.assign(new Error("io"), { code: "EIO" });
+        return realRead(fd, ...args);
+      });
+      t.mock.method(fs, "closeSync", (fd, ...args) => {
+        closed.push(fd);
+        try { realClose(fd); } catch { /* the sentinel fd is not real */ }
+      });
+
+      const rows = loadResumableSessionHistory(loadOpts());
+      assert.ok(closed.includes(badFd), "the failed read must still close its descriptor");
+      assert.equal(rows.find((row) => row.sessionId === "bad-read").title, null);
+      assert.equal(rows.find((row) => row.sessionId === "good-read").title, "still named");
+    });
+
+    it("skips sidechain user records and names the session from the real prompt", () => {
+      record("sc", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("sc", [
+        { type: "user", isSidechain: true, message: { role: "user", content: "subagent preamble" } },
+        { type: "user", message: { role: "user", content: "the real prompt" } },
+      ]);
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "the real prompt");
+    });
+
+    it("skips machine-wrapper content and names the session from the next real prompt", () => {
+      record("wrapped", T0, BOOT_A, { session_title: "" });
+      writeTranscriptLines("wrapped", [
+        { type: "user", message: { role: "user", content: "<local-command-stdout>noise</local-command-stdout>" } },
+        { type: "user", message: { role: "user", content: "the actual ask" } },
+      ]);
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.title, "the actual ask");
+    });
+
+    it("does not read a transcript that is a symlink", { skip: process.platform === "win32" }, () => {
+      record("linked", T0, BOOT_A, { session_title: "" });
+      const target = path.join(root, "real-transcript.jsonl");
+      fs.writeFileSync(target, `${JSON.stringify({
+        type: "user",
+        message: { role: "user", content: "follow the link" },
+      })}\n`);
+      const dir = path.join(claudeProjectsDir, encodeClaudeProjectDir(projectCwd));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.symlinkSync(target, path.join(dir, "linked.jsonl"));
+
+      const [row] = loadResumableSessionHistory(loadOpts());
+      assert.equal(row.transcriptPresent, false);
+      assert.equal(row.title, null);
+    });
+
+    it("builds the cross-directory index once per load", (t) => {
+      // A missing id must not re-walk every directory's file names; the shared
+      // index is built once and reused for every later miss.
+      writeTranscript("unrelated-a", path.join(root, "worktree"));
+      writeTranscript("unrelated-b", path.join(root, "other-project"));
+      for (let i = 0; i < 5; i++) {
+        record(`daemon-${i}`, T0 - i, BOOT_A, { cwd: path.join(root, "ghost-checkout") });
+      }
+      const realReaddir = fs.readdirSync;
+      let iterations = 0;
+      const projectsRoot = `${path.resolve(claudeProjectsDir)}${path.sep}`;
+      t.mock.method(fs, "readdirSync", (dir, ...args) => {
+        const result = realReaddir(dir, ...args);
+        if (!Array.isArray(result)) return result;
+        const inProjects = path.resolve(String(dir)).startsWith(projectsRoot);
+        if (!inProjects) return result;
+        return new Proxy(result, {
+          get(target, prop, receiver) {
+            if (prop === Symbol.iterator) {
+              return function* iterate() {
+                for (const entry of target) {
+                  iterations += 1;
+                  yield entry;
+                }
+              };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        });
+      });
+
+      const rows = loadResumableSessionHistory(loadOpts());
+      assert.equal(rows.length, 5);
+      assert.ok(rows.every((row) => row.group === "other"));
+      // The two project subdirectories' file-name lists, traversed once each.
+      assert.equal(iterations, 2);
     });
 
     it("never returns prompts or responses", () => {

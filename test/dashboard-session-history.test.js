@@ -134,6 +134,10 @@ function loadDashboard({ sessions = [], history = [],
     context,
   );
   vm.runInContext(
+    fs.readFileSync(path.join(__dirname, "..", "src", "language-picker.js"), "utf8"),
+    context,
+  );
+  vm.runInContext(
     fs.readFileSync(path.join(__dirname, "..", "src", "dashboard-renderer.js"), "utf8"),
     context,
   );
@@ -229,6 +233,15 @@ describe("dashboard session history section", () => {
     const button = byClass(app.root, "session-history-resume")[0];
     assert.equal(button.textContent, i18n.en.dashboardHistoryResume);
     assert.equal(button.disabled, false);
+  });
+
+  it("shows only the first eight characters of the session id in the meta line", async () => {
+    const app = loadDashboard({ history: [historyRow({ sessionId: "0123456789abcdef" })] });
+    await flush();
+
+    const meta = textOf(byClass(app.root, "session-history-meta")[0]);
+    assert.ok(meta.includes("01234567"), meta);
+    assert.ok(!meta.includes("012345678"), "a ninth character must be truncated away");
   });
 
   it("sends only the agent and opaque history key when resuming", async () => {

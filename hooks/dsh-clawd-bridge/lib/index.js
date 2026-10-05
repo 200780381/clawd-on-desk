@@ -15,6 +15,7 @@ export const name = 'dsh-clawd-bridge'
 
 const AGENT_ID = 'deepseek-harness'
 const HOOK_SOURCE = 'dsh-plugin'
+const DESKTOP_CARRIER = 'desktop'
 const SESSION_PREFIX = `${AGENT_ID}:`
 const MAX_QUEUE_PER_SESSION = 32
 const DEFAULT_PERMISSION_TIMEOUT_MS = 10 * 60 * 1000
@@ -39,6 +40,23 @@ function boundedText(value, max = TEXT_MAX) {
   return Array.from(clean).slice(0, max).join('')
 }
 
+// The carrier is read once, at apply time, from the boot-provided profile
+// context. DSH provides the context before config-tree plugins are mounted, so
+// `profileContext.name` is already available. Only the exact "desktop" name
+// counts; a missing context, a throw, "web", or any other value is unknown and
+// must not be reported as the desktop carrier.
+export function resolveProfileCarrier(ctx) {
+  let profileName
+  try {
+    profileName = ctx?.profileContext?.name
+  } catch {
+    return null
+  }
+  return typeof profileName === 'string' && profileName === DESKTOP_CARRIER
+    ? DESKTOP_CARRIER
+    : null
+}
+
 export function canonicalSessionId(value) {
   const raw = boundedText(value, 200)
   if (!raw) return `${SESSION_PREFIX}default`
@@ -57,11 +75,12 @@ function sessionFields(session) {
   }
 }
 
-export function statePayload(session, mapping, sequence = {}) {
+export function statePayload(session, mapping, sequence = {}, carrier = null) {
   return {
     agent_id: AGENT_ID,
     hook_source: HOOK_SOURCE,
     agent_pid: process.pid,
+    ...(carrier === DESKTOP_CARRIER ? { dsh_carrier: DESKTOP_CARRIER } : {}),
     ...sessionFields(session),
     state: mapping.state,
     event: mapping.event,
@@ -91,6 +110,9 @@ export function contextUsageFromPressure(pressure) {
   }
 }
 
+// Metadata (title / context occupancy) only annotates an existing session and
+// deliberately never carries the carrier: a metadata-only request must not be
+// able to change where a session came from.
 export function metadataPayload(session, metadata = {}) {
   const title = boundedText(metadata.title, TITLE_MAX)
   const hasContextPressure = Object.hasOwn(metadata, 'contextPressure')
@@ -115,9 +137,10 @@ export function mapSessionEvent(event) {
   }
   if (type === 'tool/result') {
     const content = event?.data?.message?.content
-    const failed = Boolean(event?.data?.error) || (
-      Array.isArray(content) && content.some((item) => item?.isError === true)
-    )
+    // 0.2.x marks a failed result on the message; 0.1.x marks it on the content item.
+    const messageFlagged = event?.data?.message?.isError === true
+    const contentFlagged = Array.isArray(content) && content.some((item) => item?.isError === true)
+    const failed = Boolean(event?.data?.error) || messageFlagged || contentFlagged
     return failed
       ? { event: 'PostToolUseFailure', state: 'error' }
       : { event: 'PostToolUse', state: 'working' }
@@ -135,7 +158,7 @@ export function mapSessionEvent(event) {
   return null
 }
 
-export function buildApprovalPayload(req) {
+export function buildApprovalPayload(req, carrier = null) {
   const session = req?.agent?.session
   const rawId = session?.id ?? req?.agent?.id
   const cwd = boundedText(session?.header?.cwd, 4096)
@@ -146,6 +169,7 @@ export function buildApprovalPayload(req) {
     hook_source: HOOK_SOURCE,
     hook_event_name: 'PermissionRequest',
     session_id: canonicalSessionId(rawId),
+    ...(carrier === DESKTOP_CARRIER ? { dsh_carrier: DESKTOP_CARRIER } : {}),
     tool_name: boundedText(req?.toolName, 160) || 'unknown',
     tool_use_id: callId || randomUUID(),
     tool_input: {},
@@ -272,6 +296,7 @@ export function createApprovalHandler(
   requestPermissionImpl = requestPermission,
   permissionTimeoutMs = DEFAULT_PERMISSION_TIMEOUT_MS,
   lifetimeSignal = null,
+  carrier = null,
 ) {
   return async (req, next) => {
     if (req?.signal?.aborted) return 'cancelled'
@@ -282,7 +307,7 @@ export function createApprovalHandler(
     const linked = linkAbortSignals([req?.signal, lifetimeSignal])
     let answer
     try {
-      answer = await requestPermissionImpl(buildApprovalPayload(req), {
+      answer = await requestPermissionImpl(buildApprovalPayload(req, carrier), {
         signal: linked.signal,
         timeoutMs: permissionTimeoutMs,
       })
@@ -316,6 +341,10 @@ export function createSessionObservers(sender, options = {}) {
   const requestPermissionImpl = typeof options.requestPermissionImpl === 'function'
     ? options.requestPermissionImpl
     : requestPermission
+  // The carrier travels with the observer set instead of module scope so two
+  // plugin instances (or a reload) can never leak one context's profile into
+  // the other's payloads.
+  const carrier = options.carrier === DESKTOP_CARRIER ? DESKTOP_CARRIER : null
   let projectionRegistry = null
 
   const safely = (work) => (...args) => {
@@ -341,7 +370,7 @@ export function createSessionObservers(sender, options = {}) {
       state: 'idle',
       title: metadata?.title,
       contextUsage,
-    }, { sessionSeq: session?.seq }))
+    }, { sessionSeq: session?.seq }, carrier))
     if (!contextUsage) {
       // A resumed session may still have an old Clawd context value. Match
       // DSH's ContextMeter, which hides occupancy without both operands.
@@ -356,14 +385,14 @@ export function createSessionObservers(sender, options = {}) {
     }
     const mapping = mapSessionEvent(event)
     if (!mapping) return
-    sender.enqueue(statePayload(session, mapping, { eventSeq: event?.seq }))
+    sender.enqueue(statePayload(session, mapping, { eventSeq: event?.seq }, carrier))
   })
 
   const handleSessionDisposed = safely((session) => {
     sender.enqueue(statePayload(session, {
       event: 'SessionEnd',
       state: 'sleeping',
-    }, { sessionSeq: session?.seq }))
+    }, { sessionSeq: session?.seq }, carrier))
   })
 
   const attachProjections = (projectionCtx) => {
@@ -385,7 +414,7 @@ export function createSessionObservers(sender, options = {}) {
     if (!approvalCtx || typeof approvalCtx.on !== 'function') return
     approvalCtx.on(
       'approval/request',
-      createApprovalHandler(requestPermissionImpl, permissionTimeoutMs, lifetimeSignal),
+      createApprovalHandler(requestPermissionImpl, permissionTimeoutMs, lifetimeSignal, carrier),
       { prepend: true },
     )
   }
@@ -414,6 +443,7 @@ export function apply(ctx, config = {}) {
   const observers = createSessionObservers(sender, {
     lifetimeSignal: generation.signal,
     permissionTimeoutMs,
+    carrier: resolveProfileCarrier(ctx),
   })
 
   ctx.on('session/created', observers.handleSessionCreated)
