@@ -14,6 +14,7 @@ const {
   resolveManagedRoot,
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
+const { desktopFound: platformDesktopFound, symlinkDir } = require("./dsh-desktop-fixtures");
 
 const SOURCE_DIR = path.join(__dirname, "..", "hooks", "dsh-clawd-bridge");
 const FAMILY = DSH_VERSION_FAMILIES[0];
@@ -29,15 +30,8 @@ const NO_DESKTOP = Object.freeze({
   reason: null,
 });
 
-function desktopFound() {
-  return {
-    status: "found",
-    appRoot: "/fake/DeepSeek Harness.app",
-    launcherPath: "/fake/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
-    staticVersion: null,
-    checkedPaths: [],
-    reason: null,
-  };
+function desktopFound(harness) {
+  return platformDesktopFound(harness.root);
 }
 
 function writeJson(filePath, value) {
@@ -213,7 +207,7 @@ function writeIncompleteLinkedProfile(harness, profile) {
   });
   const local = packageDir(harness.dshHome, profile);
   fs.mkdirSync(path.dirname(local), { recursive: true });
-  fs.symlinkSync(generationDir, local, "dir");
+  symlinkDir(generationDir, local);
   return { generationDir, bundleHash, profileDir };
 }
 
@@ -249,7 +243,7 @@ function makeLinkingCli(harness) {
       const target = packageDir(harness.dshHome, profile);
       fs.rmSync(target, { recursive: true, force: true });
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.symlinkSync(generationDir, target, "dir");
+      symlinkDir(generationDir, target);
       return { code: 0 };
     }
     return { code: 1, stderr: `unexpected args: ${args.join(" ")}` };
@@ -282,7 +276,7 @@ function desktopOptions(harness, cli, overrides = {}) {
     commandInfo: null,
     dshCommand: false,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     ...overrides,
   });
 }
@@ -396,6 +390,7 @@ test("a repair does not remove for a recorded target that fails verification", a
   assert.strictEqual(result.status, "error");
   assert.strictEqual(result.reason, "repair-needs-inspection");
   assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(fs.existsSync(recordPath(harness, "web")), true);
 });
 
 test("a repair does not add when the target is corrupted after remove", async (t) => {
@@ -731,7 +726,7 @@ test("a symlinked generation that disappeared stops for manual inspection", asyn
   // DSH `link:` layout: the profile node_modules entry is a symlink.
   const local = packageDir(harness.dshHome, "web");
   fs.mkdirSync(path.dirname(local), { recursive: true });
-  fs.symlinkSync(generationDir, local, "dir");
+  symlinkDir(generationDir, local);
   writeRecord(harness, "web", recordFor(harness, "web", "remove-pending"));
   fs.rmSync(generationDir, { recursive: true, force: true });
 
@@ -945,6 +940,25 @@ test("a record target path that cannot hold a marker stops the repair", async (t
   fs.writeFileSync(bogus, "not a directory", "utf8");
   writeRecord(harness, "web", recordFor(harness, "web", "remove-pending", {
     targetGenerationDir: bogus,
+  }));
+
+  const cli = makeCli(harness);
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { operation: "explicit-repair" }));
+  assert.strictEqual(result.status, "error");
+  assert.strictEqual(result.reason, "repair-needs-inspection");
+  assert.deepStrictEqual(cli.calls, []);
+  assert.strictEqual(fs.existsSync(recordPath(harness, "web")), true);
+});
+
+test("a record target reached through a link stops the repair", async (t) => {
+  const harness = makeHarness(t);
+  writeIncompleteProfile(harness, "web");
+  const alternate = writeAlternateGeneration(harness);
+  const link = path.join(managedRootOf(harness), "generations", "linked-target");
+  symlinkDir(alternate.dir, link);
+  writeRecord(harness, "web", recordFor(harness, "web", "remove-pending", {
+    targetBundleHash: alternate.hash,
+    targetGenerationDir: link,
   }));
 
   const cli = makeCli(harness);

@@ -18,6 +18,7 @@ const {
   resolveDshProfileDir,
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
+const { symlinkDir } = require("./dsh-desktop-fixtures");
 
 const SOURCE_DIR = path.join(__dirname, "..", "hooks", "dsh-clawd-bridge");
 const FAMILY = DSH_VERSION_FAMILIES[0];
@@ -153,19 +154,28 @@ function writeResidue(env, profile, name = "dsh-clawd-bridge.clawd-removing-test
   return residue;
 }
 
+// Match the realpath flavor and case folding the code uses when it resolves a
+// path: realpathSync.native, then lowercased on win32, so an injected fs can
+// recognize the path the code will read.
 function canonicalPathSync(value) {
   let cursor = path.resolve(String(value));
   const suffix = [];
   while (true) {
     try {
-      return path.join(fs.realpathSync(cursor), ...suffix);
+      const realpath = fs.realpathSync.native ? fs.realpathSync.native(cursor) : fs.realpathSync(cursor);
+      return comparablePath(path.join(realpath, ...suffix));
     } catch {
       const parent = path.dirname(cursor);
-      if (parent === cursor) return path.resolve(String(value));
+      if (parent === cursor) return comparablePath(path.resolve(String(value)));
       suffix.unshift(path.basename(cursor));
       cursor = parent;
     }
   }
+}
+
+function comparablePath(value) {
+  if (process.platform !== "win32") return value;
+  return value.replace(/^\\\\\?\\/, "").toLowerCase();
 }
 
 function fsFailingRead(targetPath) {
@@ -469,7 +479,7 @@ test("a symlinked profile directory is diagnosed", (t) => {
   });
   const linkDir = path.join(env.dshHome, "profiles", WEB_PROFILE_NAME);
   fs.mkdirSync(path.dirname(linkDir), { recursive: true });
-  fs.symlinkSync(realDir, linkDir, "dir");
+  symlinkDir(realDir, linkDir);
   const target = inspectWeb(env, "doctor");
   assert.strictEqual(target.evidence.manifest, "symlink");
   assert.strictEqual(target.reason, "profile-symlink");

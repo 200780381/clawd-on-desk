@@ -19,11 +19,11 @@ const {
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
 const { buildCleanupOptionsForHome } = require("../hooks/cleanup-integrations");
+const { desktopFound: platformDesktopFound, symlinkDir } = require("./dsh-desktop-fixtures");
 
 const SOURCE_DIR = path.join(__dirname, "..", "hooks", "dsh-clawd-bridge");
 const FAMILY = DSH_VERSION_FAMILIES[0];
 const FAMILY_VERSION = FAMILY.minVersion;
-const LAUNCHER = "/fake/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh";
 
 const NO_DESKTOP = Object.freeze({
   status: "not-found",
@@ -38,15 +38,8 @@ const NO_DESKTOP = Object.freeze({
 // operation-mode re-resolution finds the injected command and web applies.
 const NO_WEB_COMMAND = Object.freeze({ commandInfo: null, dshCommand: false });
 
-function desktopFound(staticVersion = null) {
-  return {
-    status: "found",
-    appRoot: "/fake/DeepSeek Harness.app",
-    launcherPath: LAUNCHER,
-    staticVersion,
-    checkedPaths: [LAUNCHER],
-    reason: null,
-  };
+function desktopFound(harness, staticVersion = null) {
+  return platformDesktopFound(harness.root, staticVersion);
 }
 
 function writeJson(filePath, value) {
@@ -221,7 +214,7 @@ test("only desktop is installed and uninstalled without a web manual command", a
   const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
     ...NO_WEB_COMMAND,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(installed.status, "ok");
   assert.strictEqual(installed.manualCommand, undefined);
@@ -231,7 +224,7 @@ test("only desktop is installed and uninstalled without a web manual command", a
   const removed = await uninstallDeepSeekHarnessBridge(orchOptions(harness, cli, {
     ...NO_WEB_COMMAND,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(removed.status, "ok");
   assert.strictEqual(removed.registrationRemoved, true);
@@ -262,7 +255,7 @@ test("a found but uninitialized desktop is skipped with an open-once hint", asyn
   const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
     ...NO_WEB_COMMAND,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(result.status, "skipped");
   assert.strictEqual(result.reason, "no-applicable-target");
@@ -275,7 +268,7 @@ test("one success and one failure reports ok with a desktop warning", async (t) 
   writeProfileManifest(harness, "web");
   const cli = makeCli(harness);
   const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
-    desktopDiscovery: desktopFound("0.9.0"),
+    desktopDiscovery: desktopFound(harness, "0.9.0"),
   }));
   assert.strictEqual(result.status, "ok");
   assert.ok(result.warnings.some((line) => line.startsWith("desktop:")));
@@ -286,9 +279,9 @@ test("two healthy targets report ok without an update", async (t) => {
   writeProfileManifest(harness, "web");
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound(harness) }));
   const callsAfterFirst = cli.calls.length;
-  const second = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  const second = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound(harness) }));
   assert.strictEqual(second.status, "ok");
   assert.strictEqual(second.updated, false);
   assert.strictEqual(cli.calls.length, callsAfterFirst);
@@ -299,7 +292,7 @@ test("a failure plus a not-applicable target is an error, and all not-applicable
   writeProfileManifest(failureHarness, "web");
   const cli = makeCli(failureHarness);
   const failure = await installDeepSeekHarnessBridge(orchOptions(failureHarness, cli, {
-    desktopDiscovery: desktopFound("0.9.0"),
+    desktopDiscovery: desktopFound(failureHarness, "0.9.0"),
   }));
   assert.strictEqual(failure.status, "ok"); // web succeeded
 
@@ -327,7 +320,7 @@ test("desktop probe failures keep their three distinct reasons", async (t) => {
     const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
       env: { PATH: "" },
       dshVersion: undefined,
-      desktopDiscovery: desktopFound(),
+      desktopDiscovery: desktopFound(harness),
       runCommand: entry.runCommand,
     }));
     assert.strictEqual(result.status, "error");
@@ -368,7 +361,7 @@ test("startup sync reports a disabled desktop plugin and changes nothing", async
     operation: "startup-sync",
     clawdVersion: "9.9.9",
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(result.status, "error");
   assert.strictEqual(result.reason, "plugin-disabled-in-dsh");
@@ -434,11 +427,11 @@ test("uninstall reports false when the registration is owned but removal failed"
   writeProfileManifest(harness, "web");
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound(harness) }));
   const failing = makeCli(harness);
   const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, failing, {
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     runDshCommand: async (args) => (args[2] === "desktop"
       ? { code: 1, stderr: "desktop remove denied" }
       : failing.runDshCommand(args)),
@@ -464,7 +457,7 @@ test("a desktop registration keeps its evidence when the app is gone", async (t)
   const harness = makeHarness(t);
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { ...NO_WEB_COMMAND, env: { PATH: "" }, desktopDiscovery: desktopFound() }));
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { ...NO_WEB_COMMAND, env: { PATH: "" }, desktopDiscovery: desktopFound(harness) }));
   const callsAfterInstall = cli.calls.length;
   const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, cli, {
     ...NO_WEB_COMMAND,
@@ -498,7 +491,7 @@ test("a registration restored under the lock cannot be reported as removed", asy
         if (changed) return;
         changed = true;
         writeJson(profileManifestPath, registered);
-        fs.symlinkSync(installed.generation, packageDir(harness.dshHome, "web"), "dir");
+        symlinkDir(installed.generation, packageDir(harness.dshHome, "web"));
       },
     },
   }));
@@ -656,7 +649,7 @@ test("uninstall reports error when a formerly not-applicable side gains a regist
         manifest.dsh.profile.bundles = ["@deepseek-ai/dsh-base", BRIDGE_PACKAGE_NAME];
         writeJson(desktopManifestPath, manifest);
         fs.mkdirSync(path.dirname(desktopLocal), { recursive: true });
-        fs.symlinkSync(installed.generation, desktopLocal, "dir");
+        symlinkDir(installed.generation, desktopLocal);
       },
     },
   }));
@@ -671,20 +664,20 @@ test("uninstall re-reads web after the desktop flow finishes", async (t) => {
   writeProfileManifest(harness, "web");
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound(harness) }));
   const webManifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
   const savedWeb = readJson(webManifestPath);
   const webLocal = packageDir(harness.dshHome, "web");
   let locks = 0;
   const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness), {
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     __testMutationLockHooks: {
       beforeOwnerWrite: async () => {
         locks += 1;
         if (locks !== 2) return; // desktop's lock, after web already ran
         writeJson(webManifestPath, savedWeb);
         fs.mkdirSync(path.dirname(webLocal), { recursive: true });
-        fs.symlinkSync(installed.generation, webLocal, "dir");
+        symlinkDir(installed.generation, webLocal);
       },
     },
   }));
@@ -698,7 +691,7 @@ test("a skipped side that reappears is reported as uninstall-unconfirmed", async
   writeProfileManifest(harness, "web");
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound() }));
+  const installed = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { desktopDiscovery: desktopFound(harness) }));
   // web unregisters as skipped (empty profile); desktop still runs.
   const webManifestPath = path.join(harness.dshHome, "profiles", "web", "package.json");
   const savedWeb = readJson(webManifestPath);
@@ -710,14 +703,14 @@ test("a skipped side that reappears is reported as uninstall-unconfirmed", async
 
   let locks = 0;
   const result = await uninstallDeepSeekHarnessBridge(orchOptions(harness, makeCli(harness), {
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     __testMutationLockHooks: {
       beforeOwnerWrite: async () => {
         locks += 1;
         if (locks !== 2) return; // desktop's lock, after web already ran
         writeJson(webManifestPath, savedWeb);
         fs.mkdirSync(path.dirname(packageDir(harness.dshHome, "web")), { recursive: true });
-        fs.symlinkSync(installed.generation, packageDir(harness.dshHome, "web"), "dir");
+        symlinkDir(installed.generation, packageDir(harness.dshHome, "web"));
       },
     },
   }));
@@ -864,7 +857,7 @@ test("two same-family profiles share one generation and verify their own version
   const cli = makeCli(harness);
   const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
     dshVersion: undefined,
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     runCommand: async (command) => ({
       code: 0,
       stdout: command === "dsh" ? "0.2.0-rc.2" : "0.2.1",
@@ -893,7 +886,7 @@ test("a desktop install never clears the web manual reference", async (t) => {
   writeProfileManifest(harness, "desktop");
   const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
     dshInstallRoot: unsupportedRoot,
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   // web is version-unsupported and not run, so only desktop changed.
   assert.strictEqual(result.targets.web.role, "diagnose");
@@ -910,7 +903,7 @@ test("a first desktop install carries firstInstall without restartRequired", asy
   const cli = makeCli(harness);
   const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(result.firstInstall, true);
   assert.strictEqual(result.restartRequired, false);
@@ -921,7 +914,7 @@ test("a desktop generation change carries restartRequired without firstInstall",
   const harness = makeHarness(t);
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { env: { PATH: "" }, desktopDiscovery: desktopFound() }));
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { env: { PATH: "" }, desktopDiscovery: desktopFound(harness) }));
   const alternateSource = path.join(harness.root, "alternate-source");
   fs.cpSync(SOURCE_DIR, alternateSource, { recursive: true });
   fs.appendFileSync(path.join(alternateSource, "lib", "index.js"), "\n// alternate\n", "utf8");
@@ -929,7 +922,7 @@ test("a desktop generation change carries restartRequired without firstInstall",
     env: { PATH: "" },
     sourceDir: alternateSource,
     operation: "explicit-repair",
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(result.firstInstall, false);
   assert.strictEqual(result.restartRequired, true);
@@ -939,8 +932,8 @@ test("a repeated desktop install carries neither notice flag", async (t) => {
   const harness = makeHarness(t);
   writeProfileManifest(harness, "desktop");
   const cli = makeCli(harness);
-  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { env: { PATH: "" }, desktopDiscovery: desktopFound() }));
-  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { env: { PATH: "" }, desktopDiscovery: desktopFound() }));
+  await installDeepSeekHarnessBridge(orchOptions(harness, cli, { env: { PATH: "" }, desktopDiscovery: desktopFound(harness) }));
+  const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, { env: { PATH: "" }, desktopDiscovery: desktopFound(harness) }));
   assert.strictEqual(result.updated, false);
   assert.strictEqual(result.firstInstall, undefined);
   assert.strictEqual(result.restartRequired, undefined);
@@ -954,7 +947,7 @@ test("a throwing target does not stop the other target", async (t) => {
   // Seed a web manual reference so the web flow reaches its clear step.
   await installDeepSeekHarnessBridge(orchOptions(harness, cli, { commandInfo: null, dshCommand: false }));
   const result = await installDeepSeekHarnessBridge(orchOptions(harness, cli, {
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     __testManualGenerationReferenceHooks: {
       beforeClearMove() {
         throw new Error("web exploded");
@@ -1107,7 +1100,11 @@ function loginShellOptions(harness, cli, dshPath, overrides = {}) {
   });
 }
 
-test("operation mode finds a login-shell dsh and initializes a missing web profile", async (t) => {
+// Login-shell command discovery only exists on POSIX; win32 resolves dsh with
+// where.exe, so this scenario has no Windows equivalent.
+test("operation mode finds a login-shell dsh and initializes a missing web profile", {
+  skip: process.platform === "win32",
+}, async (t) => {
   const harness = makeHarness(t);
   const cli = makeCli(harness);
   const dshPath = makeLoginShellDsh(harness);
@@ -1118,7 +1115,9 @@ test("operation mode finds a login-shell dsh and initializes a missing web profi
   assert.ok(dependencyPath(harness, "web"));
 });
 
-test("operation mode finds a login-shell dsh with an existing web manifest", async (t) => {
+test("operation mode finds a login-shell dsh with an existing web manifest", {
+  skip: process.platform === "win32",
+}, async (t) => {
   const harness = makeHarness(t);
   writeProfileManifest(harness, "web");
   const cli = makeCli(harness);
@@ -1144,7 +1143,7 @@ test("a desktop success keeps web's manual command on the top-level ok result", 
     commandInfo: null,
     dshCommand: false,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
   }));
   assert.strictEqual(result.status, "ok");
   assert.ok(result.manualCommand);

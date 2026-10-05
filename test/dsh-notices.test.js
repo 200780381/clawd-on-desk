@@ -22,6 +22,7 @@ const {
   readDeepSeekHarnessNotices,
   acknowledgeDeepSeekHarnessNotice,
 } = require("../hooks/dsh-install");
+const { desktopFound: platformDesktopFound, symlinkDir } = require("./dsh-desktop-fixtures");
 
 const SOURCE_DIR = path.join(__dirname, "..", "hooks", "dsh-clawd-bridge");
 const FAMILY = DSH_VERSION_FAMILIES[0];
@@ -36,15 +37,8 @@ const NO_DESKTOP = Object.freeze({
   reason: null,
 });
 
-function desktopFound() {
-  return {
-    status: "found",
-    appRoot: "/fake/DeepSeek Harness.app",
-    launcherPath: "/fake/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
-    staticVersion: null,
-    checkedPaths: [],
-    reason: null,
-  };
+function desktopFound(harness) {
+  return platformDesktopFound(harness.root);
 }
 
 function writeJson(filePath, value) {
@@ -145,7 +139,7 @@ function desktopOptions(harness, cli, overrides = {}) {
     commandInfo: null,
     dshCommand: false,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     ...overrides,
   });
 }
@@ -449,10 +443,10 @@ test("an install writes a first-install notice for desktop and the uninstall cle
   const harness = makeHarness(t);
   writeProfile(harness, "desktop");
   await installDeepSeekHarnessBridge(desktopOptions(harness, makeCli(harness)));
-  const state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound() });
+  const state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound(harness) });
   assert.ok(state.desktop.some((n) => n.kind === "first-install"));
   await uninstallDeepSeekHarnessBridge(desktopOptions(harness, makeCli(harness)));
-  const after = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound() });
+  const after = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound(harness) });
   assert.deepStrictEqual(after.desktop, []);
 });
 
@@ -525,7 +519,7 @@ test("a confirmed manual web removal clears the side's notices without a CLI", a
       const target = packageDir(harness.dshHome, profile);
       fs.rmSync(target, { recursive: true, force: true });
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.symlinkSync(args[4], target, "dir");
+      symlinkDir(args[4], target);
       return { code: 0 };
     },
   };
@@ -667,19 +661,19 @@ test("both profiles install, change generation, and clear on uninstall", async (
   writeProfile(harness, "web");
   writeProfile(harness, "desktop");
   const cli = makeCli(harness);
-  const both = { desktopDiscovery: desktopFound() };
+  const both = { desktopDiscovery: desktopFound(harness) };
 
   await installDeepSeekHarnessBridge(orchOptions(harness, cli, both));
 
   // A new source replaces the previous generation on both profiles.
   await installDeepSeekHarnessBridge(orchOptions(harness, cli, { ...both, sourceDir: updatedSource(harness, "updated") }));
-  let state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound() });
+  let state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound(harness) });
   const restarts = state.desktop.filter((n) => n.kind === "restart-required");
   assert.strictEqual(restarts.length, 1);
   assert.strictEqual(state.web.some((n) => n.kind === "manual-command"), false);
 
   await uninstallDeepSeekHarnessBridge(orchOptions(harness, cli, both));
-  state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound() });
+  state = await readDeepSeekHarnessNotices({ dshHome: harness.dshHome, managedRoot: harness.managedRoot, desktopDiscovery: desktopFound(harness) });
   assert.deepStrictEqual(state.web, []);
   assert.deepStrictEqual(state.desktop, []);
 });

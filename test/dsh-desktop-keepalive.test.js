@@ -15,6 +15,7 @@ const {
   inspectDeepSeekHarnessDiskSync,
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
+const { desktopFound: platformDesktopFound, symlinkDir } = require("./dsh-desktop-fixtures");
 
 const SOURCE_DIR = path.join(__dirname, "..", "hooks", "dsh-clawd-bridge");
 const FAMILY = DSH_VERSION_FAMILIES[0];
@@ -30,15 +31,8 @@ const NO_DESKTOP = Object.freeze({
   reason: null,
 });
 
-function desktopFound() {
-  return {
-    status: "found",
-    appRoot: "/fake/DeepSeek Harness.app",
-    launcherPath: "/fake/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
-    staticVersion: null,
-    checkedPaths: [],
-    reason: null,
-  };
+function desktopFound(harness) {
+  return platformDesktopFound(harness.root);
 }
 
 function writeJson(filePath, value) {
@@ -218,7 +212,7 @@ function desktopOptions(harness, cli, overrides = {}) {
     commandInfo: null,
     dshCommand: false,
     env: { PATH: "" },
-    desktopDiscovery: desktopFound(),
+    desktopDiscovery: desktopFound(harness),
     ...overrides,
   });
 }
@@ -299,7 +293,7 @@ test("a symlinked profile directory pauses cleanup", async (t) => {
   const realDesktop = path.join(harness.root, "real-desktop");
   fs.mkdirSync(path.join(realDesktop, "node_modules"), { recursive: true });
   fs.mkdirSync(path.join(harness.dshHome, "profiles"), { recursive: true });
-  fs.symlinkSync(realDesktop, path.join(harness.dshHome, "profiles", "desktop"), "dir");
+  symlinkDir(realDesktop, path.join(harness.dshHome, "profiles", "desktop"));
   const result = await installWeb(harness);
   assert.strictEqual(result.status, "ok");
   assert.strictEqual(fs.existsSync(stray), true);
@@ -341,8 +335,8 @@ test("a desktop profile symlink keeps its generation referenced", async (t) => {
   const link = path.join(realDesktop, "node_modules", "@dsh-external", "dsh-clawd-bridge");
   fs.mkdirSync(path.dirname(link), { recursive: true });
   fs.mkdirSync(path.join(harness.dshHome, "profiles"), { recursive: true });
-  fs.symlinkSync(generation, link, "dir");
-  fs.symlinkSync(realDesktop, path.join(harness.dshHome, "profiles", "desktop"), "dir");
+  symlinkDir(generation, link);
+  symlinkDir(realDesktop, path.join(harness.dshHome, "profiles", "desktop"));
   const referenced = await dshInstallTest.isGenerationReferenced(generation, {
     dshHome: harness.dshHome,
     managedRoot: harness.managedRoot,
@@ -540,7 +534,7 @@ test("an inspection-record lstat error makes disk health inspection-required", a
     managedRoot: harness.managedRoot,
     profile: "web",
     dshInstallRoot: null,
-    platform: "darwin",
+    platform: process.platform,
   });
   assert.strictEqual(health.status, "inspection-required");
   assert.strictEqual(health.inspectionLatch.reason, "inspection-latch-unreadable");
@@ -560,7 +554,7 @@ test("a symlinked inspection record makes disk health inspection-required", asyn
     managedRoot: harness.managedRoot,
     profile: "web",
     dshInstallRoot: null,
-    platform: "darwin",
+    platform: process.platform,
   });
   assert.strictEqual(health.status, "inspection-required");
   assert.strictEqual(health.inspectionLatch.invalid, true);

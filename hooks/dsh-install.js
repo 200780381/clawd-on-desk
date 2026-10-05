@@ -3789,6 +3789,18 @@ async function clearRepairResidualLink(health, options = {}) {
 // else (bad JSON, foreign owner, unreadable, symlink/non-file) is an anomaly a
 // fresh generation must not silently decide for.
 async function inspectRepairTargetMarker(generationDir) {
+  // Look at the target directory itself before its marker. A path below a
+  // non-directory is ENOENT on Windows and ENOTDIR on POSIX, so a marker-only
+  // lookup would read a file-shaped target as "record is stale" on Windows and
+  // silently fall back to a fresh generation. Only a directory can hold a
+  // marker; a file, symlink or junction is an anomaly.
+  let dirStat;
+  try {
+    dirStat = await fsp.lstat(generationDir);
+  } catch (err) {
+    return err && err.code === "ENOENT" ? "missing" : "unreadable";
+  }
+  if (!dirStat.isDirectory()) return "invalid";
   const markerPath = path.join(generationDir, MANIFEST_FILE);
   let stat;
   try {

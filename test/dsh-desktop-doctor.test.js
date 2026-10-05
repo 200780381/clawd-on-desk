@@ -136,7 +136,7 @@ function runDsh(harness, options = {}) {
   const hasDesktopInjection = Object.prototype.hasOwnProperty.call(options, "dshDesktopDiscovery");
   return checkAgentIntegrations({
     fs: options.fs || fs,
-    platform: options.platform || "darwin",
+    platform: options.platform || process.platform,
     env: options.env || {},
     homeDir: harness.homeDir,
     prefs: { agents: { "deepseek-harness": { integrationInstalled: true, enabled: true } } },

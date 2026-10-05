@@ -18,19 +18,10 @@ const {
   resolveDshTargets,
 } = require("../hooks/dsh-install");
 const { __test: dshInstallTest } = require("../hooks/dsh-install");
+const { desktopFound: platformDesktopFound, DSH_CMD_TEMPLATE } = require("./dsh-desktop-fixtures");
 
 const FAMILY_VERSION = DSH_VERSION_FAMILIES[0].minVersion;
 const SOURCE_DIR = path.join(__dirname, "..", "hooks", "dsh-clawd-bridge");
-
-// A copy of the one recognized upstream apps/desktop/cli/dsh.cmd, kept here so
-// the tests do not read the constant the code under test compares against.
-const DSH_CMD_TEMPLATE = [
-  "@echo off",
-  "setlocal DisableDelayedExpansion",
-  'set "ELECTRON_RUN_AS_NODE=1"',
-  '"%~dp0..\\..\\..\\..\\DeepSeek Harness.exe" --expose-internals "%~dp0..\\..\\..\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" %*',
-  "exit /b %errorlevel%",
-];
 
 const WIN_BIN = "D:\\软件\\DeepSeek Harness\\resources\\runtime\\cli\\bin";
 const WIN_CMD = `${WIN_BIN}\\dsh.cmd`;
@@ -1095,7 +1086,6 @@ test("an ambiguous desktop install is diagnosed and not probed", async (t) => {
 test("a mutable desktop target with an available carrier is probed", async (t) => {
   const env = makeHome(t);
   writeProfile(env.dshHome, "desktop");
-  const launcher = path.join(env.root, "DeepSeek Harness.app", "Contents", "Resources", "runtime", "cli", "bin", "dsh");
   let probed = false;
   const result = await resolveDshTargets({
     dshHome: env.dshHome,
@@ -1103,14 +1093,7 @@ test("a mutable desktop target with an available carrier is probed", async (t) =
     sourceDir: SOURCE_DIR,
     dshInstallRoot: null,
     env: { PATH: "" },
-    desktopDiscovery: {
-      status: "found",
-      appRoot: path.dirname(path.dirname(path.dirname(path.dirname(launcher)))),
-      launcherPath: launcher,
-      staticVersion: null,
-      checkedPaths: [launcher],
-      reason: null,
-    },
+    desktopDiscovery: platformDesktopFound(env.root),
     runCommand: async (_command, args) => {
       probed = args.includes("--version");
       return { code: 0, stdout: `${FAMILY_VERSION}\n` };
