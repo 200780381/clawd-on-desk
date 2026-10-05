@@ -17,6 +17,15 @@ const HOOK = path.resolve(__dirname, "..", "hooks", "workbuddy-hook.js");
 const RAW_ID = "workbuddy-notification-fixture";
 const SID = makeSessionKey({ profileId: "local", rawSessionId: RAW_ID });
 
+async function waitFor(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail("timed out waiting for the real session transition");
+}
+
 function createFixture(t) {
   const harness = createSpawnedHookHarness({ prefix: "wb-notification-" });
   const sounds = [];
@@ -94,15 +103,14 @@ describe("WorkBuddy native idle notifications", () => {
   });
 
   it("keeps a completed HUD row after the native 60-second idle reminder and starts the next turn", async (t) => {
-    t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"] });
     const f = createFixture(t);
     await f.dispatch("UserPromptSubmit");
     await f.dispatch("PreToolUse");
     await f.dispatch("PostToolUse");
     await f.dispatch("Stop");
+    await waitFor(() => f.snapshot().badge === "done");
     assert.equal(f.snapshot().badge, "done");
     const before = { ...f.api.sessions.get(SID) };
-    t.mock.timers.tick(60000);
     f.sounds.length = 0;
     await f.dispatch("Notification", { notification_type: "idle_prompt", message: "CodeBuddy is waiting for your input" });
     const after = f.api.sessions.get(SID);
