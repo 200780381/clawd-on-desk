@@ -784,6 +784,23 @@ function computeQueueCommitDeadline(existingDeadline, now, timeoutMs = QUEUE_COM
   return startedAt + timeout;
 }
 
+// Only the permission queue payload (buildQueuePayload) uses this to label a
+// session; it lives at module scope so the __test export can reach it.
+function queueAgentLabel(entry) {
+  const id = String((entry && entry.agentId) || "claude-code");
+  const labels = {
+    "claude-code": "Claude Code",
+    codebuddy: "CodeBuddy",
+    codex: "Codex",
+    "qwen-code": "Qwen Code",
+    zcode: "ZCode",
+    "copilot-cli": "Copilot CLI",
+    hermes: "Hermes",
+    "deepseek-harness": "DeepSeek Harness",
+  };
+  return labels[id] || id;
+}
+
 module.exports = function initPermission(ctx) {
 
 // Bound to ctx.lang (a live getter), so a runtime language switch is picked up
@@ -1499,21 +1516,6 @@ function queueSessionLabel(entry) {
   if (folder) return truncate(folder, 80);
   const id = String((entry && entry.sessionId) || "");
   return id ? `#${id.slice(-3)}` : "";
-}
-
-function queueAgentLabel(entry) {
-  const id = String((entry && entry.agentId) || "claude-code");
-  const labels = {
-    "claude-code": "Claude Code",
-    codebuddy: "CodeBuddy",
-    codex: "Codex",
-    "qwen-code": "Qwen Code",
-    zcode: "ZCode",
-    "copilot-cli": "Copilot CLI",
-    hermes: "Hermes",
-    dsh: "DeepSeek Harness",
-  };
-  return labels[id] || id;
 }
 
 function isSwitchingLocked() {
@@ -5455,4 +5457,5 @@ module.exports.__test = {
   areBubbleBoundsSafe,
   stackHeightForSizes,
   computeQueueCommitDeadline,
+  queueAgentLabel,
 };
