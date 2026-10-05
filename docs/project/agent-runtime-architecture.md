@@ -163,6 +163,8 @@ WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
   Hook 注册到当前 WorkBuddy AI 的 ~/.workbuddy-ai/settings.json（旧版兼容 ~/.workbuddy/settings.json）。集成为 state + Notification only：不注册 PermissionRequest HTTP hook，
   审批始终由 WorkBuddy 原生沙箱与 GUI 处理；无 session_id 的事件在返回合法 stdout 后直接丢弃，不进入 /state。
 
+  WorkBuddy's native `Notification` subtype `idle_prompt` is acknowledged with `{}` locally, before process resolution or HTTP delivery. The native runner emits this reminder after 60 seconds of idle time, including after a completed turn; it must not replace the completed HUD row with Waiting or refresh session activity. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
+
 Qoder 会话标题（本机、state-only）：
   Hook 转发显式标题与 transcript 路径，保持 stdout 为 `{}` 和原生权限流程不变。
   `agent-runtime-main` 先接受生命周期，再让 `qoder-session-title` 对 SessionStart /
