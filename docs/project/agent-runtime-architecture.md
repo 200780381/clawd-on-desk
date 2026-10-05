@@ -8,7 +8,17 @@ inputs, responses and process probes. `src/claude-tool-phase.js` keeps a bounded
 in-memory main-session ledger; `/state` observes it before permission cleanup and
 passes its internal decision to `state.js` without consuming the event twice.
 Direct state callers use the same arbiter before completion timers, recap and
-session mutation. Missing correlation keeps the legacy mapping. A batch cannot
+session mutation. Only the batch hint is rejected wholesale. A non-retired
+prompt id on an ordinary tool hook can establish a queued turn without Submit;
+multiple Submit messages under one id retain normal message handling and the
+existing tool evidence. Fresh identified tools after Stop reopen a continuation,
+while SessionEnd always disposes the session independently of prompt identity.
+Proven retired hooks and settled success tails can annotate existing title/model/
+context metadata without changing phase or liveness. Their exact permission
+matches still clean up; retired events cannot use singleton or plan fallbacks
+against a newer request. A current failure racing behind its batch preserves the
+logical model phase while playing the normal error cue, then resumes thinking.
+Missing correlation keeps the legacy mapping. A batch cannot
 replace pending approvals or live subagent cues, and its recovery/history
 classification is intentionally empty so a delayed phase hint never reopens a
 durable record. This does not add durable fencing to existing Pre/Post writers.

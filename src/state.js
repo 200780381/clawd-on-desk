@@ -1998,6 +1998,19 @@ function observeClaudeToolPhase(sessionId, event, opts = {}) {
 }
 
 function updateSession(sessionId, state, event, opts = {}) {
+  // The ledger gates the new batch hint, not ordinary message/lifecycle work.
+  // Proven old tools may annotate existing metadata without changing phase,
+  // completion timers, acknowledgement, history or activity freshness.
+  const phase = opts.claudeToolPhaseDecision || observeClaudeToolPhase(sessionId, event, opts);
+  if (!phase.accept) return false;
+  if (phase.preservePhase && !phase.errorCue) return updateSessionMetadata(sessionId, {
+    expectedAgentId: "claude-code", contextUsage: opts.contextUsage,
+    contextUsageOrigin: opts.contextUsageOrigin, sessionTitle: opts.sessionTitle, model: opts.model,
+  });
+  // A result racing behind its accepted batch still reports a real failure.
+  // Keep the model phase as the logical resume state while the error cue runs.
+  if (phase.errorCue) opts = { ...opts, preserveState: true };
+  if (phase.thinking) state = "thinking";
   const suppliedRecapOccurredAt = opts && opts.recapOccurredAt;
   const recapTimestampTrusted = Number.isSafeInteger(suppliedRecapOccurredAt) && suppliedRecapOccurredAt >= 0;
   const recapOccurredAt = recapTimestampTrusted
@@ -2066,11 +2079,6 @@ function updateSession(sessionId, state, event, opts = {}) {
     recapSuppressed = false,
     replaceProcessMetadata = false,
   } = opts;
-  // HTTP ingress checks this before permission cleanup; direct callers use
-  // the same arbiter here. The decision is internal and never read from wire.
-  const phase = opts.claudeToolPhaseDecision || observeClaudeToolPhase(sessionId, event, opts);
-  if (!phase.accept) return false;
-  if (phase.thinking) state = "thinking";
   if (startupRecoveryActive) {
     startupRecoveryActive = false;
     if (startupRecoveryTimer) { clearTimeout(startupRecoveryTimer); startupRecoveryTimer = null; }

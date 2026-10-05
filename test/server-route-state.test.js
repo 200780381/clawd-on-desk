@@ -62,7 +62,7 @@ function acceptedMetadataSpy(calls) {
   };
 }
 
-function makeMetadataStateRuntime() {
+function makeMetadataStateRuntime(overrides = {}) {
   const ctx = {
     lang: "en",
     theme: metadataContractTheme,
@@ -83,6 +83,7 @@ function makeMetadataStateRuntime() {
     pendingPermissions: [],
     processKill: () => { const err = new Error("dead"); err.code = "ESRCH"; throw err; },
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+    ...overrides,
   };
   return initState(ctx);
 }
@@ -93,6 +94,14 @@ function seedMetadataSession(api, sessionId) {
     agentId: "opencode",
     profileId: "local",
     rawSessionId: sessionId,
+  });
+}
+
+function makeClaudePhaseStateRuntime(overrides = {}) {
+  return makeMetadataStateRuntime({
+    theme: { ...metadataContractTheme,
+      timings: { ...metadataContractTheme.timings, minDisplay: {} } },
+    ...overrides,
   });
 }
 
@@ -236,7 +245,7 @@ describe("server-route-state POST", () => {
     assert.equal(res.calls.resolved.length, 0);
   });
 
-  it("rejects an old Claude Stop before it can sweep a newer prompt's permission", async () => {
+  it("preserves a newer Claude phase and permission when a retired Stop arrives", async () => {
     const api = makeMetadataStateRuntime();
     const sid = localSessionKey("batch-session");
     try {
@@ -248,11 +257,199 @@ describe("server-route-state POST", () => {
           pendingPermissions: [pending], observeClaudeToolPhase: api.observeClaudeToolPhase,
           updateSession: api.updateSession,
         } });
-      assert.equal(res.statusCode, 204);
+      assert.equal(res.statusCode, 200);
       assert.equal(res.calls.resolved.length, 0);
       assert.equal(api.sessions.get(sid).state, "thinking");
     } finally { api.cleanup(); }
   });
+  it("cleans only the exact retired Claude tool request while preserving a newer plan", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const sid = localSessionKey("retired-tool-cleanup");
+    try {
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "old" });
+      api.updateSession(sid, "working", "PreToolUse", { agentId: "claude-code", claudePromptId: "old", toolUseId: "old-tool" });
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "new" });
+      const oldRequest = { res: {}, sessionId: sid, agentId: "claude-code", toolUseId: "old-tool", toolName: "Read" };
+      const newPlan = makePlanPermission("retired-tool-cleanup");
+      const res = await callStatePost(JSON.stringify({ agent_id: "claude-code", session_id: "retired-tool-cleanup",
+        state: "working", event: "PostToolUse", prompt_id: "old", tool_use_id: "old-tool", tool_name: "Read" }), {
+        ctx: { sessions: api.sessions, pendingPermissions: [oldRequest, newPlan],
+          observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession },
+      });
+      assert.equal(res.calls.resolved.length, 1);
+      assert.strictEqual(res.calls.resolved[0].perm, oldRequest);
+      assert.equal(api.sessions.get(sid).state, "thinking");
+    } finally { api.cleanup(); }
+  });
+
+  it("cannot bypass retired Claude phase protection with a decorative SVG", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const sid = localSessionKey("retired-decorative");
+    try {
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "old" });
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "new" });
+      const res = await callStatePost(JSON.stringify({ agent_id: "claude-code", session_id: "retired-decorative",
+        state: "working", event: "PreToolUse", prompt_id: "old", svg: "x.svg", model: "metadata-model" }), {
+        ctx: { sessions: api.sessions, observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession },
+      });
+      assert.equal(res.calls.setState.length, 0);
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      assert.equal(api.sessions.get(sid).model, "metadata-model");
+    } finally { api.cleanup(); }
+  });
+
+  it("accepts a queued Claude turn with a new prompt id and no second UserPromptSubmit", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const rawId = "queued-claude-turn";
+    const sid = localSessionKey(rawId);
+    const post = (name, extra = {}) => {
+      const body = buildStateBody(name, { session_id: rawId, prompt_id: "original", ...extra },
+        () => ({ pid: null }));
+      assert.ok(body);
+      return callStatePost(JSON.stringify(body), { ctx: {
+        sessions: api.sessions, observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+    };
+    try {
+      await post("UserPromptSubmit");
+      await post("UserPromptSubmit");
+      await post("Stop");
+      const start = await post("PreToolUse", { prompt_id: "queued", tool_name: "Read", tool_use_id: "queued-tool" });
+      assert.equal(start.statusCode, 200);
+      assert.equal(api.sessions.get(sid).state, "working");
+      await post("PostToolUse", { prompt_id: "queued", tool_name: "Read", tool_use_id: "queued-tool" });
+      await post("PostToolBatch", { prompt_id: "queued", tool_calls: [{ tool_use_id: "queued-tool" }] });
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      await post("Stop", { prompt_id: "queued" });
+      await post("SessionEnd", { prompt_id: "queued" });
+      assert.equal(api.sessions.has(sid), false);
+    } finally { api.cleanup(); }
+  });
+
+  it("handles an additional same-prompt Claude message and resets its display hint and plan dialog", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const rawId = "same-prompt-message";
+    const sid = localSessionKey(rawId);
+    try {
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "same" });
+      api.updateSession(sid, "working", "PreToolUse", { agentId: "claude-code", claudePromptId: "same", toolUseId: "ongoing-tool" });
+      api.sessions.get(sid).displayHint = "code";
+      const pending = makePlanPermission(rawId);
+      const res = await callStatePost(JSON.stringify(buildStateBody("UserPromptSubmit",
+        { session_id: rawId, prompt_id: "same", prompt: "continue the fixture" }, () => ({ pid: null }))), { ctx: {
+        pendingPermissions: [pending], sessions: api.sessions,
+        observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.calls.resolved.length, 1);
+      assert.strictEqual(res.calls.resolved[0].perm, pending);
+      assert.equal(api.sessions.get(sid).displayHint, null);
+      assert.notEqual(api.updateSession(sid, "thinking", "PostToolBatch", {
+        agentId: "claude-code", claudePromptId: "same", batchToolUseIds: ["ongoing-tool"],
+      }), false);
+      assert.equal(api.sessions.get(sid).state, "thinking");
+    } finally { api.cleanup(); }
+  });
+
+  for (const batchFirst of [true, false]) {
+    it(`retains Claude tool failures and matching permission cleanup when batchFirst=${batchFirst}`, async () => {
+      const pendingPermissions = [];
+      const api = makeClaudePhaseStateRuntime({ pendingPermissions });
+      const rawId = "failed-batch";
+      const sid = localSessionKey(rawId);
+      const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+        { session_id: rawId, prompt_id: "failure-prompt", tool_use_id: "failed-tool", tool_name: "Read", ...extra },
+        () => ({ pid: null }))), { ctx: {
+        sessions: api.sessions, pendingPermissions,
+        observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      try {
+        await post("UserPromptSubmit");
+        await post("PreToolUse");
+        if (batchFirst) await post("PostToolBatch", { tool_calls: [{ tool_use_id: "failed-tool" }] });
+        const permission = { res: {}, sessionId: sid, agentId: "claude-code", toolUseId: "failed-tool", toolName: "Read" };
+        pendingPermissions.push(permission);
+        const failure = await post("PostToolUseFailure", { error: "fixture failure" });
+        assert.equal(failure.statusCode, 200);
+        assert.equal(api.getCurrentState(), "error");
+        if (batchFirst) assert.equal(api.sessions.get(sid).state, "thinking");
+        assert.equal(failure.calls.resolved.length, 1);
+        assert.strictEqual(failure.calls.resolved[0].perm, permission);
+        pendingPermissions.length = 0;
+        if (!batchFirst) {
+          await post("PostToolBatch", { tool_calls: [{ tool_use_id: "failed-tool" }] });
+          assert.equal(api.sessions.get(sid).state, "thinking");
+        }
+      } finally { api.cleanup(); }
+    });
+  }
+
+  for (const resultEvent of ["PostToolUse", "PostToolUseFailure"]) {
+    it(`registers fresh same-prompt Claude tools after a vetoed Stop, including ${resultEvent}`, async () => {
+      const api = makeClaudePhaseStateRuntime();
+      const rawId = "vetoed-stop-continuation";
+      const sid = localSessionKey(rawId);
+      const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+        { session_id: rawId, prompt_id: "continued", ...extra }, () => ({ pid: null }))), { ctx: {
+        sessions: api.sessions, observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      try {
+        await post("UserPromptSubmit");
+        await post("Stop", { stop_hook_active: true });
+        await post("PreToolUse", { tool_name: "Read", tool_use_id: "continued-tool" });
+        const result = await post(resultEvent, { tool_name: "Read", tool_use_id: "continued-tool", error: "fixture" });
+        assert.equal(result.statusCode, 200);
+        assert.equal(api.getCurrentState(), resultEvent === "PostToolUseFailure" ? "error" : "working");
+        await post("PostToolBatch", { tool_calls: [{ tool_use_id: "continued-tool" }] });
+        assert.equal(api.sessions.get(sid).state, "thinking");
+      } finally { api.cleanup(); }
+    });
+  }
+
+  it("treats Claude SessionEnd as authoritative even with a retired prompt id", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const sid = localSessionKey("end-with-retired-prompt");
+    try {
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "old" });
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "new" });
+      const pending = makePlanPermission("end-with-retired-prompt");
+      const res = await callStatePost(JSON.stringify({
+        agent_id: "claude-code", session_id: "end-with-retired-prompt", event: "SessionEnd", state: "idle", prompt_id: "old",
+      }), { ctx: {
+        pendingPermissions: [pending], sessions: api.sessions,
+        observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.calls.resolved.length, 1);
+      assert.equal(res.calls.resolved[0].behavior, "no-decision");
+      assert.equal(api.sessions.has(sid), false);
+    } finally { api.cleanup(); }
+  });
+
+  it("keeps settled Claude success tails metadata and exact permission cleanup without replacing thinking", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const sid = localSessionKey("settled-success-tail");
+    try {
+      const opts = { agentId: "claude-code", claudePromptId: "same", toolUseId: "settled-tool" };
+      api.updateSession(sid, "thinking", "UserPromptSubmit", opts);
+      api.updateSession(sid, "working", "PreToolUse", opts);
+      api.updateSession(sid, "thinking", "PostToolBatch", { ...opts, batchToolUseIds: ["settled-tool"] });
+      const before = api.sessions.get(sid).updatedAt;
+      const permission = { res: {}, sessionId: sid, agentId: "claude-code", toolUseId: "settled-tool", toolName: "Read" };
+      const res = await callStatePost(JSON.stringify({ agent_id: "claude-code", session_id: "settled-success-tail",
+        state: "working", event: "PostToolUse", prompt_id: "same", tool_use_id: "settled-tool",
+        tool_name: "Read", session_title: "native title", model: "fixture-model" }), { ctx: {
+        pendingPermissions: [permission], sessions: api.sessions,
+        observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      assert.equal(res.calls.resolved.length, 1);
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      assert.equal(api.sessions.get(sid).updatedAt, before);
+      assert.equal(api.sessions.get(sid).sessionTitle, "native title");
+      assert.equal(api.sessions.get(sid).model, "fixture-model");
+    } finally { api.cleanup(); }
+  });
+
   it("enforces DSH upstream sequence order across created, event, and disposed callbacks", async () => {
     const fence = createDshStateSequenceFence();
     const post = (event, state, sequence = {}) => callStatePost(JSON.stringify({

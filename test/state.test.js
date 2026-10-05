@@ -144,6 +144,25 @@ describe("Claude correlated batch phase", () => {
     assert.notEqual(api.sessions.get(sid).requiresCompletionAck, true, "a batch does not create a completed-turn acknowledgement");
     assert.ok(!sounds.some((args) => args.includes("happy")));
   });
+
+  for (const batchFirst of [true, false]) {
+    it(`plays the failure cue and resumes thinking with real theme holds when batchFirst=${batchFirst}`, (t) => {
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+      try {
+        event("UserPromptSubmit", "thinking");
+        event("PreToolUse", "working", { toolUseId: "failed-tool" });
+        if (batchFirst) event("PostToolBatch", "thinking", { batchToolUseIds: ["failed-tool"] });
+        event("PostToolUseFailure", "error", { toolUseId: "failed-tool" });
+        if (!batchFirst) event("PostToolBatch", "thinking", { batchToolUseIds: ["failed-tool"] });
+        t.mock.timers.tick(1000);
+        assert.equal(api.getCurrentState(), "error");
+        assert.equal(api.sessions.get(sid).state, "thinking");
+        t.mock.timers.tick(5000);
+        assert.equal(api.getCurrentState(), "thinking");
+        assert.equal(api.sessions.get(sid).requiresCompletionAck, undefined);
+      } finally { api.cleanup(); t.mock.timers.reset(); }
+    });
+  }
 });
 
 describe("optional mini peek states", () => {

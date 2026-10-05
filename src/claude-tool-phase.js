@@ -13,7 +13,8 @@ const TERMINAL_EVENTS = new Set(["Stop", "StopFailure", "ApiError", "SessionEnd"
 
 // A phase hint is weaker than permissions, completion, or subagent lifecycle.
 // This ledger only authorizes a main-session batch boundary; its caller owns
-// those stronger gates and must run this check before mutating any of them.
+// those stronger gates. Existing hooks are admitted normally; proven old
+// evidence may preserve the phase without dropping message/lifecycle handling.
 function createClaudeToolPhaseLedger(options = {}) {
   const maxSessions = Number.isSafeInteger(options.maxSessions) && options.maxSessions > 0
     ? Math.min(options.maxSessions, MAX_SESSIONS)
@@ -53,6 +54,10 @@ function createClaudeToolPhaseLedger(options = {}) {
     record.tools.clear();
   }
 
+  function preservePhase(reason, retired = false) {
+    return { accept: true, preservePhase: true, retired, reason };
+  }
+
   function observe(rawInput = {}) {
     const input = rawInput && typeof rawInput === "object" ? rawInput : {};
     const isBatch = input.event === "PostToolBatch";
@@ -75,22 +80,30 @@ function createClaudeToolPhaseLedger(options = {}) {
     }
     const promptId = normalizeIdentity(input.promptId);
     let record = records.get(sessionId);
-    if (!record && (isPrompt || (isTerminal && promptId))) {
+    if (!record && (isPrompt || (promptId && (isPre || isPost || isTerminal)))) {
       record = makeRecord();
-      if (isTerminal) record.promptId = promptId;
     }
     if (!record) return { accept: !isBatch, reason: "no-ledger" };
     touch(sessionId, record);
 
+    // SessionEnd disposes the session, not a prompt. A final packet can carry
+    // an older prompt identity and must still reach lifecycle/permission cleanup.
+    if (event === "SessionEnd") {
+      retireCurrent(record, false);
+      record.open = false;
+      record.unconfirmable = true;
+      return { accept: true, reason: "session-end" };
+    }
     if (promptId && record.retiredPromptIds.has(promptId)) {
-      return { accept: false, reason: "retired-prompt" };
+      return isBatch ? { accept: false, reason: "retired-prompt" }
+        : preservePhase("retired-prompt", true);
     }
     if (isPrompt) {
-      // A duplicated async prompt callback must not discard tools already
-      // observed for that exact prompt, overwrite working with thinking, or
-      // reopen a completed turn.
+      // prompt_id identifies a query loop, not an individual message. Claude
+      // can emit multiple genuine UserPromptSubmit events under the same id.
+      // Keep the tool evidence, but let normal message handling run.
       if (promptId && promptId === record.promptId) {
-        return { accept: false, reason: record.open ? "duplicate-prompt" : "closed-prompt" };
+        return { accept: true, reason: "same-prompt-message" };
       }
       retireCurrent(record);
       record.promptId = promptId;
@@ -98,12 +111,18 @@ function createClaudeToolPhaseLedger(options = {}) {
       record.unconfirmable = !promptId;
       return { accept: true, reason: "new-prompt" };
     }
-    if (promptId && record.promptId && promptId !== record.promptId) {
-      return { accept: false, reason: "different-prompt" };
-    }
     const toolUseId = normalizeIdentity(input.toolUseId);
     if ((isPre || isPost) && toolUseId && record.retiredToolIds.has(toolUseId)) {
-      return { accept: false, reason: "retired-tool" };
+      return preservePhase("retired-tool", true);
+    }
+    // A queued message can acquire a new prompt id without another Submit
+    // hook. Only ordinary evidence can establish that turn; a batch itself
+    // must never replace the current ledger or invent its tool starts.
+    if (!isBatch && promptId && promptId !== record.promptId) {
+      retireCurrent(record);
+      record.promptId = promptId;
+      record.open = true;
+      record.unconfirmable = false;
     }
     if (!record.promptId && !isBatch) {
       return { accept: true, reason: "legacy-uncorrelated-turn" };
@@ -143,12 +162,22 @@ function createClaudeToolPhaseLedger(options = {}) {
 
     const knownTool = toolUseId ? record.tools.get(toolUseId) : null;
     if (knownTool && knownTool.batchSettled) {
-      return { accept: false, reason: "settled-tool-tail" };
+      // Async batch and result hooks can arrive in either order. A current
+      // failure still owns its normal error cue and permission cleanup.
+      return event === "PostToolUseFailure"
+        ? { accept: true, preservePhase: true, errorCue: true, reason: "settled-tool-failure" }
+        : preservePhase("settled-tool-tail");
     }
     if (!record.open) {
-      // A fresh PreToolUse can follow a vetoed Stop without a new prompt.
-      // Preserve that legacy continuation, but do not infer a new phase turn.
-      return { accept: isPre || !promptId, reason: "closed-turn" };
+      // A vetoed Stop resumes the same query loop with no new Submit. Fresh,
+      // identified tool starts reopen and register that continuation. Unknown
+      // results retain legacy behavior but cannot prove a batch boundary.
+      if (isPre && promptId && toolUseId) {
+        record.open = true;
+        record.unconfirmable = false;
+      } else {
+        return { accept: true, reason: "closed-turn" };
+      }
     }
     if (!promptId || !record.promptId || !toolUseId) {
       record.unconfirmable = true;

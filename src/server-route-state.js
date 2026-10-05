@@ -912,6 +912,7 @@ function handleStatePost(req, res, options) {
           res.end();
           return;
         }
+        const isRetiredClaudePhase = !!(claudeToolPhaseDecision && claudeToolPhaseDecision.retired);
         const stateEventInteraction = classifyPermissionInteraction({
           agentId,
           toolName,
@@ -969,7 +970,7 @@ function handleStatePost(req, res, options) {
             toolName,
             toolUseId,
             toolInputFingerprint,
-            allowSingletonFallback: event === "Stop",
+            allowSingletonFallback: event === "Stop" && !isRetiredClaudePhase,
           });
           if (perm) {
             ctx.resolvePermissionEntry(perm, stateSweepBehaviorFor(perm), "User answered in terminal");
@@ -981,7 +982,7 @@ function handleStatePost(req, res, options) {
           // An exact match already identifies which decision completed. Do
           // not infer that a sibling decision from the same session/subagent
           // also completed — concurrent questions can legitimately coexist.
-          if (!perm || !isDecisionInteraction(perm.interaction)) {
+          if (!isRetiredClaudePhase && (!perm || !isDecisionInteraction(perm.interaction))) {
             const staleDecisions = pendingForSource().filter((stale) => (
               stale !== perm && isDecisionInteraction(stale.interaction)
             ));
@@ -1010,7 +1011,7 @@ function handleStatePost(req, res, options) {
           ))) {
             ctx.resolvePermissionEntry(stale, "no-decision", "Session ended");
           }
-        } else if (hasExplicitPermissionLifecycleSession && (
+        } else if (hasExplicitPermissionLifecycleSession && !isRetiredClaudePhase && (
           event === "UserPromptSubmit"
           || (
             event === "PreToolUse"
@@ -1029,7 +1030,7 @@ function handleStatePost(req, res, options) {
         }
         recordRequestHookEvent.acceptedUnlessDnd(shouldDropForDnd());
         let sessionUpdateApplied = true;
-        if (svg) {
+        if (svg && !(claudeToolPhaseDecision && claudeToolPhaseDecision.preservePhase)) {
           const safeSvg = pathApi.basename(svg);
           ctx.setState(state, safeSvg);
         } else {
@@ -1101,7 +1102,7 @@ function handleStatePost(req, res, options) {
         // Decorative only: the lifecycle update above remains authoritative.
         // Main owns the opt-in / DND / visibility / mini / drag gate; a visual
         // failure must never turn a valid hook state POST into a 400.
-        if (testResult && typeof ctx.handleTestResult === "function") {
+        if (testResult && !isRetiredClaudePhase && typeof ctx.handleTestResult === "function") {
           try {
             ctx.handleTestResult(testResult, {
               sessionId: sid,

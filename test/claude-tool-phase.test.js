@@ -25,13 +25,19 @@ describe("Claude main-session tool phase", () => {
     assert.equal(batch(ledger, ["read-a", "read-b"]).thinking, true);
   });
 
-  it("accepts a batch before async individual results and drops their tails", () => {
+  it("preserves phase for settled success tails but admits current tool failures", () => {
     const ledger = createClaudeToolPhaseLedger();
     start(ledger, ["read-a", "read-b"]);
     assert.equal(batch(ledger, ["read-b", "read-a"]).thinking, true);
-    for (const eventName of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
-      assert.equal(ledger.observe(event(eventName, { toolUseId: "read-a" })).accept, false);
+    for (const eventName of ["PreToolUse", "PostToolUse"]) {
+      const decision = ledger.observe(event(eventName, { toolUseId: "read-a" }));
+      assert.equal(decision.accept, true);
+      assert.equal(decision.preservePhase, true);
     }
+    const failure = ledger.observe(event("PostToolUseFailure", { toolUseId: "read-a" }));
+    assert.equal(failure.accept, true);
+    assert.equal(failure.preservePhase, true);
+    assert.equal(failure.errorCue, true);
     assert.equal(batch(ledger, ["read-a", "read-b"]).accept, false);
   });
 
@@ -68,9 +74,11 @@ describe("Claude main-session tool phase", () => {
       start(ledger);
       assert.equal(ledger.observe(event(terminal)).accept, true);
       assert.equal(batch(ledger).accept, false);
-      assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "tool-a" })).accept, false);
-      assert.equal(ledger.observe(event("PostToolUseFailure", { toolUseId: "tool-a" })).accept, false);
-      assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "tool-a" })).accept, false);
+      for (const name of ["PostToolUse", "PostToolUseFailure", "PreToolUse"]) {
+        const decision = ledger.observe(event(name, { toolUseId: "tool-a" }));
+        assert.equal(decision.accept, true);
+        assert.equal(decision.preservePhase, true);
+      }
     });
   }
 
@@ -79,7 +87,10 @@ describe("Claude main-session tool phase", () => {
     start(ledger);
     ledger.observe(event("UserPromptSubmit", { promptId: "prompt-b" }));
     for (const eventName of ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]) {
-      assert.equal(ledger.observe(event(eventName, { toolUseId: "tool-a" })).accept, false);
+      const decision = ledger.observe(event(eventName, { toolUseId: "tool-a" }));
+      assert.equal(decision.accept, true);
+      assert.equal(decision.preservePhase, true);
+      assert.equal(decision.retired, true);
     }
     assert.equal(batch(ledger).accept, false);
     ledger.observe(event("PreToolUse", { promptId: "prompt-b", toolUseId: "tool-b" }));
@@ -90,17 +101,18 @@ describe("Claude main-session tool phase", () => {
     const ledger = createClaudeToolPhaseLedger();
     start(ledger);
     ledger.observe(event("UserPromptSubmit", { promptId: "prompt-b" }));
-    assert.equal(ledger.observe(event("PostToolUse", { promptId: null, toolUseId: "tool-a" })).accept, false);
+    assert.equal(ledger.observe(event("PostToolUse", { promptId: null, toolUseId: "tool-a" })).preservePhase, true);
     ledger.observe(event("PreToolUse", { promptId: "prompt-b", toolUseId: "tool-b" }));
     assert.equal(batch(ledger, ["tool-b"], { promptId: "prompt-b" }).thinking, true);
   });
 
-  it("keeps a fresh vetoed-Stop continuation legacy compatible without reviving its old phase", () => {
+  it("registers a fresh vetoed-Stop continuation under the same prompt", () => {
     const ledger = createClaudeToolPhaseLedger();
     start(ledger);
     ledger.observe(event("Stop"));
     assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "continuation-tool" })).accept, true);
-    assert.equal(batch(ledger, ["continuation-tool"]).accept, false);
+    assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "continuation-tool" })).accept, true);
+    assert.equal(batch(ledger, ["continuation-tool"]).thinking, true);
     ledger.observe(event("UserPromptSubmit", { promptId: "prompt-b" }));
     ledger.observe(event("PreToolUse", { promptId: "prompt-b", toolUseId: "next-turn-tool" }));
     assert.equal(batch(ledger, ["next-turn-tool"], { promptId: "prompt-b" }).thinking, true);
@@ -111,20 +123,21 @@ describe("Claude main-session tool phase", () => {
     start(ledger);
     assert.equal(ledger.observe(event("Stop", { promptId: null })).accept, true);
     assert.equal(batch(ledger).accept, false);
-    assert.equal(ledger.observe(event("PostToolUse", { promptId: null, toolUseId: "tool-a" })).accept, false);
+    assert.equal(ledger.observe(event("PostToolUse", { promptId: null, toolUseId: "tool-a" })).preservePhase, true);
     assert.equal(ledger.observe(event("PostToolUse", { promptId: null, toolUseId: null })).accept, true);
   });
 
-  it("does not reset a current ledger for duplicate prompts or reopen a closed prompt", () => {
+  it("admits additional same-prompt messages without resetting tools or reopening phase evidence", () => {
     const ledger = createClaudeToolPhaseLedger();
     start(ledger);
-    assert.equal(ledger.observe(event("UserPromptSubmit")).accept, false);
+    assert.equal(ledger.observe(event("UserPromptSubmit")).accept, true);
     assert.equal(batch(ledger).thinking, true);
     ledger.observe(event("Stop"));
-    assert.equal(ledger.observe(event("UserPromptSubmit")).accept, false);
+    assert.equal(ledger.observe(event("UserPromptSubmit")).accept, true);
+    assert.equal(batch(ledger).accept, false);
   });
 
-  it("does not let a duplicate prompt overwrite a later working tool phase", () => {
+  it("does not use prompt identity as a per-message duplicate key", () => {
     const ledger = createClaudeToolPhaseLedger();
     let displayedState = "idle";
     function apply(eventName, state, extra = {}) {
@@ -133,14 +146,14 @@ describe("Claude main-session tool phase", () => {
     apply("UserPromptSubmit", "thinking");
     apply("PreToolUse", "working", { toolUseId: "tool-a" });
     apply("UserPromptSubmit", "thinking");
-    assert.equal(displayedState, "working");
+    assert.equal(displayedState, "thinking");
     assert.equal(batch(ledger).thinking, true);
   });
 
   it("keeps unknown normal events legacy compatible and does not create a ledger", () => {
     const ledger = createClaudeToolPhaseLedger();
     for (const eventName of ["Notification", "PostCompact", "PreToolUse", "PostToolUse"]) {
-      assert.equal(ledger.observe(event(eventName)).accept, true);
+      assert.equal(ledger.observe(event(eventName, { promptId: null })).accept, true);
     }
     assert.equal(ledger.size, 0);
     assert.equal(batch(ledger).accept, false);
@@ -227,18 +240,18 @@ describe("Claude main-session tool phase", () => {
     assert.equal(batch(ledger).thinking, true);
   });
 
-  it("does not infer an epoch from tools that arrived before the prompt", () => {
+  it("opens a correlated turn from a tool start when no Submit hook was emitted", () => {
     const ledger = createClaudeToolPhaseLedger();
     assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "tool-a" })).accept, true);
     ledger.observe(event("UserPromptSubmit"));
-    assert.equal(batch(ledger).accept, false);
+    assert.equal(batch(ledger).thinking, true);
   });
 
   it("does not open phase inference from a correlated prompt arriving after its Stop", () => {
     const ledger = createClaudeToolPhaseLedger();
     assert.equal(ledger.observe(event("Stop")).accept, true);
-    assert.equal(ledger.observe(event("UserPromptSubmit")).accept, false);
-    assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "late-tool" })).accept, false);
+    assert.equal(ledger.observe(event("UserPromptSubmit")).accept, true);
+    assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "late-tool" })).accept, true);
     assert.equal(batch(ledger).accept, false);
   });
 
