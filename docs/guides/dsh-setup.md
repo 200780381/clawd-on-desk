@@ -527,6 +527,10 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
   a system-wide and a per-user copy), and any candidate it cannot verify also
   blocks an automatic launch. Two symlinked locations that resolve to the same
   bundle count as one install.
+- The desktop app reopens the previous conversation on launch. Clawd puts that
+  conversation in the Session HUD only after it has an action — a prompt, a tool
+  call, or an approval — so an untouched reopened conversation never adds a HUD
+  row. The Dashboard still lists it and its open button works the same.
 - The bridge reports the desktop carrier, so the desktop app needs one restart
   after a plugin update before its sessions become clickable.
 - Closing the local bubble does not deny the request. If a configured Telegram

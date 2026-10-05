@@ -2106,6 +2106,18 @@ function updateSession(sessionId, state, event, opts = {}) {
     if (shouldStorePermissionAutomationIdentity) {
       sessionForPerm.sessionAutomationIdentity = normalizedSessionAutomationIdentity;
     }
+    // An approval is an action. Clear the reopened-conversation marker so the
+    // HUD reveals it. Only mutate an existing same-agent session: this transient
+    // branch never creates one, and a raw-id collision must not relabel a row.
+    const clearedDshAwaitingActivity = !!(
+      permAgentId === "deepseek-harness"
+      && sessionForPerm
+      && sessionForPerm.agentId === permAgentId
+      && sessionForPerm.dshAwaitingActivity === true
+    );
+    if (clearedDshAwaitingActivity) {
+      sessionForPerm.dshAwaitingActivity = false;
+    }
     // Observation is independent from the permission-bubble preference. A
     // legacy Kimi PreToolUse may arrive here as PermissionRequest with a
     // closed tool-call provenance marker; disabling that UI must not erase
@@ -2282,6 +2294,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     if (
       shouldStorePermissionAutomationIdentity
       || (shouldPersistCodexPermissionFocus && normalizedSessionAutomationIdentity)
+      || clearedDshAwaitingActivity
     ) {
       emitSessionSnapshot();
     }
@@ -2642,6 +2655,12 @@ function updateSession(sessionId, state, event, opts = {}) {
   }
 
   const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
+  // DSH desktop reopens the last conversation on launch, so SessionStart only
+  // means "opened" — not "used". Any other lifecycle event is a real action and
+  // clears the marker. Only DSH carries the field; other agents are untouched.
+  if (srcAgentId === "deepseek-harness") {
+    base.dshAwaitingActivity = event === "SessionStart";
+  }
   if (preserveCompletionAck) base.requiresCompletionAck = true;
   // #862: every branch below rebuilds the session object from `base`; carry the
   // private identity tracker through without exposing it on snapshot surfaces.
