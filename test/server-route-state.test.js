@@ -298,6 +298,26 @@ describe("server-route-state POST", () => {
     } finally { api.cleanup(); }
   });
 
+  it("does not promote a retired Claude prompt fallback into a formal metadata title", async () => {
+    const api = makeClaudePhaseStateRuntime();
+    const sid = localSessionKey("retired-prompt-title");
+    try {
+      api.updateSession(sid, "thinking", "UserPromptSubmit", { agentId: "claude-code", claudePromptId: "old" });
+      api.updateSession(sid, "thinking", "UserPromptSubmit", {
+        agentId: "claude-code", claudePromptId: "new", sessionTitle: "formal chat name",
+      });
+      const res = await callStatePost(JSON.stringify(buildStateBody("UserPromptSubmit",
+        { session_id: "retired-prompt-title", prompt_id: "old", prompt: "late fallback text" },
+        () => ({ pid: null }))), { ctx: {
+        sessions: api.sessions, observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      assert.equal(res.statusCode, 200);
+      assert.equal(api.sessions.get(sid).sessionTitle, "formal chat name");
+      assert.equal(api.sessions.get(sid).sessionTitleFromPrompt, false);
+      assert.equal(api.sessions.get(sid).state, "thinking");
+    } finally { api.cleanup(); }
+  });
+
   it("accepts a queued Claude turn with a new prompt id and no second UserPromptSubmit", async () => {
     const api = makeClaudePhaseStateRuntime();
     const rawId = "queued-claude-turn";

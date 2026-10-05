@@ -2023,7 +2023,8 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (!phase.accept) return false;
   if (phase.preservePhase && !phase.errorCue) return updateSessionMetadata(sessionId, {
     expectedAgentId: "claude-code", contextUsage: opts.contextUsage,
-    contextUsageOrigin: opts.contextUsageOrigin, sessionTitle: opts.sessionTitle, model: opts.model,
+    contextUsageOrigin: opts.contextUsageOrigin,
+    sessionTitle: opts.sessionTitleFromPrompt ? null : opts.sessionTitle, model: opts.model,
   });
   // A result racing behind its accepted batch still reports a real failure.
   // Keep the model phase as the logical resume state while the error cue runs.
