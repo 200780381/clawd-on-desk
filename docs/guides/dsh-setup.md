@@ -514,8 +514,12 @@ warnings, and rely on DSH's native web flow whenever Clawd yields no decision.
   Windows, and the HTTP 204/cancellation hand-back.
 - Clicking a desktop-app session opens the DeepSeek Harness desktop window
   (via `dsh://open`, falling back to launching the app when the protocol is not
-  handled). This is supported on macOS and Windows only, and has **not been
-  verified on a real machine yet**. It does not switch to that specific
+  handled). This is supported on macOS and Windows only. On 2026-10-05 it was
+  verified from source on macOS 26.6.2 and on Windows 11 x64 with the desktop app
+  `0.2.0-rc.2`: clicking a desktop session brought the window to the front
+  through `dsh://open` with another app in front, when the window was minimized,
+  and after it was closed. The launch fallback (used when the protocol cannot be
+  opened) is covered by unit tests only. It does not switch to that specific
   conversation: DSH has no external session-navigation entry point, so the
   window shows whatever it was already on. Web sessions remain unfocusable.
   The launch fallback refuses to start when discovery is not a single verified
