@@ -5,6 +5,7 @@ const assert = require("node:assert");
 
 const initPermission = require("../src/permission");
 const { classifyPermissionInteraction } = require("../src/permission-automation-policy");
+const { getSessionFocusTarget } = require("../src/session-focus");
 
 function flushAsync() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -158,5 +159,31 @@ describe("DSH permission response contract", () => {
   it("labels the DeepSeek Harness queue entry by its agent id", () => {
     assert.strictEqual(initPermission.__test.queueAgentLabel({ agentId: "deepseek-harness" }), "DeepSeek Harness");
     assert.strictEqual(initPermission.__test.queueAgentLabel({ agentId: "unknown-agent" }), "unknown-agent");
+  });
+
+  it("copies the desktop carrier into the fallback focus entry", () => {
+    const { buildPermissionFocusEntry } = initPermission.__test;
+    const entry = buildPermissionFocusEntry({
+      sessionId: "deepseek-harness:s1",
+      agentId: "deepseek-harness",
+      dshCarrier: "desktop",
+    });
+    assert.strictEqual(entry.dshCarrier, "desktop");
+    assert.deepStrictEqual(getSessionFocusTarget(entry, { osPlatform: "darwin" }), {
+      canFocus: true,
+      type: "dsh-desktop",
+      url: "dsh://open",
+    });
+
+    const plain = buildPermissionFocusEntry({
+      sessionId: "deepseek-harness:s1",
+      agentId: "deepseek-harness",
+    });
+    assert.strictEqual(Object.hasOwn(plain, "dshCarrier"), false);
+    assert.deepStrictEqual(getSessionFocusTarget(plain, { osPlatform: "darwin" }), {
+      canFocus: false,
+      type: null,
+      url: null,
+    });
   });
 });
