@@ -590,6 +590,21 @@ describe("createPidResolver() — Windows PowerShell path", { skip: process.plat
     });
   }
 
+  it("keeps snapshot overrides bounded and invalid values on the default deadline", () => {
+    const seen = [];
+    const cfg = getPlatformConfig();
+    withMockedExec((_file, _args, options) => {
+      seen.push(options.timeout);
+      return snapshotJson([{ pid: 1000, name: "cmd.exe", ppid: 0 }]);
+    }, () => {
+      for (const value of [undefined, 0, -1, Infinity, "5000", 3000.5, 5000, 60000]) {
+        createPidResolver({ ...LIVE_GATE, platformConfig: cfg, startPid: 1000,
+          windowsSnapshotTimeoutMs: value })();
+      }
+    });
+    assert.deepStrictEqual(seen, [3000, 3000, 3000, 3000, 3000, 3000, 5000, 5000]);
+  });
+
   it("populates pidChain by walking the snapshot Map", () => {
     const cfg = getPlatformConfig();
     const resolve = createPidResolver({ ...LIVE_GATE, platformConfig: cfg, startPid: 1000 });

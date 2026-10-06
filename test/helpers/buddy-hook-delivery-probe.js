@@ -23,6 +23,12 @@ const http = require("node:http");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 
+// Exercise the Windows deadline on every CI host without running any real
+// Windows process query; the resolver below remains test-owned and mocked.
+if (process.env.CLAWD_BUDDY_PLATFORM === "win32") {
+  Object.defineProperty(process, "platform", { value: "win32" });
+}
+
 os.homedir = () => process.env.CLAWD_BUDDY_HOME;
 os.tmpdir = () => process.env.CLAWD_BUDDY_HOME;
 

@@ -20,11 +20,13 @@ const TARGETS = [
   {
     name: "CodeBuddy",
     agentId: "codebuddy",
+    backstopMs: 5000,
     script: path.resolve(__dirname, "..", "hooks", "codebuddy-hook.js"),
   },
   {
     name: "WorkBuddy",
     agentId: "workbuddy",
+    backstopMs: process.platform === "win32" ? 7500 : 5000,
     script: path.resolve(__dirname, "..", "hooks", "workbuddy-hook.js"),
   },
 ];
@@ -151,6 +153,7 @@ async function runBuddyHook(t, options) {
     CLAWD_BUDDY_TIMELINE: timelinePath,
     CLAWD_BUDDY_STALL: options.stallDelivery ? "1" : "0",
     CLAWD_BUDDY_THROW: options.throwDelivery ? "1" : "0",
+    CLAWD_BUDDY_PLATFORM: options.forceWindows ? "win32" : "",
   });
 
   child = spawn(process.execPath, ["--require", PRELOAD, options.script], {
@@ -241,7 +244,7 @@ for (const target of TARGETS) {
       });
     }
 
-    it("reaps a stalled sender with the 5s exit backstop", async (t) => {
+    it("reaps a stalled sender with its bounded exit backstop", async (t) => {
       const result = await runBuddyHook(t, {
         script: target.script,
         event: "PreToolUse",
@@ -256,7 +259,7 @@ for (const target of TARGETS) {
       assert.ok(Number.isFinite(sendStart), "the stalled sender must record send_start");
       assert.ok(Number.isFinite(exit), "the hook must record its exit");
       assert.ok(
-        exit - sendStart >= 4000,
+        exit - sendStart >= target.backstopMs - 1000,
         `a stalled POST must survive the old 800ms timer (send_start=${sendStart}, exit=${exit})`,
       );
     });
@@ -307,5 +310,24 @@ describe("WorkBuddy hook delivery without a session id", () => {
     });
     assertCleanEmptyJson(result);
     assert.equal(result.posts.length, 0);
+  });
+});
+
+describe("WorkBuddy Windows snapshot deadline delivery", () => {
+  it("delivers after a blocking walk reaches the 5s limit without delaying stdout", async (t) => {
+    const workbuddy = TARGETS.find((target) => target.agentId === "workbuddy");
+    const result = await runBuddyHook(t, {
+      script: workbuddy.script,
+      event: "Stop",
+      walkMs: 5100,
+      watchdogMs: 12000,
+      forceWindows: true,
+    });
+    assertCleanEmptyJson(result);
+    assert.equal(result.posts.length, 1, "the real receiver must get the event after the long walk");
+    assert.equal(result.posts[0].event, "Stop");
+    assert.equal(result.posts[0].agent_id, "workbuddy");
+    const { order } = result.timeline;
+    assert.ok(order.indexOf("stdout_write") < order.indexOf("walk_start"));
   });
 });
