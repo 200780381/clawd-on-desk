@@ -20,7 +20,6 @@ Footprints counts accepted Clawd activity signals. It never guesses work time fr
 | Value | Meaning |
 |---|---|
 | Agents seen | Distinct supported built-in agents that produced accepted activity in the selected range |
-| Sessions started | Reliable, explicit fresh-session boundaries, assigned once to the local day on which the session started |
 | Turns completed | Completion boundaries that survived the agent-specific completion arbitration |
 | Tool calls | One reliable start or completion boundary per tool, chosen explicitly for each agent |
 | Activity bar/cell | Accepted activity signals in that local hour or day |
@@ -77,3 +76,4 @@ Turn off **Record footprints** to stop new event tickets and close the current c
 - Rebuild retained journal history by streaming each accepted ticket into a separate daily projection in bounded event-loop batches, then swap the projection into the aggregate synchronously. Hydration must not keep the retained tickets in memory; only summary rows and dedupe keys may grow with the retained window. Do not reintroduce synchronous whole-journal projection or an unreleased schema migration.
 - Historical civil dates are frozen at acceptance time. Preserve real epoch time, IANA time zone, UTC offset, local date, and local hour; keep Today at 24 hourly bars and the longer ranges on their fixed cells, with explicit gap/fold states.
 - Do not add tokens, duration, cost, streaks, scores, export/share, network delivery, raw content, or long-lived linkable identities without a new product and privacy review.
+- Footprints does not show a "Sessions started" count (#1142). Only Claude Code has a fresh-session boundary that Clawd can prove on every event path, so the column read as missing data for every other agent. The daily aggregate still records `sessionsStarted` and `sessionsStartedPartial`; keep those stored fields until a schema change is planned.

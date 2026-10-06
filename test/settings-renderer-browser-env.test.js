@@ -2761,7 +2761,7 @@ describe("settings renderer browser environment", () => {
     const codexRow = harness.content.querySelectorAll(".recap-agent-row")
       .find((row) => row.querySelector("strong").textContent === "codex");
     const codexMetrics = codexRow.querySelectorAll("dd");
-    assert.strictEqual(codexMetrics[2].textContent, "5");
+    assert.strictEqual(codexMetrics[1].textContent, "5");
   });
 
   it("renders the recap grid as one keyboard stop with accessible agent locks", async () => {
@@ -2810,7 +2810,8 @@ describe("settings renderer browser environment", () => {
       clearButton.getAttribute("data-settings-focus-fallback-key"),
       "recap-recording-toggle"
     );
-    assert.match(rows[0].getAttribute("aria-label"), /Sessions started: .*Turns completed: .*Tool calls: .*Activity signals:/);
+    assert.match(rows[0].getAttribute("aria-label"), /Turns completed: .*Tool calls: .*Activity signals:/);
+    assert.doesNotMatch(rows[0].getAttribute("aria-label"), /Sessions started/);
 
     const firstActiveDescendant = grid.getAttribute("aria-activedescendant");
     grid.dispatchEvent({ type: "keydown", key: "ArrowRight", bubbles: false });
@@ -2837,6 +2838,68 @@ describe("settings renderer browser environment", () => {
     active = weekGrid.querySelectorAll(".recap-cell")
       .find((cell) => cell.id === weekGrid.getAttribute("aria-activedescendant"));
     assert.strictEqual(active.getAttribute("aria-rowindex"), "7");
+  });
+
+  it("issue #1142: agent rows show turns, tool calls and activity signals without a sessions column", async () => {
+    const data = sampleRecapView();
+    data.days[0].rows[1].sessionsStartedPartial = true;
+    const harness = loadRecapTabForTest({
+      data,
+      agentMetadata: [
+        { id: "codex", name: "Codex" },
+        { id: "claude-code", name: "Claude Code" },
+      ],
+    });
+    await harness.settle();
+
+    const rowByName = new Map(
+      harness.content.querySelectorAll(".recap-agent-row")
+        .map((row) => [row.querySelector("strong").textContent, row])
+    );
+    const expectations = [
+      ["Codex", ["2", "4", "9"]],
+      ["Claude Code", ["1", "2", "3"]],
+    ];
+    for (const [name, values] of expectations) {
+      const row = rowByName.get(name);
+      assert.ok(row, name);
+      assert.deepStrictEqual(
+        row.querySelectorAll("dt").map((dt) => dt.textContent),
+        ["Turns completed", "Tool calls", "Activity signals"]
+      );
+      assert.deepStrictEqual(row.querySelectorAll("dd").map((dd) => dd.textContent), values);
+      const rowText = collectText(row);
+      assert.doesNotMatch(rowText, /Sessions started/);
+      assert.doesNotMatch(rowText, /partial/);
+    }
+  });
+
+  it("issue #1142: a metric without a reliable boundary still renders a dash with its explanation", async () => {
+    const data = sampleRecapView();
+    data.days[0].rows[0].metrics.turnsCompleted = null;
+    const harness = loadRecapTabForTest({
+      data,
+      agentMetadata: [
+        { id: "codex", name: "Codex" },
+        { id: "claude-code", name: "Claude Code" },
+      ],
+    });
+    await harness.settle();
+
+    const codexRow = harness.content.querySelectorAll(".recap-agent-row")
+      .find((row) => row.querySelector("strong").textContent === "Codex");
+    const count = codexRow.querySelectorAll("dd")[0];
+    assert.strictEqual(count.textContent, "—");
+    assert.strictEqual(
+      count.title,
+      "This agent does not provide a reliable boundary for this metric."
+    );
+    assert.strictEqual(
+      count.getAttribute("aria-label"),
+      "Turns completed: This agent does not provide a reliable boundary for this metric."
+    );
+    assert.ok(codexRow.getAttribute("aria-label")
+      .includes("Turns completed: This agent does not provide a reliable boundary for this metric."));
   });
 
   it("keeps every recap keyboard focus key stable across a live data refresh", async () => {
