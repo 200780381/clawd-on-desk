@@ -163,6 +163,17 @@ function run() {
         return;
       }
 
+      // WorkBuddy emits idle_prompt after 60s of native idle time, including
+      // after Stop. It is a reminder to send another message, not a blocked
+      // approval/input request. Forwarding it would replace the completed HUD
+      // row with Notification/Waiting. Only this explicit subtype is ignored;
+      // real permission/input prompts and untyped legacy notifications still
+      // follow the existing native-control path below.
+      if (hookName === "Notification" && payload.notification_type === "idle_prompt") {
+        finish(outLine);
+        return;
+      }
+
       const { state, event } = mapped;
 
       // #618 / #648: a hook event with no session_id cannot be attributed to a
