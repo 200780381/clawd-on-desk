@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const path = require("node:path");
 const { createSpawnedHookHarness } = require("./helpers/spawned-hook");
+const { IGNORED_NOTIFICATION_TYPES } = require("../hooks/workbuddy-hook");
 const { handleStatePost } = require("../src/server-route-state");
 const initState = require("../src/state");
 const { makeSessionKey } = require("../src/session-key");
@@ -52,11 +53,11 @@ function createFixture(t) {
   };
 
   async function dispatch(hookName, fields = {}) {
-    const idle = hookName === "Notification" && fields.notification_type === "idle_prompt";
+    const ignored = hookName === "Notification" && IGNORED_NOTIFICATION_TYPES.has(fields.notification_type);
     const result = harness.run({
       script: HOOK,
       payload: { hook_event_name: hookName, session_id: RAW_ID, cwd: "/fixture/workbuddy", ...fields },
-      httpContract: idle ? "expect-none" : "expect-attempt",
+      httpContract: ignored ? "expect-none" : "expect-attempt",
       env: { CLAWD_REMOTE: "1", CLAWD_POST_RECORDER_SUCCEED: "1" },
     });
     assert.equal(result.status, 0, result.stderr);
@@ -137,13 +138,40 @@ describe("WorkBuddy native idle notifications", () => {
     assert.deepEqual(f.api.sessions.get(SID).recentEvents, before.recentEvents);
   });
 
+  it("issue #655: swallows a per-turn auth_success without settling a running turn or alerting", async (t) => {
+    const f = createFixture(t);
+    await f.dispatch("UserPromptSubmit");
+    const before = { ...f.api.sessions.get(SID) };
+    f.sounds.length = 0;
+    await f.dispatch("Notification", { notification_type: "auth_success" });
+    const after = f.api.sessions.get(SID);
+    assert.equal(after.state, "thinking");
+    assert.equal(after.updatedAt, before.updatedAt, "the login toast must not count as new work");
+    assert.deepEqual(after.recentEvents, before.recentEvents, "UserPromptSubmit must remain the boundary");
+    assert.deepEqual(f.sounds, [], "there is no new wait alert");
+  });
+
+  it("issue #655: does not create a HUD card from an auth_success before any session exists", async (t) => {
+    const f = createFixture(t);
+    await f.dispatch("Notification", { notification_type: "auth_success" });
+    assert.equal(f.api.sessions.size, 0);
+  });
+
   it("still forwards native permission, elicitation, needs-input, and legacy notifications", async (t) => {
     const f = createFixture(t);
     for (const notificationType of ["permission_prompt", "elicitation_dialog", "agent_needs_input", "future_type", undefined]) {
       await f.dispatch("Stop");
+      f.sounds.length = 0;
       await f.dispatch("Notification", notificationType ? { notification_type: notificationType } : {});
       assert.equal(f.snapshot().lastEvent.rawEvent, "Notification", String(notificationType));
       assert.notEqual(f.snapshot().badge, "done", "a real input request must remain visible");
+      if (notificationType === "permission_prompt") {
+        // Positive control for the auth_success "no sound" assertions above:
+        // a genuinely forwarded notification really does ring the pet. The
+        // alert may queue behind the completed turn's attention min-display.
+        await waitFor(() => f.sounds.includes("confirm"), 6000);
+        assert.ok(f.sounds.includes("confirm"), "a real permission prompt still rings the pet");
+      }
       await f.dispatch("UserPromptSubmit");
       assert.equal(f.snapshot().lastEvent.rawEvent, "UserPromptSubmit");
       assert.equal(f.snapshot().state, "thinking");

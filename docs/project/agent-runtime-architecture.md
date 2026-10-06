@@ -162,8 +162,12 @@ WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
     → 同上状态机（agent_id: workbuddy）
   Hook 注册到当前 WorkBuddy AI 的 ~/.workbuddy-ai/settings.json（旧版兼容 ~/.workbuddy/settings.json）。集成为 state + Notification only：不注册 PermissionRequest HTTP hook，
   审批始终由 WorkBuddy 原生沙箱与 GUI 处理；无 session_id 的事件在返回合法 stdout 后直接丢弃，不进入 /state。
+  WorkBuddy 每轮完成会发 Stop（存成 idle），但没有结束对话的 SessionEnd，归档、删除也不发事件；Windows 上所有角色共用同一个 WorkBuddy.exe，agent_pid 取命令行不引用 app.asar 脚本、也不带 --type= 的长寿 GUI 主进程，
+  跑 app.asar 脚本的 daemon / sidecar / edge-sync / 每轮 --prewarm 宿主都不认——否则 agent_pid 会落在每轮做完就退出的宿主上，卡片被 agent-exit 提前删除。本机 idle 会话因此不再由
+  长寿进程保活，超过会话超时按 workbuddy-desktop-idle-timeout 撤卡（agent-exit 仍优先）。5.6.x 每轮 UserPromptSubmit 都可能早于 SessionStart（首轮 source=startup，之后 source=resume），
+  故 SessionStart 带 preserve_state，避免刚进入 thinking 的会话被迟到的 idle 改回空闲。
 
-  WorkBuddy's native `Notification` subtype `idle_prompt` is acknowledged with `{}` locally, before process resolution or HTTP delivery. The native runner emits this reminder after 60 seconds of idle time, including after a completed turn; it must not replace the completed HUD row with Waiting or refresh session activity. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
+  WorkBuddy's native `Notification` subtypes `idle_prompt` and `auth_success` are acknowledged with `{}` locally, before process resolution or HTTP delivery. `idle_prompt` is a "send another message" reminder, observed on 5.2.6 about 60 seconds after Stop (5.6.2's per-turn host exits before it can fire, so it was not observed there); `auth_success` is the login-success toast, emitted by 5.6.2 at the start of every turn. Forwarding either would create or settle a session — a phantom idle row before the first UserPromptSubmit, or knocking a running turn back to idle. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
 
 Qoder 会话标题（本机、state-only）：
   Hook 转发显式标题与 transcript 路径，保持 stdout 为 `{}` 和原生权限流程不变。
