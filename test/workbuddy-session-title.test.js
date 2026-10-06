@@ -475,7 +475,20 @@ describe("WorkBuddy title observer", () => {
     });
   });
 
-  it("issue #655: a replacement before the SessionStart sample drops the old reader immediately", { timeout: 10_000 }, async () => {
+  // These two tests replace the transcript while the old scan still holds it
+  // open, so that the next event has to notice the changed file identity.
+  // Windows refuses to rename over a file another handle holds open
+  // (fs.renameSync raises EPERM), so the precondition cannot be built there;
+  // the identity comparison itself is platform-independent and is exercised on
+  // macOS and Linux.
+  const replaceWhileOpen = {
+    timeout: 10_000,
+    skip: process.platform === "win32"
+      ? "Windows cannot replace a file that another handle holds open"
+      : false,
+  };
+
+  it("issue #655: a replacement before the SessionStart sample drops the old reader immediately", replaceWhileOpen, async () => {
     await fixture(async (dir) => {
       const transcriptPath = path.join(dir, "s.jsonl");
       const filler = `{"type":"message","content":"${"x".repeat(500)}"}\n`;
@@ -503,7 +516,7 @@ describe("WorkBuddy title observer", () => {
     });
   });
 
-  it("issue #655: a replacement after the SessionStart sample surfaces on the next event", { timeout: 10_000 }, async () => {
+  it("issue #655: a replacement after the SessionStart sample surfaces on the next event", replaceWhileOpen, async () => {
     await fixture(async (dir) => {
       const transcriptPath = path.join(dir, "s.jsonl");
       const filler = `{"type":"message","content":"${"x".repeat(500)}"}\n`;
