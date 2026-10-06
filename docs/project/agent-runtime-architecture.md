@@ -512,6 +512,16 @@ DND remains an interaction/visual gate and does not stop recap or coverage. Susp
 
 `state.js` 的 session snapshot 是共享 schema：Dashboard、Session HUD（含 Orbit quota ring）以及可选 Telegram completion、Discord presence、LAN PWA 等 consumer 都会读取它。新增、重命名或删除字段时必须检查全部 consumer，不能只看 Dashboard/HUD。
 
+## WorkBuddy Native Session Titles
+
+`hooks/workbuddy-hook.js` forwards `transcript_path` and marks a prompt first-line fallback with `session_title_from_prompt`. A fallback cannot replace a formal title. Only the first nonblank prompt line is considered, with secret-looking lines rejected before truncation; message bodies are not forwarded.
+
+After a local WorkBuddy session has been accepted, `src/agent-runtime-main.js` owns a `workbuddy-session-title` observer. It reads only the matching `sessions` row from `workbuddy.db`, preferring `custom_title` to `title`. Roots are an absolute `WORKBUDDY_CONFIG_DIR`, `~/.workbuddy-ai`, and `~/.workbuddy`; the home owning the supplied transcript takes precedence when both generations exist. Cwd mismatches, deleted rows, and titles over 4 KiB are rejected. Databases are opened read-only and closed after each read; absent homes are never created.
+
+When SQLite is unavailable or the database cannot supply a title, the observer reads session-scoped `ai-title` / `custom-title` JSONL metadata using `src/jsonl-session-title.js`, the incremental reader shared with Qoder. WorkBuddy reads at most 1 MiB of new transcript bytes per scan, retains bounded partial lines, and ignores other sessions and message records. A two-second poll discovers delayed generated titles and idle renames without requiring a new hook. At most 256 surviving local sessions are observed. End, disable/uninstall, eviction, same-id resume, and shutdown invalidate pending reads; remote, WSL, and headless sessions never read local WorkBuddy storage.
+
+Native titles enter `updateSessionMetadata` with an explicit WorkBuddy ownership guard. They use the existing session snapshot consumed by HUD/Dashboard and do not refresh activity timestamps, change state, replay completion, or create missing sessions. Native database storage and settings are never modified by this observer.
+
 ## Cursor Hook Commands And Session Titles
 
 Cursor Windows hooks 由 PowerShell 执行。`cursor-install.js` 用 `& "node" "cursor-hook.js"` 直连，避免额外 `cmd /s /c` 解析丢失含空格路径的引号。marker 识别同时支持旧明文命令和 PowerShell EncodedCommand；注册只更新 Clawd-owned entry，并把同事件重复的 owned entry 收敛到首条，保留首条其他设置及全部第三方 hooks。

@@ -12,6 +12,7 @@ const { digestCodexTurnId, normalizeCodexTurnId } = require("./codex-turn-id");
 const createCodexTurnFence = require("./codex-turn-fence");
 const createCodexOfficialActivity = require("./codex-official-activity");
 const { createQoderSessionTitleTracker, QODER_TITLE_EVENTS } = require("./qoder-session-title");
+const { createWorkBuddySessionTitleTracker } = require("./workbuddy-session-title");
 
 const CODEX_OFFICIAL_LOG_SUPPRESS_TTL_MS = 10 * 60 * 1000;
 // Intentionally excludes response_item:web_search_call. Codex official hooks
@@ -79,6 +80,17 @@ function createAgentRuntimeMain(options = {}) {
   const updateSession = options.updateSession || (() => {});
   const qoderSessionTitleTracker = options.qoderSessionTitleTracker
     || createQoderSessionTitleTracker();
+  const workBuddySessionTitleTracker = options.workBuddySessionTitleTracker
+    || createWorkBuddySessionTitleTracker({
+      ...options.workBuddySessionTitleOptions,
+      getSession: localWorkBuddySession,
+      updateTitle(sessionId, title) {
+        const state = getStateRuntime();
+        if (state && typeof state.updateSessionMetadata === "function") {
+          state.updateSessionMetadata(sessionId, { sessionTitle: title, expectedAgentId: "workbuddy" });
+        }
+      },
+    });
   const captureGhosttyTerminalId = options.captureGhosttyTerminalId || null;
   const clearCodexNotifyBubbles = options.clearCodexNotifyBubbles || (() => {});
   const showCodexUserInputBubble = options.showCodexUserInputBubble || (() => false);
@@ -345,7 +357,31 @@ function createAgentRuntimeMain(options = {}) {
     const result = updateSession(sessionId, state, event, opts);
     maybeCaptureGhosttyTerminalId(sessionId, event, opts);
     enrichQoderSessionTitle(sessionId, event, opts);
+    enrichWorkBuddySessionTitle(sessionId, event, opts);
     return result;
+  }
+
+  function localWorkBuddySession(sessionId) {
+    if (disposed || !isAgentEnabled("workbuddy")) return null;
+    const state = getStateRuntime();
+    const session = state && state.sessions && state.sessions.get(sessionId);
+    return session && session.agentId === "workbuddy" && (session.profileId || "local") === "local"
+      && !session.host && !session.wslDistro && !session.headless ? session : null;
+  }
+
+  function enrichWorkBuddySessionTitle(sessionId, event, opts) {
+    if (opts.agentId !== "workbuddy" || (opts.profileId || "local") !== "local"
+      || opts.host || opts.wslDistro || opts.headless) return;
+    if (event === "SessionStart" || event === "SessionEnd") workBuddySessionTitleTracker.clear(sessionId);
+    if (event === "SessionEnd") return;
+    const session = localWorkBuddySession(sessionId);
+    if (!session) return;
+    workBuddySessionTitleTracker.track({
+      sessionId,
+      rawSessionId: session.rawSessionId || opts.rawSessionId || sessionId,
+      cwd: session.cwd,
+      transcriptPath: session.transcriptPath || null,
+    });
   }
 
   function localQoderSession(sessionId) {
@@ -479,6 +515,7 @@ function createAgentRuntimeMain(options = {}) {
   }
 
   function clearSessionsByAgent(agentId) {
+    if (agentId === "workbuddy") workBuddySessionTitleTracker.clear();
     if (agentId === "codex") {
       resetLocalCodexLifecycleTracking();
       stopCodexArchiveTracker();
@@ -661,6 +698,7 @@ function createAgentRuntimeMain(options = {}) {
 
   function cleanup() {
     disposed = true;
+    workBuddySessionTitleTracker.clear();
     if (codexMonitor && typeof codexMonitor.stop === "function") codexMonitor.stop();
     stopCodexArchiveTracker();
     resetLocalCodexLifecycleTracking();
