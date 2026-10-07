@@ -6043,11 +6043,25 @@ describe("Stop completion gate (#406)", () => {
       api.updateSession("probe-cancel", "working", "PostToolUse", opts);
       api.updateSession("probe-cancel", "thinking", "PostToolBatch", { ...opts, batchToolUseIds: ["ask-tool"] });
       api.updateSession("probe-cancel", "working", "PreToolUse", { ...opts, toolUseId: "next-tool", toolName: "Read" });
+      api.updateSession("probe-cancel", "working", "PostToolUse", opts);
       fs.appendFileSync(transcript, JSON.stringify({ type: "assistant", message: { content: "Old final answer." } }) + "\n");
       mock.timers.tick(10000);
       assert.equal(api.sessions.get("probe-cancel").state, "working");
       assert.ok(!soundsPlayed.includes("complete"));
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("keeps newer work active when an older early batch's tool arrives late", () => {
+    const sid = "interleaved-batch-session";
+    const event = (name, value, extra = {}) => api.updateSession(sid, value, name,
+      { agentId: "claude-code", claudePromptId: "same-prompt", ...extra });
+    event("UserPromptSubmit", "thinking");
+    event("PostToolBatch", "thinking", { batchToolUseIds: ["old-tool"] });
+    event("PreToolUse", "working", { toolUseId: "new-tool" });
+    event("PreToolUse", "working", { toolUseId: "old-tool" });
+    assert.equal(api.sessions.get(sid).state, "working");
+    event("PostToolBatch", "thinking", { batchToolUseIds: ["new-tool"] });
+    assert.equal(api.sessions.get(sid).state, "thinking");
   });
 
   it("Claude AskUserQuestion PostToolUse falls back to transcript completion when Stop is missed", () => {

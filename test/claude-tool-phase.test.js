@@ -49,6 +49,17 @@ describe("Claude main-session tool phase", () => {
     }
   }
 
+  it("settles a reordered old batch without overriding newer unsettled work", () => {
+    const ledger = createClaudeToolPhaseLedger();
+    start(ledger, []);
+    batch(ledger, ["early-tool"]);
+    ledger.observe(event("PreToolUse", { toolUseId: "newer-tool" }));
+    const late = ledger.observe(event("PreToolUse", { toolUseId: "early-tool" }));
+    assert.equal(late.preservePhase, true);
+    assert.equal(late.thinking, undefined);
+    assert.equal(batch(ledger, ["newer-tool"]).thinking, true);
+  });
+
   it("clears early batch evidence on terminal and new-prompt boundaries", () => {
     for (const boundary of ["Stop", "StopFailure", "ApiError", "SessionEnd", "UserPromptSubmit"]) {
       const ledger = createClaudeToolPhaseLedger();

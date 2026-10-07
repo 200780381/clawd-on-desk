@@ -223,11 +223,16 @@ function createClaudeToolPhaseLedger(options = {}) {
         record.tools.set(toolUseId, { batchSettled: false });
       }
       if (!record.unconfirmable) {
-        const ready = record.earlyBatches.find(batch => [...batch].every(id => record.tools.has(id))
-          && [...record.tools].every(([id, tool]) => tool.batchSettled || batch.has(id)));
+        const ready = record.earlyBatches.find(batch => [...batch].every(id => record.tools.has(id)));
         if (ready) {
+          const otherUnsettled = [...record.tools].some(([id, tool]) => !tool.batchSettled && !ready.has(id));
           for (const id of ready) record.tools.get(id).batchSettled = true;
           record.earlyBatches = record.earlyBatches.filter(batch => ![...ready].some(id => batch.has(id)));
+          // Newer work can start before this older boundary's delayed tail.
+          // Settle the old evidence without replacing that newer work's phase.
+          if (otherUnsettled) return event === "PostToolUseFailure"
+            ? { accept: true, preservePhase: true, errorCue: true, reason: "settled-tool-failure" }
+            : preservePhase("settled-tool-tail");
           return { accept: true, thinking: true, errorCue: event === "PostToolUseFailure",
             reason: "reordered-batch-settled" };
         }

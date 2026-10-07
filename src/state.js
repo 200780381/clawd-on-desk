@@ -2030,6 +2030,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (phase.preservePhase && !phase.errorCue) {
     const existing = sessions.get(sessionId);
     if (phase.reason === "settled-tool-tail" && event === "PostToolUse"
+      && existing && existing.state === "thinking"
       && isClaudeElicitationCompletionTool(opts.toolName || (existing && existing.lastToolName))) {
       scheduleClaudeTranscriptCompletionProbe(sessionId,
         opts.transcriptPath || (existing && existing.transcriptPath), existing && existing.state === "thinking");
