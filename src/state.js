@@ -2044,7 +2044,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   // A result racing behind its accepted batch still reports a real failure.
   // Keep the model phase as the logical resume state while the error cue runs.
   if (phase.errorCue) opts = { ...opts, preserveState: true };
-  if (phase.thinking && !phase.errorCue) state = "thinking";
+  if (phase.thinking && !phase.errorCue && event !== "SubagentStart") state = "thinking";
   const suppliedRecapOccurredAt = opts && opts.recapOccurredAt;
   const recapTimestampTrusted = Number.isSafeInteger(suppliedRecapOccurredAt) && suppliedRecapOccurredAt >= 0;
   const recapOccurredAt = recapTimestampTrusted

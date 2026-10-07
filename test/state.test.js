@@ -130,6 +130,15 @@ describe("Claude correlated batch phase", () => {
     assert.equal(api.sessions.get(sid).subagentTracker.confirmedIds.size, 1);
   });
 
+  it("keeps a delayed synthetic subagent start above its early batch hint", () => {
+    event("UserPromptSubmit", "thinking");
+    event("PostToolBatch", "thinking", { batchToolUseIds: ["agent-tool"] });
+    event("SubagentStart", "juggling", { toolUseId: "agent-tool", toolName: "Agent",
+      subagentLifecycleSource: "synthetic-tool" });
+    assert.equal(api.sessions.get(sid).subagentTracker.legacyFloor, true);
+    assert.equal(api.sessions.get(sid).state, "juggling");
+  });
+
   it("keeps legacy working when prompt identity is absent and never treats a batch as completion", () => {
     const sounds = [];
     ctx.playSound = (...args) => sounds.push(args);
