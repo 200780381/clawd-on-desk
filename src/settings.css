@@ -5443,3 +5443,25 @@ html, body {
   opacity: 0.55;
   cursor: default;
 }
+:root .quota-alert-thresholds-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 260px;
+  justify-content: flex-end;
+}
+.quota-alert-thresholds-control .settings-select {
+  flex: 0 1 118px;
+  width: 118px;
+  min-width: 118px;
+}
+@container (max-width: 400px) {
+  .quota-alert-thresholds-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  :root .quota-alert-thresholds-control {
+    max-width: none;
+    justify-content: flex-start;
+  }
+}

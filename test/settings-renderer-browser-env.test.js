@@ -11912,6 +11912,116 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(updateCalls, [{ key: "quotaMergeSources", value: false }]);
   });
 
+  it("keeps opt-in reminders in the quota ring and applies switches without Save", async () => {
+    const writes = [];
+    const snapshot = makeGeneralSnapshot({
+      quotaAlertsEnabled: false, quotaAlertThresholds: [20, 10], quotaRecoveryAlertsEnabled: true,
+    });
+    const h = loadGeneralTabForTest({ snapshot, settingsAPI: {
+      update: async (key, value) => { writes.push({ key, value }); return { status: "ok" }; },
+    } });
+    h.renderContent();
+    const ring = h.content.querySelector(".quota-ring-option-list");
+    assert.ok(ring.contains(h.getSwitch("quotaAlertsEnabled")));
+    assert.equal(h.getSwitch("quotaRecoveryAlertsEnabled").getAttribute("aria-disabled"), "true");
+    const thresholdRow = ring.querySelector(".quota-alert-thresholds-row");
+    assert.equal(thresholdRow.querySelectorAll(".settings-select").length, 5);
+    assert.equal(thresholdRow.querySelectorAll(".language-picker-trigger")[0].disabled, true);
+    h.getSwitch("quotaAlertsEnabled").dispatchEvent({ type: "click" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(writes, [{ key: "quotaAlertsEnabled", value: true }]);
+    const before = h.getContentRenderCount();
+    h.core.ops.applyChanges({ changes: { quotaAlertsEnabled: true }, snapshot: { ...snapshot, quotaAlertsEnabled: true } });
+    assert.equal(h.getContentRenderCount(), before);
+    assert.equal(thresholdRow.querySelectorAll(".language-picker-trigger")[0].disabled, false);
+    assert.equal(h.getSwitch("quotaRecoveryAlertsEnabled").getAttribute("aria-disabled"), "false");
+    const source = fs.readFileSync(SETTINGS_HTML, "utf8");
+    assert.ok(!source.includes("settings-tab-productivity"));
+  });
+
+  it("quota threshold selectors persist immediately and follow canonical controller values in place", async () => {
+    const writes = [];
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] }),
+      settingsAPI: { update: async (key, value) => { writes.push({ key, value }); return { status: "ok" }; } },
+    });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-alert-thresholds-row");
+    const slots = row.querySelectorAll(".settings-select");
+    slots[2].querySelectorAll(".language-picker-option").find(option => option.getAttribute("data-lang") === "25").dispatchEvent({ type: "click" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(writes)), [{ key: "quotaAlertThresholds", value: [25, 20, 10] }]);
+    assert.match(slots[0].querySelector(".language-picker-trigger").textContent, /25%/);
+    assert.match(slots[2].querySelector(".language-picker-trigger").textContent, /10%/);
+    const before = h.getContentRenderCount();
+    h.core.ops.applyChanges({ changes: { quotaAlertThresholds: [50, 5] },
+      snapshot: { ...h.core.state.snapshot, quotaAlertThresholds: [50, 5] } });
+    assert.equal(h.getContentRenderCount(), before);
+    assert.strictEqual(h.content.querySelector(".quota-alert-thresholds-row"), row);
+    assert.match(slots[0].querySelector(".language-picker-trigger").textContent, /50%/);
+    assert.match(slots[2].querySelector(".language-picker-trigger").textContent, /Disabled/);
+  });
+
+  it("duplicate or empty quota thresholds do not save; rejected updates restore the picker", async () => {
+    const writes = [], toasts = [];
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20] }),
+      settingsAPI: { update: async (key, value) => { writes.push({ key, value }); return { status: "error", message: "disk" }; } },
+    });
+    h.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    h.renderContent();
+    const slots = h.content.querySelectorAll(".quota-alert-thresholds-control .settings-select");
+    for (const [index, value] of [[1, "20"], [0, "0"]]) {
+      slots[index].querySelectorAll(".language-picker-option").find(option => option.getAttribute("data-lang") === value).dispatchEvent({ type: "click" });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(writes.length, 0);
+    slots[0].querySelectorAll(".language-picker-option").find(option => option.getAttribute("data-lang") === "25").dispatchEvent({ type: "click" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(writes)), [{ key: "quotaAlertThresholds", value: [25] }]);
+    assert.match(slots[0].querySelector(".language-picker-trigger").textContent, /20%/);
+    assert.equal(toasts.length, 3); assert.ok(toasts.every(item => item.options.error));
+  });
+
+  it("quota threshold writes lock the other slots until the controller resolves", async () => {
+    const deferred = createDeferred(), writes = [];
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] }),
+      settingsAPI: { update: (key, value) => { writes.push({ key, value }); return deferred.promise; } },
+    });
+    h.renderContent();
+    const slots = h.content.querySelectorAll(".quota-alert-thresholds-control .settings-select");
+    slots[0].querySelectorAll(".language-picker-option").find(option => option.getAttribute("data-lang") === "25").dispatchEvent({ type: "click" });
+    slots[1].querySelectorAll(".language-picker-option").find(option => option.getAttribute("data-lang") === "5").dispatchEvent({ type: "click" });
+    assert.equal(writes.length, 1);
+    assert.ok(slots.every(slot => slot.querySelector(".language-picker-trigger").disabled));
+    deferred.resolve({ status: "ok" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(slots.every(slot => !slot.querySelector(".language-picker-trigger").disabled));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(h.core.state.snapshot.quotaAlertThresholds)), [25, 10]);
+  });
+
+  it("quota Test notification is single-flight and never writes quota preferences", async () => {
+    const pending = createDeferred(), toasts = [];
+    let tests = 0, writes = 0;
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot(),
+      settingsAPI: {
+        testQuotaNotification: () => { tests++; return pending.promise; },
+        update: async () => { writes++; return { status: "ok" }; },
+      },
+    });
+    h.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    h.renderContent();
+    const button = h.content.querySelector(".quota-notification-test-row button");
+    button.dispatchEvent({ type: "click" }); button.dispatchEvent({ type: "click" });
+    assert.equal(tests, 1); assert.equal(button.disabled, true);
+    pending.resolve({ ok: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(button.disabled, false); assert.equal(writes, 0);
+    assert.equal(toasts.length, 1); assert.equal(toasts[0].options.error, false);
+  });
+
   it("lets users choose used or remaining quota without rebuilding General", async () => {
     const updateCalls = [];
     const initialSnapshot = makeGeneralSnapshot({ quotaRingDisplayMode: "used" });
