@@ -39,6 +39,7 @@ function deriveSourceInfo(host) {
 }
 
 const EVENT_LABEL_KEYS = {
+  PostToolBatch: "eventLabelPostToolBatch",
   SessionStart: "eventLabelSessionStart",
   SessionEnd: "eventLabelSessionEnd",
   UserPromptSubmit: "eventLabelUserPromptSubmit",
@@ -323,6 +324,16 @@ function sessionUpdatedAtComparator(a, b) {
   return String(a.id).localeCompare(String(b.id));
 }
 
+// The DSH desktop app reopens the previous conversation on launch and the bridge
+// reports SessionStart before the user touches it. That row stays real (the
+// Dashboard still lists and opens it), but it must not reach the HUD until the
+// first action clears the marker.
+function isDshSessionAwaitingActivity(session) {
+  return !!session
+    && session.agentId === "deepseek-harness"
+    && session.dshAwaitingActivity === true;
+}
+
 function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {}) {
   const alias = getSessionAliasEntry(id, session, sessionAliases);
   const recentEvents = Array.isArray(session && session.recentEvents)
@@ -340,10 +351,14 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     : () => "";
   const agentId = (session && session.agentId) || null;
   const state = (session && session.state) || "idle";
-  const hiddenFromHud = shouldAutoClearDetachedSession(session, badge, options)
+  // Existing hidden reasons also disable focus (there is nothing to jump to).
+  // The awaiting-activity marker is different: it only hides the HUD row, so the
+  // Dashboard can still list the conversation and open it on demand.
+  const hiddenByExistingReason = shouldAutoClearDetachedSession(session, badge, options)
     || isSupersededLocalCodexProcessSession(id, session, options.latestLocalCodexProcessIds);
+  const hiddenFromHud = hiddenByExistingReason || isDshSessionAwaitingActivity(session);
   const startupRecovered = !!(session && session.startupRecovered === true);
-  const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenFromHud
+  const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenByExistingReason
     ? getSessionFocusTarget({ ...(session || {}), id }, {
       osPlatform: options.focusHostPlatform || options.osPlatform,
     })
@@ -401,6 +416,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     provider: (session && session.provider) || null,
     codexOriginator: (session && session.codexOriginator) || null,
     codexSource: (session && session.codexSource) || null,
+    dshCarrier: (session && session.dshCarrier) || null,
     contextUsage: snapshotContextUsage(session),
     assistantLastOutput: (session && typeof session.assistantLastOutput === "string")
       ? session.assistantLastOutput
@@ -640,6 +656,7 @@ function sessionSnapshotSignature(snapshot) {
       provider: entry.provider,
       codexOriginator: entry.codexOriginator,
       codexSource: entry.codexSource,
+      dshCarrier: entry.dshCarrier,
       contextUsage: entry.contextUsage,
       assistantLastOutput: entry.assistantLastOutput,
       assistantLastOutputTruncated: !!entry.assistantLastOutputTruncated,
@@ -668,6 +685,7 @@ module.exports = {
   isSessionInProgress,
   deriveSessionBadge,
   shouldAutoClearDetachedSession,
+  isDshSessionAwaitingActivity,
   getSessionAliasEntry,
   getEffectiveSessionTitle,
   sessionDisplayFolder,
