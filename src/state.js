@@ -2022,9 +2022,14 @@ function observeClaudeToolPhase(sessionId, event, opts = {}) {
         && !perm.subagentId && perm.toolUseId === opts.toolUseId)));
   if (event === "PostToolBatch" && !allowThinking) return { accept: false };
   if (phaseAgentId !== "claude-code") return { accept: true };
+  const confirmedNativeChildEnd = opts.subagentLifecycleSource === "native"
+    && (event === "SubagentStop" || event === "SessionEnd")
+    && existing && existing.subagentTracker && existing.subagentTracker.confirmedIds instanceof Set
+    && existing.subagentTracker.confirmedIds.has(normalizeChildId(opts.subagentId));
   return claudeToolPhases.observe({ sessionId, event, toolUseId: opts.toolUseId,
     toolUseIds: opts.batchToolUseIds, promptId: opts.claudePromptId,
-    subagentId: opts.subagentId, subagentLifecycleSource: opts.subagentLifecycleSource, allowThinking });
+    subagentId: opts.subagentId, subagentLifecycleSource: opts.subagentLifecycleSource, allowThinking,
+    confirmedNativeChildEnd });
 }
 
 function updateSession(sessionId, state, event, opts = {}) {
@@ -2035,13 +2040,17 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (!phase.accept) return false;
   if (phase.preservePhase && !phase.errorCue) {
     const existing = sessions.get(sessionId);
-    if (phase.countToolCall && existing && event === "PreToolUse") {
+    const syntheticToolStart = event === "SubagentStart" && opts.subagentLifecycleSource === "synthetic-tool";
+    // A proven first tool start may arrive after its batch or terminal. Only
+    // recap accounting runs here: no activity freshness, completion timers,
+    // child lifecycle or permission-decision fallback is replayed.
+    if (phase.countToolCall && existing && (event === "PreToolUse" || syntheticToolStart)) {
       recordAcceptedRecapEvent({
         occurredAt: Number.isSafeInteger(opts.recapOccurredAt) && opts.recapOccurredAt >= 0
           ? opts.recapOccurredAt : Date.now(),
         agentId: "claude-code", sessionId, rawSessionId: existing.rawSessionId || sessionId,
         profileId: existing.profileId || "local", host: existing.host || null,
-        wslDistro: existing.wslDistro || null, event, toolUseId: opts.toolUseId,
+        wslDistro: existing.wslDistro || null, event: "PreToolUse", toolUseId: opts.toolUseId,
         recapSuppressed: opts.recapSuppressed, recapIsSubagent: opts.recapIsSubagent,
         subagentId: opts.subagentId, subagentType: opts.subagentType,
       }, getLastSessionSnapshot());

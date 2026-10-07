@@ -32,6 +32,55 @@ function check(name, fn) {
   });
 }
 
+check("a settled Agent start cannot revive a child that already stopped", (_t, actual) => {
+  const h = runtime();
+  try {
+    h.send("UserPromptSubmit", "thinking");
+    h.send("PostToolBatch", "thinking", { batchToolUseIds: ["agent-tool"] });
+    h.send("PostToolUse", "working", { toolUseId: "agent-tool", toolName: "Agent" });
+    h.send("SubagentStart", "juggling", { subagentId: "child-a", subagentLifecycleSource: "native" });
+    h.send("SubagentStop", "working", { subagentId: "child-a", subagentLifecycleSource: "native" });
+    const before = JSON.stringify(h.api.buildSessionSnapshot());
+    h.send("SubagentStart", "juggling", { toolUseId: "agent-tool", toolName: "Agent", subagentLifecycleSource: "synthetic-tool" });
+    actual.state = h.api.sessions.get(h.sid).state;
+    assert.equal(actual.state, "thinking");
+    assert.equal(h.api.sessions.get(h.sid).subagentTracker.legacyFloor, false);
+    assert.equal(JSON.stringify(h.api.buildSessionSnapshot()), before);
+    h.send("SubagentStart", "juggling", { toolUseId: "fresh-agent", toolName: "Agent", subagentLifecycleSource: "synthetic-tool" });
+    assert.equal(h.api.sessions.get(h.sid).state, "juggling", "fresh tool starts remain live evidence");
+  } finally { h.api.cleanup(); }
+});
+
+check("an unknown child Stop cannot suppress a delayed settled Agent start", (_t, actual) => {
+  const h = runtime();
+  try {
+    h.send("UserPromptSubmit", "thinking");
+    h.send("PostToolBatch", "thinking", { batchToolUseIds: ["agent-tool"] });
+    h.send("PostToolUse", "working", { toolUseId: "agent-tool" });
+    h.send("SubagentStop", "working", { subagentId: "unknown-child", subagentLifecycleSource: "native" });
+    h.send("SubagentStart", "juggling", { toolUseId: "agent-tool", toolName: "Agent", subagentLifecycleSource: "synthetic-tool" });
+    actual.state = h.api.sessions.get(h.sid).state;
+    assert.equal(actual.state, "juggling");
+  } finally { h.api.cleanup(); }
+});
+
+check("a queued first Pre after its Stop counts once without reviving completion", (_t, actual) => {
+  const h = runtime();
+  try {
+    h.send("UserPromptSubmit", "thinking"); h.send("Stop", "attention");
+    const queued = { claudePromptId: "queued", toolUseId: "queued-tool" };
+    h.send("PostToolBatch", "thinking", { ...queued, batchToolUseIds: ["queued-tool"] });
+    h.send("Stop", "attention", { ...queued, assistantLastOutput: "fixture answer" });
+    const before = JSON.stringify(h.api.buildSessionSnapshot()), soundCount = h.sounds.length;
+    h.send("PreToolUse", "working", queued); h.send("PreToolUse", "working", queued);
+    actual.tools = h.sink.snapshot().filter(event => event.metrics.includes("tool-call")).length;
+    assert.equal(actual.tools, 1);
+    assert.equal(JSON.stringify(h.api.buildSessionSnapshot()), before);
+    assert.equal(h.sounds.length, soundCount);
+    assert.equal(h.api.deriveSessionBadge(h.api.sessions.get(h.sid)), "done");
+  } finally { h.api.cleanup(); }
+});
+
 for (const gate of ["approval", "DND", "headless"]) {
   check(`retained batch rechecks ${gate} before a delayed tool callback`, (_t, actual) => {
     const h = runtime();
