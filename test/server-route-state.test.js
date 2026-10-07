@@ -338,6 +338,65 @@ describe("server-route-state POST", () => {
     } finally { api.cleanup(); }
   });
 
+  for (const foreignEvent of ["PreToolUse", "PostToolUse", "Stop"]) {
+    it(`still completes the open Claude prompt after unseen ${foreignEvent} through /state`, async () => {
+      const sounds = [];
+      const api = makeClaudePhaseStateRuntime({ playSound: name => sounds.push(name) });
+      const rawId = "unseen-prompt-arrival", sid = localSessionKey(rawId);
+      const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+        { session_id: rawId, prompt_id: "open", ...extra }, () => ({ pid: null }))), { ctx: {
+        sessions: api.sessions, observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+      } });
+      try {
+        await post("UserPromptSubmit");
+        await post("PreToolUse", { tool_name: "Read", tool_use_id: "open-tool" });
+        await post(foreignEvent, { prompt_id: "unseen", tool_name: "Read", tool_use_id: "unseen-tool" });
+        await post("PostToolUse", { tool_name: "Read", tool_use_id: "open-tool" });
+        sounds.length = 0;
+        await post("Stop");
+        assert.equal(api.sessions.get(sid).state, "idle");
+        assert.equal(api.deriveSessionBadge(api.sessions.get(sid)), "done");
+        assert.deepEqual(sounds, ["complete"]);
+      } finally { api.cleanup(); }
+    });
+  }
+
+  for (const multi of [false, true]) {
+    for (const tail of ["PreToolUse", "PostToolUseFailure"]) {
+      it(`recovers a reordered Claude ${multi ? "parallel" : "single-tool"} batch via ${tail} through /state`, async () => {
+        const pendingPermissions = [];
+        const api = makeClaudePhaseStateRuntime({ pendingPermissions });
+        const rawId = "reordered-claude-batch", sid = localSessionKey(rawId);
+        const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+          { session_id: rawId, prompt_id: "open", ...extra }, () => ({ pid: null }))), { ctx: {
+          sessions: api.sessions, pendingPermissions,
+          observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+        } });
+        try {
+          await post("UserPromptSubmit");
+          if (multi) await post("PreToolUse", { tool_use_id: "slow-tool", tool_name: "Read" });
+          const toolIds = multi ? ["slow-tool", "fast-tool"] : ["fast-tool"];
+          await post("PostToolBatch", { tool_calls: toolIds.map(tool_use_id => ({ tool_use_id })) });
+          if (tail === "PostToolUseFailure") pendingPermissions.push({ res: {}, sessionId: sid,
+            agentId: "claude-code", toolUseId: "fast-tool", toolName: "Bash" });
+          const response = await post(tail, { tool_use_id: "fast-tool", tool_name: "Bash", error: "fixture failure" });
+          assert.equal(api.sessions.get(sid).state, "thinking");
+          if (tail === "PostToolUseFailure") {
+            assert.equal(api.getCurrentState(), "error");
+            assert.equal(response.calls.resolved.length, 1);
+            pendingPermissions.length = 0;
+          }
+          await post("PreToolUse", { tool_use_id: "fast-tool", tool_name: "Bash" });
+          await post("PostToolUse", { tool_use_id: "fast-tool", tool_name: "Bash" });
+          assert.equal(api.sessions.get(sid).state, "thinking");
+          await post("PreToolUse", { tool_use_id: "next-tool", tool_name: "Read" });
+          await post("PostToolBatch", { tool_calls: [{ tool_use_id: "next-tool" }] });
+          assert.equal(api.sessions.get(sid).state, "thinking");
+        } finally { api.cleanup(); }
+      });
+    }
+  }
+
   it("accepts a queued Claude turn with a new prompt id and no second UserPromptSubmit", async () => {
     const api = makeClaudePhaseStateRuntime();
     const rawId = "queued-claude-turn";

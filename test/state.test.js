@@ -5993,6 +5993,63 @@ describe("Stop completion gate (#406)", () => {
     }
   });
 
+  for (const batchFirst of [true, false]) {
+    it(`keeps the AskUserQuestion transcript fallback after a batch (batchFirst=${batchFirst})`, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-claude-batch-probe-"));
+      const transcript = path.join(dir, "transcript.jsonl");
+      const rawSessionId = "claude-batch-probe";
+      const sessionId = resolveSessionIdentity(rawSessionId, "local").sessionId;
+      const opts = { agentId: "claude-code", rawSessionId, claudePromptId: "probe-prompt",
+        toolUseId: "ask-tool", toolName: "AskUserQuestion", transcriptPath: transcript };
+      const batch = () => api.updateSession(sessionId, "thinking", "PostToolBatch",
+        { ...opts, batchToolUseIds: ["ask-tool"] });
+      try {
+        fs.writeFileSync(transcript, JSON.stringify({ type: "assistant",
+          message: { content: [{ type: "tool_use", name: "AskUserQuestion" }] } }) + "\n");
+        api.updateSession(sessionId, "thinking", "UserPromptSubmit", opts);
+        api.updateSession(sessionId, "working", "PreToolUse", opts);
+        if (batchFirst) batch();
+        api.updateSession(sessionId, "working", "PostToolUse", opts);
+        if (!batchFirst) batch();
+        mock.timers.tick(1999);
+        assert.equal(api.sessions.get(sessionId).state, "thinking");
+        assert.ok(!soundsPlayed.includes("complete"));
+        fs.appendFileSync(transcript, JSON.stringify({ type: "assistant",
+          message: { content: "Final answer after the question." } }) + "\n");
+        mock.timers.tick(1);
+        assert.equal(api.sessions.get(sessionId).state, "idle");
+        assert.equal(api.deriveSessionBadge(api.sessions.get(sessionId)), "done");
+        mock.timers.tick(_defaultTheme.timings.minDisplay.thinking);
+        assert.equal(soundsPlayed.filter(sound => sound === "complete").length, 1);
+        assert.equal(batch(), false, "a trailing batch cannot reopen transcript completion");
+        api.updateSession(sessionId, "working", "PreToolUse",
+          { ...opts, claudePromptId: "queued-prompt", toolUseId: "queued-tool", toolName: "Read" });
+        api.updateSession(sessionId, "thinking", "PostToolBatch",
+          { ...opts, claudePromptId: "queued-prompt", batchToolUseIds: ["queued-tool"] });
+        assert.equal(api.sessions.get(sessionId).state, "thinking");
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
+  it("cancels the batch-thinking question probe when a real next tool starts", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-claude-batch-probe-"));
+    const transcript = path.join(dir, "transcript.jsonl");
+    const opts = { agentId: "claude-code", claudePromptId: "probe-prompt", toolUseId: "ask-tool",
+      toolName: "AskUserQuestion", transcriptPath: transcript };
+    try {
+      fs.writeFileSync(transcript, "");
+      api.updateSession("probe-cancel", "thinking", "UserPromptSubmit", opts);
+      api.updateSession("probe-cancel", "working", "PreToolUse", opts);
+      api.updateSession("probe-cancel", "working", "PostToolUse", opts);
+      api.updateSession("probe-cancel", "thinking", "PostToolBatch", { ...opts, batchToolUseIds: ["ask-tool"] });
+      api.updateSession("probe-cancel", "working", "PreToolUse", { ...opts, toolUseId: "next-tool", toolName: "Read" });
+      fs.appendFileSync(transcript, JSON.stringify({ type: "assistant", message: { content: "Old final answer." } }) + "\n");
+      mock.timers.tick(10000);
+      assert.equal(api.sessions.get("probe-cancel").state, "working");
+      assert.ok(!soundsPlayed.includes("complete"));
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("Claude AskUserQuestion PostToolUse falls back to transcript completion when Stop is missed", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-claude-stop-fallback-"));
     const transcript = path.join(dir, "transcript.jsonl");

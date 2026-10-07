@@ -43,6 +43,7 @@ function createClaudeToolPhaseLedger(options = {}) {
       open: false,
       unconfirmable: false,
       tools: new Map(),
+      earlyBatches: [],
       retiredToolIds: new Set(),
       retiredPromptIds: new Set(),
     };
@@ -51,7 +52,11 @@ function createClaudeToolPhaseLedger(options = {}) {
   function retireCurrent(record, retirePrompt = true) {
     if (retirePrompt) remember(record.retiredPromptIds, record.promptId, MAX_RETIRED_PROMPTS);
     for (const id of record.tools.keys()) remember(record.retiredToolIds, id, maxTools);
+    for (const batch of record.earlyBatches) {
+      for (const id of batch) remember(record.retiredToolIds, id, maxTools);
+    }
     record.tools.clear();
+    record.earlyBatches = [];
   }
 
   function preservePhase(reason, retired = false) {
@@ -119,6 +124,13 @@ function createClaudeToolPhaseLedger(options = {}) {
     // hook. Only ordinary evidence can establish that turn; a batch itself
     // must never replace the current ledger or invent its tool starts.
     if (!isBatch && promptId && promptId !== record.promptId) {
+      if (record.open) {
+        // Unseen ordinary traffic is not proof that the open query ended.
+        // Retain its identity so its own Stop still completes normally.
+        record.unconfirmable = true;
+        record.earlyBatches = [];
+        return { accept: true, reason: "different-open-prompt" };
+      }
       retireCurrent(record);
       record.promptId = promptId;
       record.open = true;
@@ -143,10 +155,12 @@ function createClaudeToolPhaseLedger(options = {}) {
       const ids = normalizeClaudeBatchToolUseIds(input.toolUseIds);
       if (!ids) return { accept: false, reason: "invalid-batch" };
       if (record.unconfirmable) return { accept: false, reason: "uncertain-tools" };
+      let missingStart = false;
       for (const id of ids) {
         const tool = record.tools.get(id);
-        if (!tool || record.retiredToolIds.has(id)) return { accept: false, reason: "unknown-batch-tool" };
-        if (tool.batchSettled) return { accept: false, reason: "settled-batch" };
+        if (record.retiredToolIds.has(id)) return { accept: false, reason: "unknown-batch-tool" };
+        if (!tool) missingStart = true;
+        else if (tool.batchSettled) return { accept: false, reason: "settled-batch" };
       }
       const batchIds = new Set(ids);
       // Even a PostToolUse-completed sibling still needs its own batch
@@ -156,7 +170,23 @@ function createClaudeToolPhaseLedger(options = {}) {
           return { accept: false, reason: "other-unsettled-tools" };
         }
       }
+      if (missingStart) {
+        // Batch hooks skip PID discovery and can overtake fast Pre/Post hooks.
+        // Retain the whole boundary, but never invent starts or change phase
+        // until every named tool has supplied ordinary correlated evidence.
+        const duplicate = record.earlyBatches.some(batch => batch.size === batchIds.size
+          && ids.every(id => batch.has(id)));
+        const retainedIds = record.earlyBatches.reduce((count, batch) => count + batch.size, 0);
+        if (!duplicate && retainedIds + ids.length > maxTools) {
+          record.unconfirmable = true;
+          record.earlyBatches = [];
+          return { accept: false, reason: "early-batch-capacity" };
+        }
+        if (!duplicate) record.earlyBatches.push(batchIds);
+        return { accept: false, reason: "early-batch" };
+      }
       for (const id of ids) record.tools.get(id).batchSettled = true;
+      record.earlyBatches = record.earlyBatches.filter(batch => !ids.some(id => batch.has(id)));
       return { accept: true, thinking: true, reason: "batch-settled" };
     }
 
@@ -183,15 +213,26 @@ function createClaudeToolPhaseLedger(options = {}) {
       record.unconfirmable = true;
       return { accept: true, reason: "uncorrelated-tool" };
     }
-    if (isPre) {
+    const earlyBatchTool = record.earlyBatches.some(batch => batch.has(toolUseId));
+    if (isPre || earlyBatchTool) {
       if (!knownTool) {
         if (record.tools.size >= maxTools) {
           record.unconfirmable = true;
           return { accept: true, reason: "tool-capacity" };
         }
-        record.tools.set(toolUseId, { completed: false, batchSettled: false });
+        record.tools.set(toolUseId, { batchSettled: false });
       }
-      return { accept: true, reason: "tool-start" };
+      if (!record.unconfirmable) {
+        const ready = record.earlyBatches.find(batch => [...batch].every(id => record.tools.has(id))
+          && [...record.tools].every(([id, tool]) => tool.batchSettled || batch.has(id)));
+        if (ready) {
+          for (const id of ready) record.tools.get(id).batchSettled = true;
+          record.earlyBatches = record.earlyBatches.filter(batch => ![...ready].some(id => batch.has(id)));
+          return { accept: true, thinking: true, errorCue: event === "PostToolUseFailure",
+            reason: "reordered-batch-settled" };
+        }
+      }
+      return { accept: true, reason: isPre ? "tool-start" : "early-batch-result" };
     }
     if (!knownTool) {
       // Async Post may beat Pre. Fail closed for the phase hint instead of
@@ -199,7 +240,6 @@ function createClaudeToolPhaseLedger(options = {}) {
       record.unconfirmable = true;
       return { accept: true, reason: "unknown-tool-result" };
     }
-    knownTool.completed = true;
     return { accept: true, reason: "tool-result" };
   }
 

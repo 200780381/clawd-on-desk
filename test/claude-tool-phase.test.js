@@ -16,6 +16,60 @@ function batch(ledger, ids = ["tool-a"], extra = {}) {
 }
 
 describe("Claude main-session tool phase", () => {
+  for (const foreignEvent of ["PreToolUse", "PostToolUse", "Stop"]) {
+    it(`keeps the open prompt completable after unseen ${foreignEvent} traffic`, () => {
+      const ledger = createClaudeToolPhaseLedger();
+      start(ledger);
+      ledger.observe(event(foreignEvent, { promptId: "unseen", toolUseId: "foreign-tool" }));
+      assert.equal(batch(ledger).accept, false);
+      const stop = ledger.observe(event("Stop"));
+      assert.equal(stop.accept, true);
+      assert.equal(stop.preservePhase, undefined);
+      ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "queued-tool" }));
+      assert.equal(batch(ledger, ["queued-tool"], { promptId: "queued" }).thinking, true);
+    });
+  }
+
+  for (const multi of [false, true]) {
+    for (const tail of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
+      it(`recovers an early ${multi ? "parallel" : "single-tool"} batch on ${tail}`, () => {
+        const ledger = createClaudeToolPhaseLedger();
+        start(ledger, multi ? ["slow-tool"] : []);
+        const ids = multi ? ["slow-tool", "fast-tool"] : ["fast-tool"];
+        assert.equal(batch(ledger, ids).accept, false, "a batch alone must not invent a tool start");
+        const recovered = ledger.observe(event(tail, { toolUseId: "fast-tool" }));
+        assert.equal(recovered.thinking, true);
+        assert.equal(recovered.errorCue, tail === "PostToolUseFailure");
+        ledger.observe(event("PreToolUse", { toolUseId: "fast-tool" }));
+        const failure = ledger.observe(event("PostToolUseFailure", { toolUseId: "fast-tool" }));
+        assert.equal(failure.errorCue, true);
+        ledger.observe(event("PreToolUse", { toolUseId: "next-tool" }));
+        assert.equal(batch(ledger, ["next-tool"]).thinking, true, "the reordered tool must not block later batches");
+      });
+    }
+  }
+
+  it("clears early batch evidence on terminal and new-prompt boundaries", () => {
+    for (const boundary of ["Stop", "StopFailure", "ApiError", "SessionEnd", "UserPromptSubmit"]) {
+      const ledger = createClaudeToolPhaseLedger();
+      start(ledger, []);
+      batch(ledger, ["early-tool"]);
+      ledger.observe(event(boundary, boundary === "UserPromptSubmit" ? { promptId: "new-prompt" } : {}));
+      assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "early-tool" })).preservePhase, true);
+      assert.equal(batch(ledger, ["early-tool"]).accept, false);
+    }
+  });
+
+  it("bounds early evidence and ignores repeated early batches without consuming its budget", () => {
+    const ledger = createClaudeToolPhaseLedger({ maxTools: 2 });
+    start(ledger, []);
+    for (let i = 0; i < 5; i++) assert.equal(batch(ledger, ["early-a"]).reason, "early-batch");
+    assert.equal(batch(ledger, ["early-b"]).reason, "early-batch");
+    assert.equal(batch(ledger, ["early-c"]).reason, "early-batch-capacity");
+    ledger.observe(event("PreToolUse", { toolUseId: "early-a" }));
+    assert.equal(batch(ledger, ["early-a"]).accept, false);
+  });
+
   it("changes phase only at a correlated complete parallel batch", () => {
     const ledger = createClaudeToolPhaseLedger();
     start(ledger, ["read-a", "read-b"]);
