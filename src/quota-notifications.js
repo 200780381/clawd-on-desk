@@ -9,7 +9,14 @@ function formatQuotaAlert(event, lang) {
   const strings = getQuotaStrings(lang);
   const provider = ({ claudeQuota: "Claude Code", codexQuota: "Codex", codexSparkQuota: "Codex Spark",
     kimiQuota: "Kimi", antigravityQuota: "Antigravity" })[event.providerKey] || event.providerKey;
-  const n = event.windowMinutes;
+  const knownWindowMinutes = {
+    claudeFiveHour: 300, claudeWeekly: 10080,
+    geminiFiveHour: 300, geminiWeekly: 10080,
+    thirdPartyFiveHour: 300, thirdPartyWeekly: 10080,
+    codexFiveHour: 300, codexWeekly: 10080, kimiFiveHour: 300, kimiWeekly: 10080,
+  };
+  const n = Number.isFinite(event.windowMinutes) && event.windowMinutes > 0
+    ? event.windowMinutes : knownWindowMinutes[event.windowKey];
   const windowLabel = Number.isFinite(n) && n > 0 ? (n % 1440 === 0
     ? strings.quotaWindowDays.replace("{n}", String(n / 1440))
     : n % 60 === 0 ? strings.quotaWindowHours.replace("{n}", String(n / 60))

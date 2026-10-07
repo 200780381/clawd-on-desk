@@ -34,6 +34,18 @@ test("format all languages using actual window length; omit unknown duration cle
     assert.notEqual(formatQuotaAlert({ ...EVENT, type: "recovered" }, lang).title, formatQuotaAlert(EVENT, lang).title);
   }
 });
+test("known provider window keys supply missing lengths while explicit reports remain authoritative", () => {
+  for (const lang of ["en", "zh", "zh-TW", "ja", "ko", "pt-BR", "es"]) {
+    for (const [windowKey, minutes] of [["claudeFiveHour", 300], ["claudeWeekly", 10080],
+      ["geminiFiveHour", 300], ["geminiWeekly", 10080], ["thirdPartyFiveHour", 300], ["thirdPartyWeekly", 10080]]) {
+      const absent = formatQuotaAlert({ ...EVENT, windowKey, windowMinutes: null }, lang);
+      assert.deepEqual(absent, formatQuotaAlert({ ...EVENT, windowKey, windowMinutes: minutes }, lang));
+      assert.deepEqual(formatQuotaAlert({ ...EVENT, windowKey, windowMinutes: 90 }, lang),
+        formatQuotaAlert({ ...EVENT, windowMinutes: 90 }, lang));
+    }
+    assert.ok(!formatQuotaAlert({ ...EVENT, windowKey: "unknown", windowMinutes: null }, lang).body.includes("·"));
+  }
+});
 test("wait for native show, respect mute and retain the click handler until close", async () => {
   const h = harness(); h.mute(true);
   let resolved = false; const pending = h.presenter.show(EVENT).then(v => { resolved = true; return v; });

@@ -550,6 +550,15 @@ DND or failed notification delivery preserves eligibility. The settings-only tes
 is owner-gated, does not mutate quota/history, and uses the same settings i18n as native alerts.
 See `docs/guides/quota-reminders.md` for thresholds, recovery and retention.
 
+Known window keys supply a display label when a provider omits windowMinutes;
+an explicit reported duration remains authoritative. Failed delivery retries
+after 30 seconds, doubles to a 15-minute cap, and never consumes eligibility.
+Cooldown is private in-memory state per source/window/candidate, is discarded
+with its history owner, and resets for a new window or a more urgent threshold.
+DND suppresses attempts without extending cooldown. Native show acknowledges
+system acceptance; the localized Test result points to OS notification settings
+when no banner appears. The Windows balloon fallback still acknowledges dispatch.
+
 `state.js` 的 session snapshot 是共享 schema：Dashboard、Session HUD（含 Orbit quota ring）以及可选 Telegram completion、Discord presence、LAN PWA 等 consumer 都会读取它。新增、重命名或删除字段时必须检查全部 consumer，不能只看 Dashboard/HUD。
 
 ## WorkBuddy Native Session Titles
