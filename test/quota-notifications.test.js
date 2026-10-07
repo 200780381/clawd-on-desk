@@ -34,6 +34,32 @@ test("format all languages using actual window length; omit unknown duration cle
     assert.notEqual(formatQuotaAlert({ ...EVENT, type: "recovered" }, lang).title, formatQuotaAlert(EVENT, lang).title);
   }
 });
+test("Claude and Antigravity slot names supply missing lengths while explicit reports remain authoritative", () => {
+  // Each slot is paired with the provider that actually owns it: only Claude
+  // Code and Antigravity infer a window from the slot name.
+  const slots = [
+    ["claudeQuota", "claudeFiveHour", 300, "claudeWeekly"],
+    ["claudeQuota", "claudeWeekly", 10080, "claudeFiveHour"],
+    ["antigravityQuota", "geminiFiveHour", 300, "geminiWeekly"],
+    ["antigravityQuota", "geminiWeekly", 10080, "geminiFiveHour"],
+    ["antigravityQuota", "thirdPartyFiveHour", 300, "thirdPartyWeekly"],
+    ["antigravityQuota", "thirdPartyWeekly", 10080, "thirdPartyFiveHour"],
+  ];
+  for (const lang of ["en", "zh", "zh-TW", "ja", "ko", "pt-BR", "es"]) {
+    for (const [providerKey, windowKey, minutes, siblingWindowKey] of slots) {
+      const event = { ...EVENT, providerKey, windowKey };
+      // A missing duration renders exactly like the slot's implied duration.
+      assert.deepEqual(formatQuotaAlert({ ...event, windowMinutes: null }, lang),
+        formatQuotaAlert({ ...event, windowMinutes: minutes }, lang));
+      // An explicit duration wins over the slot name; both sides share the
+      // provider and group, so their display names match too.
+      assert.deepEqual(formatQuotaAlert({ ...event, windowMinutes: 90 }, lang),
+        formatQuotaAlert({ ...event, windowKey: siblingWindowKey, windowMinutes: 90 }, lang));
+    }
+    assert.ok(!formatQuotaAlert({ ...EVENT, providerKey: "claudeQuota", windowKey: "unknown",
+      windowMinutes: null }, lang).body.includes("·"));
+  }
+});
 test("wait for native show, respect mute and retain the click handler until close", async () => {
   const h = harness(); h.mute(true);
   let resolved = false; const pending = h.presenter.show(EVENT).then(v => { resolved = true; return v; });

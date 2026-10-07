@@ -11,6 +11,8 @@ const MAX_RESET_AHEAD_MS = 45 * 24 * 60 * 60 * 1000;
 const MAX_HISTORY_RECORDS = 256;
 const MAX_HISTORY_BYTES = 256 * 1024;
 const PERSIST_DEBOUNCE_MS = 2000;
+const FAILURE_RETRY_BASE_MS = 30_000;
+const FAILURE_RETRY_CAP_MS = 15 * 60_000;
 const PROVIDER_WINDOWS = {
   antigravityQuota: ["geminiFiveHour", "geminiWeekly", "thirdPartyFiveHour", "thirdPartyWeekly"],
   claudeQuota: ["claudeFiveHour", "claudeWeekly"],
@@ -62,6 +64,7 @@ function createQuotaAlerts(options = {}) {
   const startedAt = now();
   const records = new Map();
   const pending = new Map();
+  const failures = new Map(); // Ephemeral and bounded by the live history keys.
   let dirty = false;
   let persistTimer = null;
   let disposed = false;
@@ -79,10 +82,14 @@ function createQuotaAlerts(options = {}) {
         dirty = true;
       }
     }
-    if (records.size <= MAX_HISTORY_RECORDS) return;
-    const oldest = [...records].sort((a, b) => a[1].observedAt - b[1].observedAt);
-    for (const [key] of oldest.slice(0, records.size - MAX_HISTORY_RECORDS)) records.delete(key);
-    dirty = true;
+    if (records.size > MAX_HISTORY_RECORDS) {
+      const oldest = [...records].sort((a, b) => a[1].observedAt - b[1].observedAt);
+      for (const [key] of oldest.slice(0, records.size - MAX_HISTORY_RECORDS)) records.delete(key);
+      dirty = true;
+    }
+    for (const [key, failure] of failures) {
+      if (records.get(key) !== failure.record) failures.delete(key);
+    }
   }
 
   function load() {
@@ -155,9 +162,25 @@ function createQuotaAlerts(options = {}) {
 
   function deliver(event, config, record, acknowledge) {
     if (config.suppressed === true || pending.has(record.key)) return false;
+    const candidate = `${event.type}:${event.threshold ?? ""}`;
+    const previous = failures.get(record.key);
+    if (previous && previous.record === record && previous.candidate === candidate
+      && now() < previous.nextAttemptAt) return false;
+    const failed = () => {
+      if (disposed || records.get(record.key) !== record) return;
+      const previous = failures.get(record.key);
+      const attempts = previous && previous.record === record && previous.candidate === candidate
+        ? Math.min(previous.attempts + 1, 10) : 1;
+      failures.set(record.key, { record, candidate, attempts,
+        nextAttemptAt: now() + Math.min(FAILURE_RETRY_CAP_MS, FAILURE_RETRY_BASE_MS * 2 ** (attempts - 1)) });
+    };
     try {
       const result = notify(event);
-      if (!result || typeof result.then !== "function") return result === true;
+      if (!result || typeof result.then !== "function") {
+        if (result === true) failures.delete(record.key);
+        else failed();
+        return result === true;
+      }
       const token = {};
       pending.set(record.key, token);
       Promise.resolve(result).then((shown) => {
@@ -166,13 +189,20 @@ function createQuotaAlerts(options = {}) {
         if (shown === true && !disposed && pending.get(record.key) === token
           && records.get(record.key) === record) {
           acknowledge();
+          failures.delete(record.key);
           dirty = true;
           flush();
+        } else if (shown !== true && pending.get(record.key) === token) {
+          failed();
         }
-      }, (error) => warn("Clawd: quota alert notification could not be shown", error))
+      }, (error) => {
+        if (pending.get(record.key) === token) failed();
+        warn("Clawd: quota alert notification could not be shown", error);
+      })
         .finally(() => { if (pending.get(record.key) === token) pending.delete(record.key); });
       return false;
     } catch (error) {
+      failed();
       warn("Clawd: quota alert notification could not be shown", error);
       return false;
     }
@@ -281,6 +311,7 @@ function createQuotaAlerts(options = {}) {
     flush();
     disposed = true;
     pending.clear();
+    failures.clear();
   }
 
   load();
