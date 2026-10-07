@@ -18,6 +18,19 @@ function event(overrides = {}) {
 }
 
 describe("codex turn fence", () => {
+  it("rejects a delayed closed-turn compaction when the next turn is working", () => {
+    const fence = createCodexTurnFence();
+    fence.observe(event({ event: "UserPromptSubmit", state: "thinking" }));
+    fence.observe(event({ event: "Stop", state: "attention" }));
+    fence.observe(event({ event: "PreCompact", state: "sweeping" }));
+    fence.observe(event({ event: "UserPromptSubmit", state: "thinking", turnId: "B" }));
+    fence.observe(event({ turnId: "B" }));
+    const before = fence.getSnapshot("codex:s1");
+    assert.equal(fence.observe(event({ event: "event_msg:context_compacted", state: "sweeping", source: "jsonl" })).reason, "closed-turn-id");
+    assert.equal(fence.observe(event({ event: "event_msg:context_compacted", state: "sweeping", turnId: "X" })).reason, "unexpected-distinct-work");
+    assert.equal(fence.observe(event({ event: "event_msg:context_compacted", state: "sweeping", turnId: "B" })).accept, true);
+    assert.deepEqual(fence.getSnapshot("codex:s1"), before);
+  });
   it("accepts manual compaction after Stop without reopening the completed turn", () => {
     const fence = createCodexTurnFence();
     fence.observe(event({ event: "UserPromptSubmit", state: "thinking" }));

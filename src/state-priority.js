@@ -69,7 +69,7 @@ function resolveDisplayStateFromSessions(sessions, options = {}) {
   const statePriority = options.statePriority || STATE_PRIORITY;
   let best = resolveDominantSessionState(sessions, { statePriority });
 
-  if (options.compacting === true && getStatePriority(best, statePriority) < getStatePriority("sweeping", statePriority)) {
+  if (options.compacting === true && getStatePriority(best, statePriority) < getStatePriority("thinking", statePriority)) {
     best = "sweeping";
   }
 

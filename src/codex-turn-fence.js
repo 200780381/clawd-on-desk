@@ -109,6 +109,17 @@ function createCodexTurnFence(options = {}) {
     // and timestamp guards run at ingestion before this fence.
     if (input.state === "sweeping"
       && (input.event === "PreCompact" || input.event === "event_msg:context_compacted")) {
+      const owner = records.get(sessionId);
+      // A post-turn/manual compact may finish after its old turn closed, but
+      // must not overwrite another turn that has since started. With an open
+      // id-less turn, an identified completion is not proven to belong to it.
+      if (owner && !owner.terminalLatch && input.turnId
+        && input.turnId !== owner.currentTurnId) {
+        const reason = owner.closedTurnIds.has(input.turnId)
+          ? "closed-turn-id" : "unexpected-distinct-work";
+        logDecision("drop", input, reason);
+        return { accept: false, reason };
+      }
       return { accept: true, reason: "housekeeping" };
     }
     const syntheticOpenStart = input.syntheticBackfill === true

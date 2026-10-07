@@ -50,12 +50,14 @@ monitor 当前标题与索引不一致时也会重发，覆盖索引恢复场景
 
 Codex 压缩开始通过 official `PreCompact` hook 触发既有 `sweeping` 动画，
 同时覆盖 `manual` / `auto` trigger。`state.js` 按 conversation ID 保留私有显示持有记录，
-压缩期间其他对话的工作/思考不会盖掉清扫；共用 Desktop PID 的对话各自持有、各自释放，
+压缩持有只在没有其他对话工作/思考时选择清扫；完成、错误和审批提示仍正常播放，
+提示结束后按仍存活的持有记录恢复清扫。共用 Desktop PID 的对话各自持有、各自释放，
 不改 session snapshot 合约。完成、同会话恢复工作/思考、SessionStart、Stop/abort/end、
 过期清理、隐藏/禁用/移除会话均释放；缺失完成事件最多持有 10 分钟，重复开始不延长。
 headless 压缩不占全局动画；DND、禁用清扫、确认审批锁与更高优先级显示仍受保护。
 手动压缩可发生在回合结束后，turn fence 将精确的开始/完成清扫事件视为 housekeeping，
-不重开回合、不放行旧工具尾事件，JSONL timestamp/backfill 保护不变。
+不重开回合、不放行旧工具尾事件；新回合已打开时，带不同 turn ID 的压缩信号不能覆盖
+新回合，只有当前回合或无 ID 的兼容信号可进入。JSONL timestamp/backfill 保护不变。
 它不结束回合、不产生控制决定。已有安装在下次集成同步时
 增量注册该事件，保留用户 hook；新增命令仍须遵守 Codex 原生 hook review。
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版

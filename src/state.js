@@ -640,12 +640,6 @@ function clearPendingStateTimer() {
 function setState(newState, svgOverride, options = {}) {
   if (shouldDropForDnd()) return;
 
-  if (options.settingsPreview !== true && hasCodexCompactionVisual()
-    && getStatePriority(newState, STATE_PRIORITY) < getStatePriority("sweeping", STATE_PRIORITY)) {
-    newState = resolveDisplayState();
-    svgOverride = getSvgOverride(newState);
-  }
-
   if (newState === "yawning" && SLEEP_SEQUENCE.has(currentState)) return;
 
   const sameState = newState === currentState;

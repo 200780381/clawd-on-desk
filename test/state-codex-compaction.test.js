@@ -18,7 +18,7 @@ describe("Codex compaction across desktop conversations", () => {
     processAlive = true;
     ctx = { theme, doNotDisturb: false, miniMode: false, miniTransitioning: false,
       mouseOverPet: false, mouseStillSince: Date.now(), pendingPermissions: [],
-      playSound: noop, sendToRenderer: (...args) => calls.push(args), syncHitWin: noop,
+      playSound: name => calls.push(["sound", name]), sendToRenderer: (...args) => calls.push(args), syncHitWin: noop,
       sendToHitWin: noop, miniPeekIn: noop, miniPeekOut: noop, buildContextMenu: noop,
       buildTrayMenu: noop, resolvePermissionEntry: noop, dismissPermissionsForDnd: noop,
       focusTerminalWindow: noop, processKill: () => {
@@ -30,21 +30,25 @@ describe("Codex compaction across desktop conversations", () => {
   afterEach(() => { state.cleanup(); mock.timers.reset(); });
   const send = (id, value, event, extra = {}) => state.updateSession(id, value, event, { ...opts, ...extra });
 
-  it("keeps sweeping while another conversation uses tools beyond the initial hold", () => {
+  it("yields to another conversation's work and completion, then resumes sweeping", () => {
     send("compacting", "sweeping", "PreCompact");
     mock.timers.tick(theme.timings.minDisplay.sweeping + 1000);
     send("other", "working", "PreToolUse");
     assert.equal(state.sessions.get("other").state, "working");
-    assert.equal(state.getCurrentState(), "sweeping");
+    assert.equal(state.getCurrentState(), "working");
     mock.timers.tick(226113);
     send("other", "working", "PostToolUse");
+    assert.equal(state.getCurrentState(), "working");
+    send("other", "attention", "Stop", { agentId: "claude-code", agentPid: null, sourcePid: null });
+    assert.ok(calls.some(call => call[0] === "sound" && call[1] === "complete"));
+    mock.timers.tick(7000);
     assert.equal(state.getCurrentState(), "sweeping");
     send("compacting", "sweeping", "event_msg:context_compacted");
     mock.timers.tick(2286);
     send("compacting", "idle", "SessionStart", { sessionStartSource: "compact" });
     assert.equal(state.getCurrentState(), "sweeping");
     mock.timers.tick(theme.timings.minDisplay.sweeping - 2286);
-    assert.equal(state.getCurrentState(), "working");
+    assert.equal(state.resolveDisplayState(), "idle");
   });
 
   it("keeps each compaction independent when two conversations compact", () => {
@@ -54,11 +58,15 @@ describe("Codex compaction across desktop conversations", () => {
     send("first", "sweeping", "event_msg:context_compacted");
     send("first", "working", "PreToolUse");
     mock.timers.tick(7000);
+    assert.equal(state.getCurrentState(), "working");
+    send("first", "attention", "Stop");
+    mock.timers.tick(theme.timings.autoReturn.attention);
+    mock.timers.tick(theme.timings.minDisplay.sweeping);
     assert.equal(state.getCurrentState(), "sweeping");
     send("second", "sweeping", "event_msg:context_compacted");
     send("second", "idle", "SessionStart");
     mock.timers.tick(theme.timings.minDisplay.sweeping);
-    assert.equal(state.getCurrentState(), "working");
+    assert.equal(state.resolveDisplayState(), "idle");
   });
 
   for (const [value, event] of [["working", "PreToolUse"], ["thinking", "UserPromptSubmit"],
@@ -87,6 +95,9 @@ describe("Codex compaction across desktop conversations", () => {
       send("other", "working", "PreToolUse", { agentId: "claude-code", agentPid: null, sourcePid: null });
       mock.timers.tick(7000);
       assert.equal(state.getCurrentState(), "working");
+      send("other", "attention", "Stop", { agentId: "claude-code", agentPid: null, sourcePid: null });
+      mock.timers.tick(7000);
+      assert.equal(state.resolveDisplayState(), "idle", "a released owner must not leave a latent sweep");
     });
   }
 
@@ -94,11 +105,10 @@ describe("Codex compaction across desktop conversations", () => {
     send("first", "sweeping", "PreCompact");
     mock.timers.tick(5 * 60 * 1000);
     send("first", "sweeping", "PreCompact");
-    send("other", "working", "PreToolUse");
     mock.timers.tick(5 * 60 * 1000 - 1);
     assert.equal(state.getCurrentState(), "sweeping");
     mock.timers.tick(1);
-    assert.equal(state.getCurrentState(), "working");
+    assert.equal(state.resolveDisplayState(), "idle");
   });
 
   it("does not give headless compaction a global animation", () => {
@@ -120,7 +130,7 @@ describe("Codex compaction across desktop conversations", () => {
     const resolved = state.resolveDisplayState();
     state.setState(resolved);
     mock.timers.tick(7000);
-    assert.equal(state.getCurrentState(), "sweeping");
+    assert.equal(state.getCurrentState(), "working");
   });
 
   it("honors disabled sweeping and DND while tracking the real lifecycle", () => {
@@ -147,6 +157,9 @@ describe("Codex compaction across desktop conversations", () => {
     mock.timers.tick(7000);
     assert.equal(state.getCurrentState(), "notification");
     send("other", "working", "PostToolUse", { agentId: "kimi-cli" });
+    mock.timers.tick(7000);
+    assert.equal(state.getCurrentState(), "working");
+    send("other", "attention", "Stop", { agentId: "kimi-cli" });
     mock.timers.tick(7000);
     assert.equal(state.getCurrentState(), "sweeping");
   });

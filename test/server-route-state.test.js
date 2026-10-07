@@ -4,6 +4,8 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert");
 const { EventEmitter } = require("node:events");
 const path = require("node:path");
+const fs = require("node:fs");
+const os = require("node:os");
 
 const {
   CLAWD_SERVER_HEADER,
@@ -62,7 +64,7 @@ function acceptedMetadataSpy(calls) {
   };
 }
 
-function makeMetadataStateRuntime() {
+function makeMetadataStateRuntime(overrides = {}) {
   const ctx = {
     lang: "en",
     theme: metadataContractTheme,
@@ -83,6 +85,7 @@ function makeMetadataStateRuntime() {
     pendingPermissions: [],
     processKill: () => { const err = new Error("dead"); err.code = "ESRCH"; throw err; },
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+    ...overrides,
   };
   return initState(ctx);
 }
@@ -190,6 +193,54 @@ describe("server-route-state health", () => {
 });
 
 describe("server-route-state POST", () => {
+  it("rejects a parsed old-turn compaction after HTTP hooks start a newer Codex turn", async () => {
+    const CodexLogMonitor = require("../agents/codex-log-monitor");
+    const codexConfig = require("../agents/codex");
+    class ManualCodexLogMonitor extends CodexLogMonitor { start() {} }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-codex-delayed-compaction-"));
+    const fileName = "rollout-2026-03-25T15-10-51-019d23d4-f1a9-7633-b9c7-758327137228.jsonl";
+    const filePath = path.join(dir, fileName);
+    const rawId = "codex:019d23d4-f1a9-7633-b9c7-758327137228", sid = localSessionKey(rawId);
+    const changes = [], sounds = [];
+    const api = makeMetadataStateRuntime({
+      theme: { ...metadataContractTheme, timings: { ...metadataContractTheme.timings, minDisplay: {} } },
+      sendToRenderer: (...args) => changes.push(args), playSound: name => sounds.push(name), processKill: () => true,
+    });
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => ManualCodexLogMonitor,
+      loadCodexAgent: () => ({ ...codexConfig, logConfig: { ...codexConfig.logConfig, sessionDir: dir } }),
+      getStateRuntime: () => api, updateSession: (...args) => api.updateSession(...args),
+    });
+    const post = (event, state, turnId) => callStatePost(JSON.stringify({
+      agent_id: "codex", session_id: rawId, hook_source: "codex-official", event, state, turn_id: turnId,
+    }), { ctx: { sessions: api.sessions, updateSession: (...args) => runtime.updateSessionFromServer(...args) } });
+    const appendCompaction = turnId => fs.appendFileSync(filePath, JSON.stringify({ type: "event_msg",
+      payload: { type: "item_completed", turn_id: turnId, item: { type: "ContextCompaction", id: "compact-item" } },
+    }) + "\n");
+    try {
+      await post("UserPromptSubmit", "thinking", "old-turn");
+      await post("Stop", "idle", "old-turn");
+      const monitor = runtime.startCodexLogMonitor();
+      monitor._findCodexWriterPid = () => null;
+      fs.writeFileSync(filePath, JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "old-turn" } }) + "\n");
+      monitor._pollFile(filePath, fileName);
+      await post("UserPromptSubmit", "thinking", "new-turn");
+      await post("PreToolUse", "working", "new-turn");
+      const before = JSON.stringify(api.buildSessionSnapshot());
+      changes.length = 0; sounds.length = 0;
+      appendCompaction("old-turn");
+      monitor._pollFile(filePath, fileName);
+      assert.equal(api.sessions.get(sid).state, "working");
+      assert.equal(JSON.stringify(api.buildSessionSnapshot()), before);
+      assert.deepEqual(changes, []);
+      assert.deepEqual(sounds, []);
+      appendCompaction("new-turn");
+      monitor._pollFile(filePath, fileName);
+      assert.equal(api.getCurrentState(), "sweeping", "current-turn compaction must still pass");
+    } finally {
+      runtime.cleanup(); api.cleanup(); fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("enforces DSH upstream sequence order across created, event, and disposed callbacks", async () => {
     const fence = createDshStateSequenceFence();
     const post = (event, state, sequence = {}) => callStatePost(JSON.stringify({
