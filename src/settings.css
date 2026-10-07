@@ -2165,6 +2165,11 @@ html, body {
   justify-content: center;
   text-align: center;
 }
+/* Author display rules outrank the UA [hidden] rule, so the reminder rows
+   toggled by the master switch need their own explicit hidden guard. */
+.quota-ring-option-list .row[hidden] {
+  display: none;
+}
 
 .kimi-quota-card {
   align-items: stretch;
@@ -2325,6 +2330,7 @@ html, body {
 }
 @container (max-width: 400px) {
   .quota-ring-display-mode-row,
+  .quota-alert-thresholds-row,
   .volume-slider-row {
     align-items: stretch;
     flex-direction: column;
@@ -2334,6 +2340,9 @@ html, body {
   .volume-slider-row .volume-control {
     width: 100%;
     min-width: 0;
+    margin-left: 0;
+  }
+  .quota-alert-thresholds-row .row-control {
     margin-left: 0;
   }
 }
@@ -5442,26 +5451,4 @@ html, body {
 .theme-official-retry-btn:disabled {
   opacity: 0.55;
   cursor: default;
-}
-:root .quota-alert-thresholds-control {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 260px;
-  justify-content: flex-end;
-}
-.quota-alert-thresholds-control .settings-select {
-  flex: 0 1 118px;
-  width: 118px;
-  min-width: 118px;
-}
-@container (max-width: 400px) {
-  .quota-alert-thresholds-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  :root .quota-alert-thresholds-control {
-    max-width: none;
-    justify-content: flex-start;
-  }
 }

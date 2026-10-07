@@ -5,11 +5,39 @@ require("./settings-i18n");
 const { STRINGS } = globalThis.ClawdSettingsI18n;
 function getQuotaStrings(lang) { return STRINGS[lang] || STRINGS.en; }
 
+const PROVIDER_NAMES = { claudeQuota: "Claude Code", codexQuota: "Codex", codexSparkQuota: "Codex Spark",
+  kimiQuota: "Kimi", antigravityQuota: "Antigravity" };
+// Claude Code's statusline and Antigravity's usage report never carry a window
+// duration, so only their fixed slot names may imply one. Codex-family slots are
+// excluded: the "primary" slot is not reliably the short window, so guessing
+// would mislabel it.
+const WINDOW_KEY_MINUTES = { FiveHour: 300, Weekly: 10080 };
+
+function deriveWindowMinutes(providerKey, windowKey) {
+  if (providerKey !== "claudeQuota" && providerKey !== "antigravityQuota") return null;
+  const key = typeof windowKey === "string" ? windowKey : "";
+  if (key.endsWith("FiveHour")) return WINDOW_KEY_MINUTES.FiveHour;
+  if (key.endsWith("Weekly")) return WINDOW_KEY_MINUTES.Weekly;
+  return null;
+}
+
+function providerDisplayName(event) {
+  if (event.providerKey === "antigravityQuota") {
+    // Antigravity reports two groups under one provider; name them the same way
+    // the Dashboard does so a notification is traceable back to its ring.
+    const key = typeof event.windowKey === "string" ? event.windowKey : "";
+    if (key.startsWith("gemini")) return "Antigravity Gemini";
+    if (key.startsWith("thirdParty")) return "Antigravity Claude/GPT";
+  }
+  return PROVIDER_NAMES[event.providerKey] || event.providerKey;
+}
+
 function formatQuotaAlert(event, lang) {
   const strings = getQuotaStrings(lang);
-  const provider = ({ claudeQuota: "Claude Code", codexQuota: "Codex", codexSparkQuota: "Codex Spark",
-    kimiQuota: "Kimi", antigravityQuota: "Antigravity" })[event.providerKey] || event.providerKey;
-  const n = event.windowMinutes;
+  const provider = providerDisplayName(event);
+  const n = Number.isFinite(event.windowMinutes) && event.windowMinutes > 0
+    ? event.windowMinutes
+    : deriveWindowMinutes(event.providerKey, event.windowKey);
   const windowLabel = Number.isFinite(n) && n > 0 ? (n % 1440 === 0
     ? strings.quotaWindowDays.replace("{n}", String(n / 1440))
     : n % 60 === 0 ? strings.quotaWindowHours.replace("{n}", String(n / 60))

@@ -1,11 +1,15 @@
 # Quota reminders
 
 Open **Settings → General → Session management → Quota ring** and enable quota
-reminders. Choose 1–5 different remaining-percentage thresholds (1–99) with the
-existing selectors; unused slots are Disabled. Defaults are **20% and 10%
-remaining**. Changes apply immediately. Recovery reminders are optional.
-The ring's Used/Remaining preference does not change reminder semantics, and
-reminders can remain enabled when the visible ring is hidden.
+reminders. **When to remind** offers four presets — 10% remaining, 20% and 10%
+(Default), 30% / 20% / 10%, and 50% / 20% / 10%. Combinations saved by older
+versions that don't match a preset keep working and appear as a **Custom** entry
+until you pick a preset.
+The reminder rows stay hidden while the master switch is off, and chosen levels
+apply immediately. Recovery reminders are optional. The ring's Used/Remaining
+preference does not change reminder semantics, and reminders can remain enabled
+when the visible ring is hidden. If a **Test notification** does not appear,
+allow Clawd in your system notification settings.
 
 Reminders consume the existing account reports separately for each provider,
 local/remote source and window. They do not enable usage collection or make

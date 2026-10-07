@@ -83,3 +83,39 @@ test("unsupported native notifications use the Windows balloon fallback only whe
   const linux = harness({ platform: "linux", trayBalloonOwner: { show() { throw new Error("must not show"); } } });
   linux.support(false); assert.equal(await linux.presenter.show(EVENT), false); linux.presenter.dispose();
 });
+
+test("claude quota slots imply their window when the report omits a duration", () => {
+  const fiveHour = { type: "low", providerKey: "claudeQuota", windowKey: "claudeFiveHour", remainingPercent: 15 };
+  const weekly = { type: "low", providerKey: "claudeQuota", windowKey: "claudeWeekly", remainingPercent: 9 };
+  assert.equal(formatQuotaAlert(fiveHour, "zh").body, "Claude Code · 5 小时额度：剩余 15%。");
+  assert.equal(formatQuotaAlert(weekly, "zh").body, "Claude Code · 7 天额度：剩余 9%。");
+  assert.equal(formatQuotaAlert(fiveHour, "en").body, "Claude Code · 5-hour window: 15% remaining.");
+  assert.equal(formatQuotaAlert(weekly, "en").body, "Claude Code · 7-day window: 9% remaining.");
+});
+
+test("antigravity names its two quota groups and infers their windows", () => {
+  const geminiWeekly = { type: "low", providerKey: "antigravityQuota", windowKey: "geminiWeekly", remainingPercent: 9 };
+  const thirdPartyFiveHour = { type: "low", providerKey: "antigravityQuota", windowKey: "thirdPartyFiveHour", remainingPercent: 30 };
+  assert.equal(formatQuotaAlert(geminiWeekly, "zh").body, "Antigravity Gemini · 7 天额度：剩余 9%。");
+  assert.equal(formatQuotaAlert(thirdPartyFiveHour, "en").body, "Antigravity Claude/GPT · 5-hour window: 30% remaining.");
+  assert.notEqual(formatQuotaAlert(geminiWeekly, "zh").body, formatQuotaAlert(thirdPartyFiveHour, "zh").body);
+});
+
+test("codex-family quota never guesses a window from its slot name", () => {
+  const cases = [["codexQuota", "Codex"], ["codexSparkQuota", "Codex Spark"], ["kimiQuota", "Kimi"]];
+  for (const [providerKey, name] of cases) {
+    const value = formatQuotaAlert({ type: "low", providerKey, windowKey: "codexWeekly", remainingPercent: 15 }, "zh");
+    assert.equal(value.body, `${name}：剩余 15%。`);
+    assert.ok(!value.body.includes("额度"));
+  }
+});
+
+test("keeps the remote source host on inferred window labels", () => {
+  const event = { type: "low", providerKey: "claudeQuota", windowKey: "claudeFiveHour", remainingPercent: 15,
+    host: "remote-host" };
+  assert.equal(formatQuotaAlert(event, "zh").body, "Claude Code (remote-host) · 5 小时额度：剩余 15%。");
+  assert.equal(
+    formatQuotaAlert({ ...event, providerKey: "antigravityQuota", windowKey: "geminiFiveHour" }, "en").body,
+    "Antigravity Gemini (remote-host) · 5-hour window: 15% remaining.",
+  );
+});
