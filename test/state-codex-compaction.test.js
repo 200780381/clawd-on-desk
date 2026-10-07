@@ -51,6 +51,56 @@ describe("Codex compaction across desktop conversations", () => {
     assert.equal(state.resolveDisplayState(), "idle");
   });
 
+  it("plays WorkBuddy completion queued behind sweeping even when compaction finishes first", () => {
+    send("compacting", "sweeping", "PreCompact");
+    mock.timers.tick(1000);
+    send("workbuddy", "thinking", "UserPromptSubmit", { agentId: "workbuddy", agentPid: 77, sourcePid: 77 });
+    send("workbuddy", "attention", "Stop", { agentId: "workbuddy", agentPid: 77, sourcePid: 77 });
+    assert.equal(state.deriveSessionBadge(state.sessions.get("workbuddy")), "done");
+    mock.timers.tick(1000);
+    send("compacting", "sweeping", "event_msg:context_compacted");
+    mock.timers.tick(theme.timings.minDisplay.sweeping - 2000);
+    assert.equal(state.getCurrentState(), "attention");
+    assert.equal(calls.filter(call => call[0] === "sound" && call[1] === "complete").length, 1);
+  });
+
+  for (const event of ["PreCompact", "event_msg:context_compacted"]) {
+    it(`lets active WorkBuddy work win over a new Codex ${event} cue`, () => {
+      send("workbuddy", "working", "PreToolUse", { agentId: "workbuddy", agentPid: 77, sourcePid: 77 });
+      mock.timers.tick(2000);
+      send("compacting", "sweeping", event);
+      mock.timers.tick(10000);
+      assert.equal(state.getCurrentState(), "working");
+    });
+  }
+
+  it("preserves WorkBuddy completion when a sibling Codex completes while another still compacts", () => {
+    send("compacting-a", "sweeping", "PreCompact");
+    send("compacting-b", "sweeping", "PreCompact");
+    mock.timers.tick(1000);
+    send("workbuddy", "attention", "Stop", { agentId: "workbuddy", agentPid: 77, sourcePid: 77 });
+    mock.timers.tick(1000);
+    send("compacting-b", "sweeping", "event_msg:context_compacted");
+    mock.timers.tick(theme.timings.minDisplay.sweeping - 2000);
+    assert.equal(state.getCurrentState(), "attention");
+    assert.ok(calls.some(call => call[0] === "sound" && call[1] === "complete"));
+    mock.timers.tick(theme.timings.autoReturn.attention);
+    assert.equal(state.getCurrentState(), "sweeping");
+  });
+
+  it("does not let a duplicate WorkBuddy Stop reconciliation replace its queued completion", () => {
+    send("compacting", "sweeping", "PreCompact");
+    mock.timers.tick(6000);
+    const buddy = { agentId: "workbuddy", agentPid: 77, sourcePid: 77 };
+    send("workbuddy", "working", "PreToolUse", buddy);
+    mock.timers.tick(100);
+    send("workbuddy", "attention", "Stop", buddy);
+    send("workbuddy", "attention", "Stop", buddy);
+    mock.timers.tick(theme.timings.minDisplay.working - 100);
+    assert.equal(state.getCurrentState(), "attention");
+    assert.equal(calls.filter(call => call[0] === "sound" && call[1] === "complete").length, 1);
+  });
+
   it("keeps each compaction independent when two conversations compact", () => {
     send("first", "sweeping", "PreCompact");
     send("second", "sweeping", "PreCompact");

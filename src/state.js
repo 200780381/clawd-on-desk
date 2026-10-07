@@ -7,6 +7,7 @@ const {
   createStatePriorityConstants,
   getStatePriority,
   resolveDisplayStateFromSessions,
+  resolveDominantSessionState,
 } = require("./state-priority");
 const {
   buildStateBindings,
@@ -639,6 +640,23 @@ function clearPendingStateTimer() {
 
 function setState(newState, svgOverride, options = {}) {
   if (shouldDropForDnd()) return;
+
+  // Compaction is a low-priority busy cue, including its replay and passive
+  // hold reconciliation. Preserve queued completion/error/input cues before
+  // the generic sweeping priority can cancel them. Settings previews retain
+  // their explicit presentation behavior.
+  if (newState === "sweeping" && options.settingsPreview !== true
+    && (options.codexCompactionCue === true || hasCodexCompactionVisual())) {
+    if (pendingState && getStatePriority(pendingState, STATE_PRIORITY) >= getStatePriority("thinking", STATE_PRIORITY)) return;
+    const active = resolveDominantSessionState(sessions, { statePriority: STATE_PRIORITY });
+    if (active !== "sweeping" && getStatePriority(active, STATE_PRIORITY) >= getStatePriority("thinking", STATE_PRIORITY)) {
+      const resolved = resolveDisplayState();
+      if (resolved !== newState) {
+        setState(resolved, getSvgOverride(resolved));
+        return;
+      }
+    }
+  }
 
   if (newState === "yawning" && SLEEP_SEQUENCE.has(currentState)) return;
 
@@ -3049,6 +3067,8 @@ function updateSession(sessionId, state, event, opts = {}) {
       return;
     }
     setState(state, state === "attention" && event === "Stop" ? completionVisual : null, {
+      codexCompactionCue: srcAgentId === "codex" && state === "sweeping"
+        && (event === "PreCompact" || event === "event_msg:context_compacted"),
       restartAnimation: srcAgentId === "codex"
         && state === "sweeping"
         && event === "event_msg:context_compacted",
