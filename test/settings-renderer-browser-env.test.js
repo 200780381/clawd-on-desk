@@ -11916,6 +11916,7 @@ describe("settings renderer browser environment", () => {
   it("quota reminders: hides the reminder rows while the master switch is off", async () => {
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
     assert.match(css, /\.quota-ring-option-list \.row\[hidden\]\s*\{\s*display:\s*none;/);
+    assert.match(css, /\.quota-alert-thresholds-row \.settings-select\s*\{[\s\S]*min-width:\s*216px;/);
     const snapshot = makeGeneralSnapshot({
       quotaAlertsEnabled: false, quotaAlertThresholds: [20, 10], quotaRecoveryAlertsEnabled: true,
     });

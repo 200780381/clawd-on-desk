@@ -2170,6 +2170,12 @@ html, body {
 .quota-ring-option-list .row[hidden] {
   display: none;
 }
+/* The longest localized presets (pt-BR / es) need more than the default
+   .settings-select min-width before their trailing text gets clipped. */
+.quota-alert-thresholds-row .settings-select {
+  min-width: 216px;
+  width: 240px;
+}
 
 .kimi-quota-card {
   align-items: stretch;
