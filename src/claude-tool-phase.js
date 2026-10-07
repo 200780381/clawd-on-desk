@@ -15,6 +15,10 @@ const TERMINAL_EVENTS = new Set(["Stop", "StopFailure", "ApiError", "SessionEnd"
 // This ledger only authorizes a main-session batch boundary; its caller owns
 // those stronger gates. Existing hooks are admitted normally; proven old
 // evidence may preserve the phase without dropping message/lifecycle handling.
+// accept=false drops only a batch hint. preservePhase retains normal metadata
+// and exact permission cleanup. thinking is a gated presentation hint;
+// errorCue retains a real failure, and countToolCall admits a first delayed Pre
+// solely to recap accounting without refreshing session state or liveness.
 function createClaudeToolPhaseLedger(options = {}) {
   const maxSessions = Number.isSafeInteger(options.maxSessions) && options.maxSessions > 0
     ? Math.min(options.maxSessions, MAX_SESSIONS)
@@ -44,6 +48,7 @@ function createClaudeToolPhaseLedger(options = {}) {
       unconfirmable: false,
       tools: new Map(),
       earlyBatches: [],
+      queuedBatches: new Map(),
       retiredToolIds: new Set(),
       retiredPromptIds: new Set(),
     };
@@ -57,6 +62,7 @@ function createClaudeToolPhaseLedger(options = {}) {
     }
     record.tools.clear();
     record.earlyBatches = [];
+    record.queuedBatches.clear();
   }
 
   function preservePhase(reason, retired = false) {
@@ -110,8 +116,10 @@ function createClaudeToolPhaseLedger(options = {}) {
       if (promptId && promptId === record.promptId) {
         return { accept: true, reason: "same-prompt-message" };
       }
+      const queued = record.queuedBatches.get(promptId) || [];
       retireCurrent(record);
       record.promptId = promptId;
+      record.earlyBatches = queued;
       record.open = true;
       record.unconfirmable = !promptId;
       return { accept: true, reason: "new-prompt" };
@@ -131,8 +139,10 @@ function createClaudeToolPhaseLedger(options = {}) {
         record.earlyBatches = [];
         return { accept: true, reason: "different-open-prompt" };
       }
+      const queued = record.queuedBatches.get(promptId) || [];
       retireCurrent(record);
       record.promptId = promptId;
+      record.earlyBatches = queued;
       record.open = true;
       record.unconfirmable = false;
     }
@@ -148,7 +158,27 @@ function createClaudeToolPhaseLedger(options = {}) {
     }
 
     if (isBatch) {
-      if (!record.open) return { accept: false, reason: "closed-turn" };
+      if (!record.open) {
+        // A queued turn may omit Submit, and its batch can beat its first Pre.
+        // Keep bounded evidence without adopting or reopening that turn. Only
+        // a later ordinary callback with the exact new prompt may adopt it.
+        const ids = normalizeClaudeBatchToolUseIds(input.toolUseIds);
+        if (input.allowThinking !== false && promptId && record.promptId && promptId !== record.promptId
+          && ids && !ids.some(id => record.retiredToolIds.has(id))) {
+          const queued = record.queuedBatches.get(promptId) || [];
+          if (queued.some(batch => batch.size === ids.length && ids.every(id => batch.has(id)))) {
+            return { accept: false, reason: "queued-batch" };
+          }
+          const total = [...record.queuedBatches.values()].flat().reduce((n, batch) => n + batch.size, 0);
+          if (total + ids.length <= maxTools && (record.queuedBatches.has(promptId)
+            || record.queuedBatches.size < MAX_RETIRED_PROMPTS)) {
+            queued.push(new Set(ids));
+            record.queuedBatches.set(promptId, queued);
+            return { accept: false, reason: "queued-batch" };
+          }
+        }
+        return { accept: false, reason: "closed-turn" };
+      }
       if (!promptId || !record.promptId || promptId !== record.promptId) {
         return { accept: false, reason: "uncorrelated-batch" };
       }
@@ -192,6 +222,14 @@ function createClaudeToolPhaseLedger(options = {}) {
 
     const knownTool = toolUseId ? record.tools.get(toolUseId) : null;
     if (knownTool && knownTool.batchSettled) {
+      if (isPre) {
+        const countToolCall = knownTool.preObserved !== true;
+        knownTool.preObserved = true;
+        // SubagentStart still owns collaboration lifecycle after Batch→Post.
+        // Its tool may be settled, but the launched child is not finished.
+        if (event === "SubagentStart") return { accept: true, reason: "settled-subagent-start" };
+        return { ...preservePhase("settled-tool-tail"), countToolCall };
+      }
       // Async batch and result hooks can arrive in either order. A current
       // failure still owns its normal error cue and permission cleanup.
       return event === "PostToolUseFailure"
@@ -220,14 +258,18 @@ function createClaudeToolPhaseLedger(options = {}) {
           record.unconfirmable = true;
           return { accept: true, reason: "tool-capacity" };
         }
-        record.tools.set(toolUseId, { batchSettled: false });
+        record.tools.set(toolUseId, { batchSettled: false, preObserved: isPre });
       }
+      if (isPre) record.tools.get(toolUseId).preObserved = true;
       if (!record.unconfirmable) {
         const ready = record.earlyBatches.find(batch => [...batch].every(id => record.tools.has(id)));
         if (ready) {
           const otherUnsettled = [...record.tools].some(([id, tool]) => !tool.batchSettled && !ready.has(id));
           for (const id of ready) record.tools.get(id).batchSettled = true;
           record.earlyBatches = record.earlyBatches.filter(batch => ![...ready].some(id => batch.has(id)));
+          if (input.allowThinking === false) return {
+            accept: true, errorCue: event === "PostToolUseFailure", reason: "reordered-batch-suppressed",
+          };
           // Newer work can start before this older boundary's delayed tail.
           // Settle the old evidence without replacing that newer work's phase.
           if (otherUnsettled) return event === "PostToolUseFailure"

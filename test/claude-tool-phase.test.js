@@ -16,6 +16,40 @@ function batch(ledger, ids = ["tool-a"], extra = {}) {
 }
 
 describe("Claude main-session tool phase", () => {
+  it("retains a queued first batch without reopening the closed turn, within a shared budget", () => {
+    const ledger = createClaudeToolPhaseLedger({ maxTools: 2 });
+    start(ledger);
+    ledger.observe(event("Stop"));
+    for (let i = 0; i < 10; i++) assert.equal(batch(ledger, ["queued-a", "queued-b"], { promptId: "queued" }).reason, "queued-batch");
+    assert.equal(batch(ledger, ["overflow"], { promptId: "another" }).accept, false);
+    assert.equal(batch(ledger).accept, false, "queued evidence does not reopen the closed original turn");
+    assert.equal(ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "queued-a" })).thinking, undefined);
+    assert.equal(ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "queued-b" })).thinking, true);
+  });
+
+  for (const boundary of ["Stop", "SessionEnd", "UserPromptSubmit"]) {
+    it(`discards queued early evidence at ${boundary}`, () => {
+      const ledger = createClaudeToolPhaseLedger();
+      start(ledger);
+      ledger.observe(event("Stop"));
+      batch(ledger, ["queued-tool"], { promptId: "queued" });
+      ledger.observe(event(boundary, boundary === "UserPromptSubmit" ? { promptId: "newer" } : {}));
+      const pre = ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "queued-tool" }));
+      assert.equal(pre.thinking, undefined);
+    });
+  }
+
+  it("gates a delayed settlement but preserves its failure and later batch progress", () => {
+    const ledger = createClaudeToolPhaseLedger();
+    start(ledger, []);
+    batch(ledger, ["early"]);
+    const failure = ledger.observe(event("PostToolUseFailure", { toolUseId: "early", allowThinking: false }));
+    assert.equal(failure.thinking, undefined);
+    assert.equal(failure.errorCue, true);
+    ledger.observe(event("PreToolUse", { toolUseId: "later" }));
+    assert.equal(batch(ledger, ["later"]).thinking, true);
+  });
+
   for (const foreignEvent of ["PreToolUse", "PostToolUse", "Stop"]) {
     it(`keeps the open prompt completable after unseen ${foreignEvent} traffic`, () => {
       const ledger = createClaudeToolPhaseLedger();

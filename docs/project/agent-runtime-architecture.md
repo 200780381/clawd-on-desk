@@ -31,6 +31,14 @@ tails then preserve that phase and cannot block later batches; terminal and
 prompt boundaries clear the retained evidence. AskUserQuestion's transcript
 completion probe survives an accepted batch and may settle its thinking phase
 when Stop is missing; fresh tools, prompts and terminal events still cancel it.
+Closed turns may retain bounded batches for an unseen queued prompt without
+adopting it; only an ordinary exact-prompt callback opens that turn. Delayed
+settlement rechecks approval/DND/headless gates. A result may release only its
+own exact tool approval; other requests still block the thinking hint. Settled
+tools retain a first-Pre marker for recap-only accounting, and synthetic
+SubagentStart still updates collaboration lifecycle. Failure resume keeps live
+subagent activity above thinking. Queue evidence is cleared on terminal/new
+prompt boundaries and shares the existing tool and prompt capacity bounds.
 
 ## Data Flow
 
