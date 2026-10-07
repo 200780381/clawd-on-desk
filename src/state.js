@@ -43,6 +43,7 @@ const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage");
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
 const { getClaudeStopDisposition } = require("../hooks/claude-stop-disposition");
+const { createClaudeToolPhaseLedger } = require("./claude-tool-phase");
 const { getStartupRecoveryProcessNames } = require("../agents/registry");
 const { hasReusableDefaultIdentity, mapRecapMetrics } = require("./recap-metrics");
 const {
@@ -113,6 +114,7 @@ function completionVisualForHint(hint) {
 
 // ── Session tracking ──
 const sessions = new Map();
+const claudeToolPhases = createClaudeToolPhaseLedger();
 // Account-wide rate-limit quota, keyed by reporting source — deliberately
 // NOT session state (see src/state-account-quota.js). Persistence is
 // opt-in via ctx so the many test-constructed state runtimes stay
@@ -146,6 +148,7 @@ const COMPLETION_HOUSEKEEPING_EVENTS = new Set([
 // already reached its quiet window.
 const COMPLETION_CANCEL_EVENTS = new Set([
   "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+  "PostToolBatch",
   "SubagentStart", "PreCompact", "PostCompact",
   "PermissionRequest", "CodexUserInputRequest", "Elicitation", "StopFailure", "ApiError", "SessionEnd",
 ]);
@@ -1771,7 +1774,7 @@ function hasClaudeBackgroundSubagentCompletionHold(sessionOrTracker) {
   );
 }
 
-function scheduleClaudeTranscriptCompletionProbe(sessionId, transcriptPath) {
+function scheduleClaudeTranscriptCompletionProbe(sessionId, transcriptPath, allowThinking = false) {
   const safePath = normalizeTranscriptPath(transcriptPath);
   if (!safePath) return;
 
@@ -1779,13 +1782,14 @@ function scheduleClaudeTranscriptCompletionProbe(sessionId, transcriptPath) {
 
   const startedAt = Date.now();
   const probe = {
-    timer: null, transcriptPath: safePath, startedAt,
+    timer: null, transcriptPath: safePath, startedAt, allowThinking,
     recapRecordingToken: captureRecapRecordingToken(),
   };
 
   const runProbe = () => {
     const session = sessions.get(sessionId);
-    if (!session || session.agentId !== "claude-code" || session.state !== "working") {
+    if (!session || session.agentId !== "claude-code"
+      || (session.state !== "working" && !(probe.allowThinking && session.state === "thinking"))) {
       claudeTranscriptCompletionProbes.delete(sessionId);
       return;
     }
@@ -1872,6 +1876,11 @@ function promoteCompletion(sessionId, completionPayload = undefined) {
   // attention cue. Record that distinction so a later duplicate Stop is
   // suppressed while an earlier idle-only terminal can still be upgraded.
   session.recentEvents = pushRecentEvent(session, "attention", "Stop");
+  if (session.agentId === "claude-code") {
+    // Transcript/debounce completion is also a real terminal for the private
+    // phase ledger. Delayed batches must not reopen a completed question.
+    claudeToolPhases.observe({ sessionId, event: "Stop" });
+  }
   const completionSnapshotEvent = session.recentEvents[session.recentEvents.length - 1] || null;
   session.state = "idle";
   session.updatedAt = Date.now();
@@ -1999,7 +2008,43 @@ function resolveIncomingSessionTitle(existing, agentId, incomingTitle, incomingF
   return { title: existingTitle, fromPrompt: existingFromPrompt };
 }
 
+function observeClaudeToolPhase(sessionId, event, opts = {}) {
+  const existing = sessions.get(sessionId);
+  const phaseAgentId = resolveIncomingAgentId(existing, opts.agentId, opts.agentIdDefaulted);
+  if (event === "PostToolBatch" && (phaseAgentId !== "claude-code" || !existing
+    || opts.subagentId || opts.headless || existing.headless || ctx.doNotDisturb
+    || (ctx.pendingPermissions || []).some((perm) => perm && perm.res
+      && perm.sessionId === sessionId && perm.agentId === "claude-code"))) return { accept: false };
+  if (phaseAgentId !== "claude-code") return { accept: true };
+  return claudeToolPhases.observe({ sessionId, event, toolUseId: opts.toolUseId,
+    toolUseIds: opts.batchToolUseIds, promptId: opts.claudePromptId,
+    subagentId: opts.subagentId, subagentLifecycleSource: opts.subagentLifecycleSource });
+}
+
 function updateSession(sessionId, state, event, opts = {}) {
+  // The ledger gates the new batch hint, not ordinary message/lifecycle work.
+  // Proven old tools may annotate existing metadata without changing phase,
+  // completion timers, acknowledgement, history or activity freshness.
+  const phase = opts.claudeToolPhaseDecision || observeClaudeToolPhase(sessionId, event, opts);
+  if (!phase.accept) return false;
+  if (phase.preservePhase && !phase.errorCue) {
+    const existing = sessions.get(sessionId);
+    if (phase.reason === "settled-tool-tail" && event === "PostToolUse"
+      && existing && existing.state === "thinking"
+      && isClaudeElicitationCompletionTool(opts.toolName || (existing && existing.lastToolName))) {
+      scheduleClaudeTranscriptCompletionProbe(sessionId,
+        opts.transcriptPath || (existing && existing.transcriptPath), existing && existing.state === "thinking");
+    }
+    return updateSessionMetadata(sessionId, {
+      expectedAgentId: "claude-code", contextUsage: opts.contextUsage,
+      contextUsageOrigin: opts.contextUsageOrigin,
+      sessionTitle: opts.sessionTitleFromPrompt ? null : opts.sessionTitle, model: opts.model,
+    });
+  }
+  // A result racing behind its accepted batch still reports a real failure.
+  // Keep the model phase as the logical resume state while the error cue runs.
+  if (phase.errorCue) opts = { ...opts, preserveState: true };
+  if (phase.thinking && !phase.errorCue && event !== "SubagentStart") state = "thinking";
   const suppliedRecapOccurredAt = opts && opts.recapOccurredAt;
   const recapTimestampTrusted = Number.isSafeInteger(suppliedRecapOccurredAt) && suppliedRecapOccurredAt >= 0;
   const recapOccurredAt = recapTimestampTrusted
@@ -2065,6 +2110,8 @@ function updateSession(sessionId, state, event, opts = {}) {
     recapIsSubagent = false,
     recapDedupeId = null,
     toolUseId = null,
+    claudePromptId = null,
+    batchToolUseIds = null,
     recapSuppressed = false,
     replaceProcessMetadata = false,
   } = opts;
@@ -2078,8 +2125,12 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (event !== "Stop" && COMPLETION_CANCEL_EVENTS.has(event)) {
     cancelCompletionDebounce(sessionId, event);
   }
-  if (event === "Stop" || COMPLETION_CANCEL_EVENTS.has(event)) {
+  if (event === "Stop" || (COMPLETION_CANCEL_EVENTS.has(event) && event !== "PostToolBatch")) {
     cancelClaudeTranscriptCompletionProbe(sessionId, event);
+  }
+  if (phase.thinking) {
+    const probe = claudeTranscriptCompletionProbes.get(sessionId);
+    if (probe) probe.allowThinking = true;
   }
 
   const sessionForPerm = sessions.get(sessionId);
@@ -2381,7 +2432,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       || ["Agent", "Task"].includes(incomingToolName)
     )
   );
-  const preservedState = preserveState && existing ? existing.state : null;
+  const preservedState = preserveState && existing ? (phase.thinking ? "thinking" : existing.state) : null;
   const duplicateCompletionVisualAtEntry = shouldSuppressDuplicateCompletionVisual(existing, state, event);
   const isClaudeMainStop = event === "Stop"
     && state === "attention"
@@ -2870,7 +2921,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     && isClaudeElicitationCompletionTool(srcToolName)
     && srcTranscriptPath
   ) {
-    scheduleClaudeTranscriptCompletionProbe(sessionId, srcTranscriptPath);
+    scheduleClaudeTranscriptCompletionProbe(sessionId, srcTranscriptPath, phase.thinking === true);
   }
   // Any Kimi event other than the PreToolUse that originally opened the hold
   // means the user already answered (Approve / Reject / Reject-and-tell-model)
@@ -3260,6 +3311,7 @@ function clearPermissionNotification(sessionId, options = {}) {
 
 function clearSessionsByAgent(agentId) {
   if (!agentId) return 0;
+  if (agentId === "claude-code") claudeToolPhases.clear();
   let removed = 0;
   for (const [id, s] of sessions) {
     if (s && s.agentId === agentId) {
@@ -3694,6 +3746,7 @@ function cleanup() {
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingState = null;
   pendingClaudeRecapStarts.clear();
+  claudeToolPhases.clear();
   if (autoReturnTimer) clearTimeout(autoReturnTimer);
   clearAllCompletionDebounces();
   clearAllClaudeTranscriptCompletionProbes();
@@ -3712,7 +3765,7 @@ function cleanup() {
 }
 
 return {
-  setState, applyState, updateSession, recordRecapEventOnly, restoreSessionFromLease, resolveDisplayState, resolveVisualBinding, setUpdateVisualState,
+  setState, applyState, updateSession, observeClaudeToolPhase, recordRecapEventOnly, restoreSessionFromLease, resolveDisplayState, resolveVisualBinding, setUpdateVisualState,
   shouldDropForDnd,
   enableDoNotDisturb, disableDoNotDisturb,
   // Read-only, unmerged account windows for source-specific alert deduplication.

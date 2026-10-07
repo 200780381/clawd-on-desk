@@ -2,6 +2,36 @@
 
 This document holds the deeper runtime and integration notes that were previously in the root `AGENTS.md`.
 
+Claude's live tool/model phase additionally uses `PostToolBatch` on the conservative
+2.1.280+ baseline. The hook sends only bounded tool IDs and `prompt_id`, omitting
+inputs, responses and process probes. `src/claude-tool-phase.js` keeps a bounded
+in-memory main-session ledger; `/state` observes it before permission cleanup and
+passes its internal decision to `state.js` without consuming the event twice.
+Direct state callers use the same arbiter before completion timers, recap and
+session mutation. Only the batch hint is rejected wholesale. A non-retired
+prompt id on an ordinary tool hook can establish a queued turn without Submit
+when no turn is open. An unseen id while a turn is open disables batch inference
+without retiring the current prompt, so its own Stop still completes normally;
+multiple Submit messages under one id retain normal message handling and the
+existing tool evidence. Fresh identified tools after Stop reopen a continuation,
+while SessionEnd always disposes the session independently of prompt identity.
+Proven retired hooks and settled success tails can annotate existing title/model/
+context metadata without changing phase or liveness. Their exact permission
+matches still clean up; retired events cannot use singleton or plan fallbacks
+against a newer request. A current failure racing behind its batch preserves the
+logical model phase while playing the normal error cue, then resumes thinking.
+Missing correlation keeps the legacy mapping. A batch cannot
+replace pending approvals or live subagent cues, and its recovery/history
+classification is intentionally empty so a delayed phase hint never reopens a
+durable record. This does not add durable fencing to existing Pre/Post writers.
+An early batch can overtake fast tool hooks because it skips PID discovery.
+The ledger retains bounded whole-batch evidence and waits for ordinary
+correlated evidence for every named tool before returning to thinking. Late
+tails then preserve that phase and cannot block later batches; terminal and
+prompt boundaries clear the retained evidence. AskUserQuestion's transcript
+completion probe survives an accepted batch and may settle its thinking phase
+when Stop is missing; fresh tools, prompts and terminal events still cancel it.
+
 ## Data Flow
 
 ```text
