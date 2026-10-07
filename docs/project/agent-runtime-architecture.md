@@ -39,6 +39,10 @@ tools retain a first-Pre marker for recap-only accounting, and synthetic
 SubagentStart still updates collaboration lifecycle. Failure resume keeps live
 subagent activity above thinking. Queue evidence is cleared on terminal/new
 prompt boundaries and shares the existing tool and prompt capacity bounds.
+A result that beats its own Pre is recorded as unsettled work for the turn:
+its own batch can settle it and earlier batches cannot cross it. This ordering
+alone no longer makes the whole turn unconfirmable; thinking still requires a
+correlated batch and the existing gates.
 
 ## Data Flow
 

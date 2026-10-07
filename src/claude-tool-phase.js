@@ -282,10 +282,17 @@ function createClaudeToolPhaseLedger(options = {}) {
       return { accept: true, reason: isPre ? "tool-start" : "early-batch-result" };
     }
     if (!knownTool) {
-      // Async Post may beat Pre. Fail closed for the phase hint instead of
-      // inventing its start or guessing that another turn's tool is current.
-      record.unconfirmable = true;
-      return { accept: true, reason: "unknown-tool-result" };
+      // A fast tool's result can beat its own Pre; real turns have shown this.
+      // Record it as unsettled work for this turn so its own batch can settle
+      // it and an earlier batch cannot cross it. If that batch has already
+      // settled it, the late Pre only backfills the start and its recap tool
+      // call; otherwise the Pre is an ordinary tool start.
+      if (record.tools.size >= maxTools) {
+        record.unconfirmable = true;
+        return { accept: true, reason: "tool-capacity" };
+      }
+      record.tools.set(toolUseId, { batchSettled: false, preObserved: false });
+      return { accept: true, reason: "result-before-start" };
     }
     return { accept: true, reason: "tool-result" };
   }
