@@ -73,6 +73,16 @@ test("async rejection and synchronous throw follow the same cooldown", async () 
   } finally { thrown.alerts.dispose(); }
 });
 
+test("a negative async acknowledgement in the same window starts the cooldown", async () => {
+  const sends = [];
+  const h = fixture(() => new Promise(resolve => sends.push(resolve)));
+  try {
+    h.advance(1); h.observe(); sends[0](false); await settle();
+    h.advance(29999); h.observe(); assert.equal(sends.length, 1);
+    h.advance(1); h.observe(); assert.equal(sends.length, 2);
+  } finally { h.alerts.dispose(); }
+});
+
 test("a late old-window failure cannot put its replacement into cooldown", async () => {
   const sends = [];
   const h = fixture(() => new Promise(resolve => sends.push(resolve)));

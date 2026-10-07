@@ -550,11 +550,15 @@ DND or failed notification delivery preserves eligibility. The settings-only tes
 is owner-gated, does not mutate quota/history, and uses the same settings i18n as native alerts.
 See `docs/guides/quota-reminders.md` for thresholds, recovery and retention.
 
-Known window keys supply a display label when a provider omits windowMinutes;
-an explicit reported duration remains authoritative. Failed delivery retries
-after 30 seconds, doubles to a 15-minute cap, and never consumes eligibility.
-Cooldown is private in-memory state per source/window/candidate, is discarded
-with its history owner, and resets for a new window or a more urgent threshold.
+Only Claude Code and Antigravity slot names supply a display window (FiveHour or
+Weekly) when their reports omit windowMinutes; Codex-family slot names are never
+guessed, because the "primary" slot is not reliably the 5-hour window (see the
+comment at the top of `hooks/codex-rate-limits.js`). An explicit reported
+duration remains authoritative. Failed delivery retries after 30 seconds,
+doubles to a 15-minute cap, and never consumes eligibility. Cooldown is private
+in-memory state per source/window and only for the last failed candidate; a new
+window or a different candidate (such as a more urgent threshold) starts fresh,
+and it is discarded with its history owner.
 DND suppresses attempts without extending cooldown. Native show acknowledges
 system acceptance; the localized Test result points to OS notification settings
 when no banner appears. The Windows balloon fallback still acknowledges dispatch.
