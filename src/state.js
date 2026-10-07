@@ -2011,14 +2011,20 @@ function resolveIncomingSessionTitle(existing, agentId, incomingTitle, incomingF
 function observeClaudeToolPhase(sessionId, event, opts = {}) {
   const existing = sessions.get(sessionId);
   const phaseAgentId = resolveIncomingAgentId(existing, opts.agentId, opts.agentIdDefaulted);
-  if (event === "PostToolBatch" && (phaseAgentId !== "claude-code" || !existing
+  const allowThinking = !(phaseAgentId !== "claude-code" || !existing
     || opts.subagentId || opts.headless || existing.headless || ctx.doNotDisturb
     || (ctx.pendingPermissions || []).some((perm) => perm && perm.res
-      && perm.sessionId === sessionId && perm.agentId === "claude-code"))) return { accept: false };
+      && perm.sessionId === sessionId && perm.agentId === "claude-code"
+      // The exact current result releases its own approval in /state. Other
+      // pending requests remain stronger than a delayed batch phase hint.
+      && !(["PostToolUse", "PostToolUseFailure"].includes(event)
+        && typeof opts.toolUseId === "string" && opts.toolUseId
+        && !perm.subagentId && perm.toolUseId === opts.toolUseId)));
+  if (event === "PostToolBatch" && !allowThinking) return { accept: false };
   if (phaseAgentId !== "claude-code") return { accept: true };
   return claudeToolPhases.observe({ sessionId, event, toolUseId: opts.toolUseId,
     toolUseIds: opts.batchToolUseIds, promptId: opts.claudePromptId,
-    subagentId: opts.subagentId, subagentLifecycleSource: opts.subagentLifecycleSource });
+    subagentId: opts.subagentId, subagentLifecycleSource: opts.subagentLifecycleSource, allowThinking });
 }
 
 function updateSession(sessionId, state, event, opts = {}) {
@@ -2029,6 +2035,17 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (!phase.accept) return false;
   if (phase.preservePhase && !phase.errorCue) {
     const existing = sessions.get(sessionId);
+    if (phase.countToolCall && existing && event === "PreToolUse") {
+      recordAcceptedRecapEvent({
+        occurredAt: Number.isSafeInteger(opts.recapOccurredAt) && opts.recapOccurredAt >= 0
+          ? opts.recapOccurredAt : Date.now(),
+        agentId: "claude-code", sessionId, rawSessionId: existing.rawSessionId || sessionId,
+        profileId: existing.profileId || "local", host: existing.host || null,
+        wslDistro: existing.wslDistro || null, event, toolUseId: opts.toolUseId,
+        recapSuppressed: opts.recapSuppressed, recapIsSubagent: opts.recapIsSubagent,
+        subagentId: opts.subagentId, subagentType: opts.subagentType,
+      }, getLastSessionSnapshot());
+    }
     if (phase.reason === "settled-tool-tail" && event === "PostToolUse"
       && existing && existing.state === "thinking"
       && isClaudeElicitationCompletionTool(opts.toolName || (existing && existing.lastToolName))) {
@@ -2432,7 +2449,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       || ["Agent", "Task"].includes(incomingToolName)
     )
   );
-  const preservedState = preserveState && existing ? (phase.thinking ? "thinking" : existing.state) : null;
+  let preservedState = preserveState && existing ? (phase.thinking ? "thinking" : existing.state) : null;
   const duplicateCompletionVisualAtEntry = shouldSuppressDuplicateCompletionVisual(existing, state, event);
   const isClaudeMainStop = event === "Stop"
     && state === "attention"
@@ -2718,6 +2735,10 @@ function updateSession(sessionId, state, event, opts = {}) {
   base.subagentTracker = subagentTracker;
   const typedSubagentHoldActive = Number.isFinite(claudeBackgroundSubagentHoldAt)
     && claudeBackgroundSubagentHoldAt > 0;
+  if (preservedState && phase.thinking) {
+    if (hasSubagentHoldEvidence(subagentTracker)) preservedState = "juggling";
+    else if (typedSubagentHoldActive) preservedState = "working";
+  }
 
   // Evict oldest session if at capacity and this is a new session.
   evictOldestSessionIfNeeded(sessionId);
