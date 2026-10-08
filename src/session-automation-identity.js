@@ -100,7 +100,8 @@ function assessCodexIdentity({
   agentPid,
 }) {
   // Remote Codex hooks do not currently provide a locally probeable process
-  // lifecycle and Codex has no SessionEnd hook. Keep them ineligible until the
+  // lifecycle, and the official SessionEnd does not make remote session end
+  // evidence authoritative for automation. Keep them ineligible until the
   // remote runtime supplies equally authoritative end evidence.
   if (profileId !== "local") {
     return result(false, "remote-session-lifecycle-not-authoritative");

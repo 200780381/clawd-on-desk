@@ -2907,6 +2907,24 @@ function updateSession(sessionId, state, event, opts = {}) {
 
   if (event === "SessionEnd") {
     const endingSession = sessions.get(sessionId);
+    // Codex Desktop unloads an idle thread hours after its last turn, and that
+    // SessionEnd must not retire a local Codex session the user can still reply
+    // to through Telegram: a direct reply needs the live row
+    // (src/telegram-direct-send.js returns session_not_live otherwise) and the
+    // completion mapping stays valid for 24h. Treat it as a no-op — no delete,
+    // no completion, no state change — and let stale cleanup retire it later.
+    if (
+      endingSession
+      && endingSession.agentId === "codex"
+      && (endingSession.profileId || "local") === "local"
+      && !endingSession.host
+      && !endingSession.wslDistro
+      && typeof ctx.hasReplyableCompletionMapping === "function"
+      && ctx.hasReplyableCompletionMapping(sessionId, endingSession) === true
+    ) {
+      debugSession(`session-end keep replyable ${describeSession(sessionId, endingSession)}`);
+      return;
+    }
     cancelCodexExitProbe(sessionId, "SessionEnd");
     if (
       !subagentId

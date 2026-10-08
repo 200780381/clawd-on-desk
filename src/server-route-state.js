@@ -14,6 +14,9 @@ const {
 } = require("../hooks/server-config");
 const { isCodexDesktopOriginator } = require("../hooks/codex-originator");
 const {
+  CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS,
+} = require("../hooks/codex-internal-worker");
+const {
   assessWindowsProcessChainRequest,
   buildShadowComparison,
   processMetadataForState,
@@ -484,6 +487,18 @@ function handleStatePost(req, res, options) {
       // around the full updateSession lifecycle machine.
       const metadataOnly = data.metadata_only === true;
       const hookSource = typeof data.hook_source === "string" ? data.hook_source : null;
+      // The hook tags a recognized Codex Desktop ambient-suggestion thread.
+      // Only a local, official Codex state event may carry it — remote/WSL and
+      // other agents never do — and the value is re-validated at this trust
+      // boundary rather than trusted from the hook.
+      const codexInternalThread = data.codex_internal_thread === CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS
+        && agentId === "codex"
+        && hookSource === "codex-official"
+        && trustedProfileId === "local"
+        && !host
+        && !wslDistro
+        ? CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS
+        : null;
       const clearDshContextUsage = metadataOnly
         && agentId === "deepseek-harness"
         && hookSource === "dsh-plugin"
@@ -1104,6 +1119,7 @@ function handleStatePost(req, res, options) {
             permissionGateId,
             preserveState,
             hookSource,
+            ...(codexInternalThread ? { codexInternalThread } : {}),
             ...(codexHookState.turnId ? { turnId: codexHookState.turnId } : {}),
             ...(codexHookState.turnId ? { recapDedupeId: codexHookState.turnId } : {}),
             backgroundTasksCount,

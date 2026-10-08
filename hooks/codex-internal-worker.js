@@ -151,6 +151,52 @@ function isCodexMemoryWorkerPayload(payload, options = {}) {
   return matchesAbsoluteHome(cwd, home, pathApi, sep, realpath, platform);
 }
 
+// Codex Desktop's app-server runs ephemeral threads that write no rollout, so
+// their hook payloads carry an empty transcript_path. It also sets
+// CODEX_INTERNAL_ORIGINATOR_OVERRIDE for the app-server process, which Codex
+// exports to hooks, while a terminal `codex` (or `codex exec --ephemeral`)
+// does not. This is a precondition, not a drop rule: the user-visible side chat
+// shares exactly these fields, so only the two fixed ambient-suggestion prompts
+// below identify hidden work. An empty transcript plus that client-only
+// variable is the usable signal for "client ephemeral thread".
+function isCodexClientEphemeralPayload(payload, options = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+
+  // An ephemeral thread never writes a rollout. A non-empty string, or any
+  // other non-null value, means this is not one and must be left alone.
+  const transcriptPath = payload.transcript_path;
+  if (transcriptPath !== undefined && transcriptPath !== null) {
+    if (typeof transcriptPath !== "string" || transcriptPath.trim()) return false;
+  }
+
+  const env = options.env || process.env;
+  const originator = env && env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
+  return typeof originator === "string" && originator.trim() !== "";
+}
+
+// Wire value the hook tags a recognized ambient-suggestion UserPromptSubmit
+// with; the server keys its per-sid suppression set on it.
+const CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS = "ambient_suggestions";
+
+// The two fixed prompts Codex Desktop's ambient-suggestion workers submit (seen
+// verbatim across many generation and safety-review threads). Only the prefixes
+// are matched: if upstream rewrites the text, recognition simply stops and the
+// thread regresses to "visible for about a minute, then retired by SessionEnd"
+// rather than hiding the user's side chat.
+const CODEX_AMBIENT_SUGGESTION_PROMPT_PREFIXES = Object.freeze([
+  "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex",
+  "You are an expert at upholding safety and compliance standards for Codex ambient suggestions",
+]);
+
+function isCodexAmbientSuggestionPrompt(prompt) {
+  if (typeof prompt !== "string") return false;
+  const trimmed = prompt.replace(/^\s+/, "");
+  return CODEX_AMBIENT_SUGGESTION_PROMPT_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
 module.exports = {
+  CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS,
+  isCodexAmbientSuggestionPrompt,
+  isCodexClientEphemeralPayload,
   isCodexMemoryWorkerPayload,
 };
