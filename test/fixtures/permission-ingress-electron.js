@@ -17,7 +17,13 @@ app.on("window-all-closed", () => {});
 const deadline = setTimeout(() => app.exit(1), 25000);
 
 app.whenReady().then(async () => {
-  const harness = await createPermissionIngressHarness({ render: true });
+  // Automated ingress checks exercise real renderers without a pet owner,
+  // so synthetic approvals must stay hidden. Historical baseline evidence
+  // can explicitly supply an owner to capture the positioned approval UI.
+  const harness = await createPermissionIngressHarness({
+    render: true,
+    ctxOverrides: expectBlocked ? {} : { win: { isDestroyed: () => false } },
+  });
   const registration = registerPermissionIpc({ ipcMain, permission: harness.permission });
   const pageServer = http.createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/html" });
@@ -73,6 +79,10 @@ app.whenReady().then(async () => {
     await waitUntil(() => harness.permission.pendingPermissions.length === 2, "B not pending");
     const entryB = harness.permission.pendingPermissions[1];
     await waitUntil(() => entryA.bubbleReady && entryB.bubbleReady, "A/B UI did not render");
+    if (expectBlocked) {
+      assert.equal(entryA.bubble.isVisible(), false, "synthetic A must remain hidden without a pet owner");
+      assert.equal(entryB.bubble.isVisible(), false, "synthetic B must remain hidden without a pet owner");
+    }
     harness.permission.resolvePermissionEntry(entryB, "allow");
     assert.equal(JSON.parse((await b.response).body).hookSpecificOutput.decision.behavior, "allow");
     assert.equal(a.settled, false);
