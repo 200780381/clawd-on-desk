@@ -41,6 +41,7 @@ const CODEX_WORKING_LIKE_STATES = new Set(["working", "thinking", "juggling"]);
 const CODEX_TURN_CAPTURE_EVENTS = new Set([
   "UserPromptSubmit",
   "Stop",
+  "Interrupt",
   "event_msg:task_started",
   "event_msg:task_complete",
   "event_msg:turn_aborted",
@@ -440,16 +441,19 @@ function createAgentRuntimeMain(options = {}) {
   // Once Stop (or this very fallback) idles the session it is no longer
   // working-like, so a later duplicate task_complete is suppressed again and we
   // avoid double done/celebration.
-  function shouldAllowCodexJsonlCompletionFallback(sessionId, state, event) {
+  function shouldAllowCodexJsonlCompletionFallback(sessionId, state, event, turnId, extra) {
     if (event !== "event_msg:task_complete") return false;
     // codex-log-monitor only resolves task_complete to a completion state.
     if (state !== "attention" && state !== "idle") return false;
     const stateRuntime = getStateRuntime();
     const sessions = stateRuntime && stateRuntime.sessions;
     const session = sessions && typeof sessions.get === "function" ? sessions.get(sessionId) : null;
-    if (!session || session.agentId !== "codex") return false;
-    if (session.host || session.headless) return false;
-    return CODEX_WORKING_LIKE_STATES.has(session.state);
+    if (!isLocalCodexSessionRecord(session) || session.headless) return false;
+    return CODEX_WORKING_LIKE_STATES.has(session.state)
+      || (typeof stateRuntime.hasCodexCompactionHold === "function"
+        && stateRuntime.hasCodexCompactionHold(sessionId, {
+          turnId, occurredAt: extra && extra.recapOccurredAt,
+        }));
   }
 
   function shouldSuppressCodexLogEvent(sessionId, state, event, turnId = null, extra = null) {
@@ -459,7 +463,7 @@ function createAgentRuntimeMain(options = {}) {
     if (event === "response_item:function_call" && extra && extra.recapIsWebSearch === true) return false;
     if (!CODEX_LOG_EVENTS_COVERED_BY_OFFICIAL_HOOKS.has(event)) return false;
     if (!hasRecentCodexOfficialHookSession(sessionId, turnId)) return false;
-    if (shouldAllowCodexJsonlCompletionFallback(sessionId, state, event)) return false;
+    if (shouldAllowCodexJsonlCompletionFallback(sessionId, state, event, turnId, extra)) return false;
     return true;
   }
 
@@ -566,7 +570,15 @@ function createAgentRuntimeMain(options = {}) {
           state,
           turnId: opts.turnId,
         });
-        if (!fenceDecision.accept) return false;
+        if (!fenceDecision.accept) {
+          if (fenceDecision.reason === "duplicate-terminal") {
+            const stateRuntime = getStateRuntime();
+            stateRuntime?.releaseCodexCompactionOnTerminal?.(sessionId, event, {
+              turnId: opts.turnId, occurredAt: now(),
+            });
+          }
+          return false;
+        }
         // A fresh official lifecycle proves the same raw id is live again, so
         // release the tombstone left by an earlier SessionEnd — the new turn's
         // rollout must be able to rebuild the row.
@@ -884,6 +896,16 @@ function createAgentRuntimeMain(options = {}) {
           turnBoundaryOpen: extra && extra.turnBoundaryOpen === true,
         });
         if (!fenceDecision.accept) {
+          if (fenceDecision.reason === "duplicate-terminal") {
+            const stateRuntime = getStateRuntime();
+            // The local rollout monitor must not release presentation owned
+            // by a remote/WSL session that happens to share its raw id.
+            if (isLocalCodexSessionRecord(stateRuntime?.sessions?.get(sessionId))) {
+              stateRuntime.releaseCodexCompactionOnTerminal?.(sessionId, event, {
+                turnId: extra && extra.turnId, occurredAt: extra && extra.recapOccurredAt,
+              });
+            }
+          }
           if (
             fenceDecision.reason === "closed-turn-id"
             || fenceDecision.reason === "terminal-latch"
