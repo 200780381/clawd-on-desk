@@ -357,6 +357,43 @@ describe("Claude main-session tool phase", () => {
     assert.equal(batch(ledger).accept, false);
   });
 
+  it("recovers a result that arrives before its own start", () => {
+    const ledger = createClaudeToolPhaseLedger();
+    start(ledger, []);
+    assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "fast-tool" })).reason, "result-before-start");
+    assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "fast-tool" })).reason, "tool-start");
+    assert.equal(batch(ledger, ["fast-tool"]).thinking, true);
+    ledger.observe(event("PreToolUse", { toolUseId: "next-tool" }));
+    ledger.observe(event("PostToolUse", { toolUseId: "next-tool" }));
+    assert.equal(batch(ledger, ["next-tool"]).thinking, true, "the whole turn must stay confirmable");
+  });
+
+  it("settles a result-before-start tool at its batch and backfills the late start once", () => {
+    const ledger = createClaudeToolPhaseLedger();
+    start(ledger, []);
+    assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "fast-tool" })).reason, "result-before-start");
+    assert.equal(batch(ledger, ["fast-tool"]).thinking, true);
+    const late = ledger.observe(event("PreToolUse", { toolUseId: "fast-tool" }));
+    assert.equal(late.preservePhase, true);
+    assert.equal(late.countToolCall, true);
+    assert.notEqual(ledger.observe(event("PreToolUse", { toolUseId: "fast-tool" })).countToolCall, true);
+  });
+
+  it("recovers a failure that arrives before its own start", () => {
+    const ledger = createClaudeToolPhaseLedger();
+    start(ledger, []);
+    assert.equal(ledger.observe(event("PostToolUseFailure", { toolUseId: "fast-tool" })).reason, "result-before-start");
+    assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "fast-tool" })).reason, "tool-start");
+    assert.equal(batch(ledger, ["fast-tool"]).thinking, true);
+  });
+
+  it("fails closed when a result-before-start tool exceeds the tool budget", () => {
+    const ledger = createClaudeToolPhaseLedger({ maxTools: 1 });
+    start(ledger, ["existing-tool"]);
+    assert.equal(ledger.observe(event("PostToolUse", { toolUseId: "late-tool" })).reason, "tool-capacity");
+    assert.equal(batch(ledger, ["existing-tool"]).accept, false);
+  });
+
   it("rejects mismatched and missing batch prompt identities", () => {
     const ledger = createClaudeToolPhaseLedger();
     start(ledger);

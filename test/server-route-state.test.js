@@ -499,6 +499,31 @@ describe("server-route-state POST", () => {
     } finally { api.cleanup(); }
   });
 
+  it("recovers a Claude tool result that arrives before its own start through /state", async () => {
+    const sink = createMemoryRecapSink(), pendingPermissions = [];
+    const api = makeClaudePhaseStateRuntime({ recapSink: sink, pendingPermissions });
+    const rawId = "result-before-start", sid = localSessionKey(rawId);
+    const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+      { session_id: rawId, prompt_id: "open", ...extra }, () => ({ pid: null }))), { ctx: {
+      sessions: api.sessions, pendingPermissions,
+      observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+    } });
+    try {
+      await post("UserPromptSubmit");
+      await post("PostToolUse", { tool_use_id: "first-tool", tool_name: "Read" });
+      await post("PreToolUse", { tool_use_id: "first-tool", tool_name: "Read" });
+      await post("PostToolBatch", { tool_calls: [{ tool_use_id: "first-tool" }] });
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      await post("PreToolUse", { tool_use_id: "second-tool", tool_name: "Read" });
+      await post("PostToolUse", { tool_use_id: "second-tool", tool_name: "Read" });
+      await post("PostToolBatch", { tool_calls: [{ tool_use_id: "second-tool" }] });
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      assert.equal(sink.snapshot().filter(event => event.metrics.includes("tool-call")).length, 2);
+      await post("Stop");
+      assert.equal(api.deriveSessionBadge(api.sessions.get(sid)), "done");
+    } finally { api.cleanup(); }
+  });
+
   it("does not settle an unrelated approval when a retained batch completes", async () => {
     const pendingPermissions = [];
     const api = makeClaudePhaseStateRuntime({ pendingPermissions });

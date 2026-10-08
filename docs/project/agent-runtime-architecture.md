@@ -47,6 +47,10 @@ bounded exact-prompt/tool tombstone may admit a first delayed Pre solely to
 recap accounting after a terminal. It never reopens the row, refreshes activity,
 replays completion or applies singleton/plan permission cleanup. Retirement
 eviction drops the accounting exception with the corresponding tool tombstone.
+A result that beats its own Pre is recorded as unsettled work for the turn:
+its own batch can settle it and earlier batches cannot cross it. This ordering
+alone no longer makes the whole turn unconfirmable; thinking still requires a
+correlated batch and the existing gates.
 
 ## Data Flow
 
