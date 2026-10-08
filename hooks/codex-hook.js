@@ -136,6 +136,7 @@ const EVENT_TO_STATE = {
   UserPromptSubmit: "thinking",
   PreToolUse: "working",
   PostToolUse: "working",
+  PreCompact: "sweeping",
   // Placeholder: server.js resolves official Codex Stop to attention/idle
   // using the per-turn tool-use map it owns.
   Stop: "idle",

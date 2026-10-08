@@ -27,6 +27,7 @@ Windows 的 hit window 在原生 activation controller 可用时按前台全屏�
 - 状态优先级：`error(8) > notification(7) > sweeping(6) > attention(5) > carrying/juggling(4) > working(3) > thinking(2) > idle(1) > sleeping(0)`
 - 最小显示时长：防止快速闪切（`error=5s`、`attention/notification=4s`、`carrying=3s`、`sweeping=2s`、`working/thinking=1s`）
 - 一次性状态：`attention/error/sweeping/notification/carrying` 显示后自动回退（`AUTO_RETURN_MS`）
+- Codex `PreCompact` 为清扫额外建立按对话的显示持有，普通其他对话活动不会提前切回工作；完成或同对话恢复活动后释放，再按完成提示的最小显示时长回退。丢失完成最多持有 10 分钟，headless 不持有，DND/禁用动画/审批锁保持原有语义。
 - 睡眠序列：20s 鼠标静止 → idle-look → 60s → yawning(3s) → dozing → 10min → collapsing(0.8s) → sleeping；鼠标移动触发 waking(1.5s) → 恢复
 - 逻辑 `idle` 与静置视觉分离：Settings 可为当前主题选择一个常驻 idle 变体，但不改变状态优先级；thinking / working / permission / completion / sleep / reaction / roam 仍会覆盖它，结束后再回到所选视觉
 - 逻辑状态与真正显示的视觉也彼此分离：所有 state、reaction、随机 idle、低功耗替换和回退都先生成带 `visualGeneration` 的显示请求；renderer 结算后，main 才提交 `{ displayState, file, hitBox, source, visualGeneration }`。原生 hit window、配饰投影与 Presence 只读这份 committed visual，输入窗口仍即时读取逻辑状态做反应门控
@@ -73,6 +74,7 @@ Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数�
 main 中的 displayed-visual projection 是文件、hitbox 和视觉来源的唯一权威。renderer 对每个仍有效的 request 恰好返回一个终结结果：正常加载为 `swapped`，当前文件已经显示为 `already-displayed`，实际显示了可投影的替代文件为 `fallback`，无法验证则为 `failed`；被后续请求取代的 generation 由 main 标为 `superseded`，renderer 不伪造 ACK。
 
 - renderer 的 object → img → accessory-settle 回退链必须先自行走完；main 的 9750ms settlement deadline 只是无 ACK 兜底
+- 显式 `restartAnimation: true` 请求绕过 renderer 的同文件复用，重播动画并走正常结算；超时重投递保留该标记。Codex 压缩完成用它重播与 `PreCompact` 相同的清扫文件，同时从完成事件重新计入最小显示时间；普通请求继续复用同文件。
 - 同一 logical visual 最多自动 re-request 一次；连续两个 request 都没有 ACK 时，同一 displayed-visual projection 实例最多尝试 reload 一次，失败也消耗预算。当前 main 只创建一个实例，因此该预算覆盖当前主进程寿命，不随 renderer reload 重置；独立 crash recovery 有自己的限制。visual timeout 本身不得循环 reload
 - 只有 `verified: true` 且实际 basename 合法的结果可提交；不可投影的 fallback 以 failed 终结，保留上一份 committed visual
 - reaction 也走 generation 合同，但不广播到 Presence；hit renderer 继续即时消费 logical state，不等待视觉 ACK
