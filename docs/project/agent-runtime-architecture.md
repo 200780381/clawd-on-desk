@@ -39,6 +39,18 @@ tools retain a first-Pre marker for recap-only accounting, and synthetic
 SubagentStart still updates collaboration lifecycle. Failure resume keeps live
 subagent activity above thinking. Queue evidence is cleared on terminal/new
 prompt boundaries and shares the existing tool and prompt capacity bounds.
+After a confirmed native child ends, already-settled synthetic tool-start hints
+cannot recreate an anonymous collaboration lane. This is a conservative bound
+on older hints, not a guessed tool-to-child identity; unknown/duplicate child
+Stops do not qualify, and fresh identified starts remain authoritative. A
+bounded exact-prompt/tool tombstone may admit a first delayed Pre solely to
+recap accounting after a terminal. It never reopens the row, refreshes activity,
+replays completion or applies singleton/plan permission cleanup. Retirement
+eviction drops the accounting exception with the corresponding tool tombstone.
+A result that beats its own Pre is recorded as unsettled work for the turn:
+its own batch can settle it and earlier batches cannot cross it. This ordering
+alone no longer makes the whole turn unconfirmable; thinking still requires a
+correlated batch and the existing gates.
 
 ## Data Flow
 

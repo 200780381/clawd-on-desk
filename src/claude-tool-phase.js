@@ -50,15 +50,27 @@ function createClaudeToolPhaseLedger(options = {}) {
       earlyBatches: [],
       queuedBatches: new Map(),
       retiredToolIds: new Set(),
+      retiredFirstPres: new Map(),
       retiredPromptIds: new Set(),
     };
   }
 
   function retireCurrent(record, retirePrompt = true) {
     if (retirePrompt) remember(record.retiredPromptIds, record.promptId, MAX_RETIRED_PROMPTS);
-    for (const id of record.tools.keys()) remember(record.retiredToolIds, id, maxTools);
+    for (const [id, tool] of record.tools) {
+      remember(record.retiredToolIds, id, maxTools);
+      // preObserved means an ordinary Pre (including a synthetic Agent/Task
+      // start) reached the ledger; a result/batch alone cannot set it.
+      if (!tool.preObserved) record.retiredFirstPres.set(id, record.promptId);
+    }
     for (const batch of record.earlyBatches) {
-      for (const id of batch) remember(record.retiredToolIds, id, maxTools);
+      for (const id of batch) {
+        remember(record.retiredToolIds, id, maxTools);
+        if (!record.tools.has(id)) record.retiredFirstPres.set(id, record.promptId);
+      }
+    }
+    for (const id of record.retiredFirstPres.keys()) {
+      if (!record.retiredToolIds.has(id)) record.retiredFirstPres.delete(id);
     }
     record.tools.clear();
     record.earlyBatches = [];
@@ -73,11 +85,21 @@ function createClaudeToolPhaseLedger(options = {}) {
     const input = rawInput && typeof rawInput === "object" ? rawInput : {};
     const isBatch = input.event === "PostToolBatch";
     const isChild = typeof input.subagentId === "string" && !!input.subagentId.trim();
-    if (isChild) return { accept: !isBatch, reason: isBatch ? "subagent-batch" : "subagent-event" };
 
     const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
     if (!sessionId || sessionId.length > 1024 || /[\u0000-\u001f\u007f]/u.test(sessionId)) {
       return { accept: !isBatch, reason: "no-session" };
+    }
+    if (isChild) {
+      const record = records.get(sessionId);
+      // The State tracker supplies this private proof only for a known live
+      // native child. An unknown/duplicate Stop cannot retire phase evidence.
+      if (record && input.confirmedNativeChildEnd === true) {
+        for (const tool of record.tools.values()) {
+          if (tool.batchSettled) tool.nativeChildEnded = true;
+        }
+      }
+      return { accept: !isBatch, reason: isBatch ? "subagent-batch" : "subagent-event" };
     }
     const event = input.event;
     const isPrompt = event === "UserPromptSubmit";
@@ -105,9 +127,16 @@ function createClaudeToolPhaseLedger(options = {}) {
       record.unconfirmable = true;
       return { accept: true, reason: "session-end" };
     }
+    const toolUseId = normalizeIdentity(input.toolUseId);
+    const countRetiredFirstPre = () => {
+      if (!isPre || !promptId || !toolUseId
+        || record.retiredFirstPres.get(toolUseId) !== promptId) return false;
+      record.retiredFirstPres.delete(toolUseId);
+      return true;
+    };
     if (promptId && record.retiredPromptIds.has(promptId)) {
       return isBatch ? { accept: false, reason: "retired-prompt" }
-        : preservePhase("retired-prompt", true);
+        : { ...preservePhase("retired-prompt", true), countToolCall: countRetiredFirstPre() };
     }
     if (isPrompt) {
       // prompt_id identifies a query loop, not an individual message. Claude
@@ -124,12 +153,13 @@ function createClaudeToolPhaseLedger(options = {}) {
       record.unconfirmable = !promptId;
       return { accept: true, reason: "new-prompt" };
     }
-    const toolUseId = normalizeIdentity(input.toolUseId);
     if ((isPre || isPost) && toolUseId && record.retiredToolIds.has(toolUseId)) {
-      return preservePhase("retired-tool", true);
+      return { ...preservePhase("retired-tool", true), countToolCall: countRetiredFirstPre() };
     }
     // A queued message can acquire a new prompt id without another Submit
-    // hook. Only ordinary evidence can establish that turn; a batch itself
+    // hook. Ordinary tool or terminal evidence may adopt that identity; a
+    // terminal immediately retires it, retaining only bounded first-Pre
+    // accounting evidence. A batch itself
     // must never replace the current ledger or invent its tool starts.
     if (!isBatch && promptId && promptId !== record.promptId) {
       if (record.open) {
@@ -227,7 +257,9 @@ function createClaudeToolPhaseLedger(options = {}) {
         knownTool.preObserved = true;
         // SubagentStart still owns collaboration lifecycle after Batch→Post.
         // Its tool may be settled, but the launched child is not finished.
-        if (event === "SubagentStart") return { accept: true, reason: "settled-subagent-start" };
+        if (event === "SubagentStart") return knownTool.nativeChildEnded
+          ? { ...preservePhase("settled-subagent-tail"), countToolCall }
+          : { accept: true, reason: "settled-subagent-start" };
         return { ...preservePhase("settled-tool-tail"), countToolCall };
       }
       // Async batch and result hooks can arrive in either order. A current
@@ -282,10 +314,17 @@ function createClaudeToolPhaseLedger(options = {}) {
       return { accept: true, reason: isPre ? "tool-start" : "early-batch-result" };
     }
     if (!knownTool) {
-      // Async Post may beat Pre. Fail closed for the phase hint instead of
-      // inventing its start or guessing that another turn's tool is current.
-      record.unconfirmable = true;
-      return { accept: true, reason: "unknown-tool-result" };
+      // A fast tool's result can beat its own Pre; real turns have shown this.
+      // Record it as unsettled work for this turn so its own batch can settle
+      // it and an earlier batch cannot cross it. If that batch has already
+      // settled it, the late Pre only backfills the start and its recap tool
+      // call; otherwise the Pre is an ordinary tool start.
+      if (record.tools.size >= maxTools) {
+        record.unconfirmable = true;
+        return { accept: true, reason: "tool-capacity" };
+      }
+      record.tools.set(toolUseId, { batchSettled: false, preObserved: false });
+      return { accept: true, reason: "result-before-start" };
     }
     return { accept: true, reason: "tool-result" };
   }

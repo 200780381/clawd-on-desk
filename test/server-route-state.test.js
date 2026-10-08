@@ -250,6 +250,51 @@ describe("server-route-state POST", () => {
       runtime.cleanup(); api.cleanup(); fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+  it("backfills queued terminal-before-Pre accounting without consuming a newer plan approval", async () => {
+    const sink = createMemoryRecapSink(), sounds = [], pendingPermissions = [];
+    const api = makeClaudePhaseStateRuntime({ recapSink: sink, playSound: name => sounds.push(name), pendingPermissions });
+    const rawId = "queued-stop-before-pre", sid = localSessionKey(rawId);
+    const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+      { session_id: rawId, prompt_id: "queued", ...extra }, () => ({ pid: null }))), { ctx: {
+      sessions: api.sessions, pendingPermissions,
+      observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+    } });
+    try {
+      await post("UserPromptSubmit", { prompt_id: "original" }); await post("Stop", { prompt_id: "original" });
+      await post("PostToolBatch", { tool_calls: [{ tool_use_id: "late-agent" }] });
+      await post("Stop", { last_assistant_message: "fixture answer" });
+      await post("UserPromptSubmit", { prompt_id: "new" });
+      const pending = makePlanPermission(rawId); pendingPermissions.push(pending);
+      const before = JSON.stringify(api.buildSessionSnapshot()), soundCount = sounds.length;
+      const result = await post("PreToolUse", { tool_use_id: "late-agent", tool_name: "Read" });
+      await post("PreToolUse", { tool_use_id: "late-agent", tool_name: "Read" });
+      assert.equal(sink.snapshot().filter(event => event.metrics.includes("tool-call")).length, 1);
+      assert.equal(JSON.stringify(api.buildSessionSnapshot()), before);
+      assert.equal(sounds.length, soundCount); assert.equal(result.calls.resolved.length, 0);
+      assert.strictEqual(pendingPermissions[0], pending);
+    } finally { api.cleanup(); }
+  });
+
+  it("does not revive completed native child activity through a late synthetic hook", async () => {
+    const api = makeClaudePhaseStateRuntime(), rawId = "native-stop-late-agent", sid = localSessionKey(rawId);
+    const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+      { session_id: rawId, prompt_id: "same", ...extra }, () => ({ pid: null }))), { ctx: {
+      sessions: api.sessions, observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+    } });
+    try {
+      await post("UserPromptSubmit");
+      await post("PostToolBatch", { tool_calls: [{ tool_use_id: "agent-tool" }] });
+      await post("PostToolUse", { tool_use_id: "agent-tool", tool_name: "Agent" });
+      await post("SubagentStart", { agent_id: "child-a", agent_type: "Explore" });
+      await post("SubagentStop", { agent_id: "child-a", agent_type: "Explore" });
+      const before = JSON.stringify(api.buildSessionSnapshot());
+      await post("PreToolUse", { tool_use_id: "agent-tool", tool_name: "Agent" });
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      assert.equal(api.sessions.get(sid).subagentTracker.legacyFloor, false);
+      assert.equal(JSON.stringify(api.buildSessionSnapshot()), before);
+    } finally { api.cleanup(); }
+  });
+
   it("does not consume Claude phase evidence for disabled, metadata-only or invalid-state requests", async () => {
     const base = { agent_id: "claude-code", session_id: "batch-session", state: "thinking",
       event: "UserPromptSubmit", prompt_id: "prompt-1" };
@@ -499,6 +544,31 @@ describe("server-route-state POST", () => {
       await post("PreToolUse", { tool_use_id: "next-tool", tool_name: "Read" });
       await post("PostToolBatch", { tool_calls: [{ tool_use_id: "next-tool" }] });
       assert.equal(api.sessions.get(sid).state, "thinking");
+      await post("Stop");
+      assert.equal(api.deriveSessionBadge(api.sessions.get(sid)), "done");
+    } finally { api.cleanup(); }
+  });
+
+  it("recovers a Claude tool result that arrives before its own start through /state", async () => {
+    const sink = createMemoryRecapSink(), pendingPermissions = [];
+    const api = makeClaudePhaseStateRuntime({ recapSink: sink, pendingPermissions });
+    const rawId = "result-before-start", sid = localSessionKey(rawId);
+    const post = (name, extra = {}) => callStatePost(JSON.stringify(buildStateBody(name,
+      { session_id: rawId, prompt_id: "open", ...extra }, () => ({ pid: null }))), { ctx: {
+      sessions: api.sessions, pendingPermissions,
+      observeClaudeToolPhase: api.observeClaudeToolPhase, updateSession: api.updateSession,
+    } });
+    try {
+      await post("UserPromptSubmit");
+      await post("PostToolUse", { tool_use_id: "first-tool", tool_name: "Read" });
+      await post("PreToolUse", { tool_use_id: "first-tool", tool_name: "Read" });
+      await post("PostToolBatch", { tool_calls: [{ tool_use_id: "first-tool" }] });
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      await post("PreToolUse", { tool_use_id: "second-tool", tool_name: "Read" });
+      await post("PostToolUse", { tool_use_id: "second-tool", tool_name: "Read" });
+      await post("PostToolBatch", { tool_calls: [{ tool_use_id: "second-tool" }] });
+      assert.equal(api.sessions.get(sid).state, "thinking");
+      assert.equal(sink.snapshot().filter(event => event.metrics.includes("tool-call")).length, 2);
       await post("Stop");
       assert.equal(api.deriveSessionBadge(api.sessions.get(sid)), "done");
     } finally { api.cleanup(); }
