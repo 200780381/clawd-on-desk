@@ -78,7 +78,7 @@ Cursor Agent 状态同步（command hook，stdin JSON，非阻塞）：
     → 同上状态机（agent_id: cursor-agent）
 
 Codex CLI 状态同步（official hooks primary + JSONL fallback）：
-  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / Stop
+  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / Stop / SessionEnd
     → hooks/codex-hook.js（stdin JSON，session_id 优先与 transcript_path 的 rollout UUID 对齐）
     → HTTP POST 127.0.0.1:23333/state { state, session_id, event, turn_id, hook_source }
     → 同上状态机（agent_id: codex）
@@ -87,6 +87,32 @@ Codex CLI 状态同步（official hooks primary + JSONL fallback）：
   Codex 写入 ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
     → agents/codex-log-monitor.js（fallback：hook 未覆盖事件、hook 禁用/不可用、历史兼容）
     → src/agent-runtime-main.js 对 hook-active session 做事件级 suppression，避免重复状态/重复气泡；本地 JSONL 路径不经过 HTTP server
+
+Codex 桌面端 app-server 下的临时线程（无 transcript 且 hook 环境有非空
+`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`）既包含隐藏的「智能建议」后台线程，也包含
+用户自己的侧边聊天，两者 hook 字段完全相同；终端里直接跑的 `codex exec --ephemeral`
+没有该变量，不受影响。`hooks/codex-internal-worker.js` 保留前提判定
+`isCodexClientEphemeralPayload`，并只按两个固定提示词开头认智能建议
+（`isCodexAmbientSuggestionPrompt`）：这类线程的 `SessionStart` 不显示，
+`UserPromptSubmit` 在 body 上加 `codex_internal_thread:"ambient_suggestions"` 标记照常 POST
+（不发提示词原文），其他状态事件照常 POST，所以侧边聊天正常显示。所有客户端临时线程的
+`SessionStart` 都不显示，但仍用 `lifecycle:"start"` 做一次常规进程解析预热 Windows pid
+缓存（不 POST、不读自动启动开关、不冷启动）：Windows 默认 legacy 模式下首次
+`UserPromptSubmit` 是 cache-only，不预热就拿不到 PID、第一轮没法跳转。服务端
+`src/agent-runtime-main.js` 用有界集合（200）记住被标记的本地 Codex sid，之后该 sid 的
+官方事件一律不建行、不播完成，已有行则按归档方式撤掉，直到它的 SessionEnd 把 sid 移出；
+标记由 `src/server-route-state.js` 校验（仅本地 official codex）后经 `codexInternalThread`
+传入。若上游改写提示词文字，识别失效只会退化成「短暂出现、被 SessionEnd 收掉」，不会藏起
+用户对话。official `SessionEnd`（`CODEX_HOOK_EVENTS`，timeout 固定 3 秒）在线程拆除时发
+（归档、删除、闲置卸载、正常关闭），所以闲置几小时后卸载也会发；服务端 `src/state.js` 的
+SessionEnd 分支删行、取消 exit probe、结束 automation lifecycle，但本地 Codex 会话若仍有可
+回复的完成映射（`ctx.hasReplyableCompletionMapping`）则整体当作 no-op，否则 Telegram 直接
+回复会因会话不在而 `session_not_live`。`src/agent-runtime-main.js` 对官方 SessionEnd 真正删掉
+的本地 Codex sid 记一个有界墓碑（200，参照 turn fence）：之后该 sid 的 JSONL 事件除回合开始
+（`event_msg:task_started`，或 `syntheticBackfill && turnBoundaryOpen` 且带 turnId）外一律丢弃、
+不建会话，quota / context 照常摄入；解除墓碑只看 fences 接受的新回合开始或该 sid 的官方
+SessionStart / UserPromptSubmit，被 fence 拒掉的旧回合开始不解除；SessionEnd 不清 turn fence。
+新增该 hook 需要用户在 Codex `/hooks` 里重新批准后才生效。
 
 本机 Codex 会话标题：现有 JSONL monitor 每轮为已观察到生命周期的会话合并读取一次
 `session_index.jsonl`（沿用 512 KiB tail 上限）。新标题/改名以 `session_index:title`

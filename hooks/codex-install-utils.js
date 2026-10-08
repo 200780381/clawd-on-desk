@@ -37,6 +37,7 @@ const CODEX_HOOK_EVENTS = [
   "PostToolUse",
   "PreCompact",
   "Stop",
+  "SessionEnd",
 ];
 const CODEX_HOOKS_FEATURE_KEY = "hooks";
 const LEGACY_CODEX_HOOKS_FEATURE_KEY = "codex_hooks";
@@ -693,7 +694,10 @@ function removeStableCodexHookLauncher(options = {}) {
 }
 
 function timeoutForCodexEvent(event) {
-  return event === "PermissionRequest" ? 600 : 30;
+  if (event === "PermissionRequest") return 600;
+  // Upstream caps SessionEnd at 3 seconds regardless of a larger config value.
+  if (event === "SessionEnd") return 3;
+  return 30;
 }
 
 function getCodexPaths(options = {}) {

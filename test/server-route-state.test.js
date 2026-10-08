@@ -201,6 +201,43 @@ describe("server-route-state health", () => {
   });
 });
 
+describe("server-route-state Codex ambient-suggestion marker", () => {
+  const AMBIENT_RAW = "codex:019d23d4-f1a9-7633-b9c7-758327137228";
+
+  function ambientBody(extra = {}) {
+    return JSON.stringify({
+      state: "thinking",
+      event: "UserPromptSubmit",
+      agent_id: "codex",
+      hook_source: "codex-official",
+      session_id: AMBIENT_RAW,
+      codex_internal_thread: "ambient_suggestions",
+      source_pid: 42,
+      ...extra,
+    });
+  }
+
+  it("issue #1073 follow-up: passes a local official Codex ambient marker through to updateSession", async () => {
+    const res = await callStatePost(ambientBody());
+    assert.strictEqual(res.calls.updateSession.length, 1);
+    assert.strictEqual(res.calls.updateSession[0][3].codexInternalThread, "ambient_suggestions");
+  });
+
+  it("issue #1073 follow-up: drops the ambient marker for a remote Codex profile", async () => {
+    const res = await callStatePost(ambientBody(), {
+      options: { remoteProfile: { profileId: "remote-1", displayHost: "remote-host" } },
+    });
+    assert.strictEqual(res.calls.updateSession.length, 1);
+    assert.strictEqual(res.calls.updateSession[0][3].codexInternalThread, undefined);
+  });
+
+  it("issue #1073 follow-up: drops the ambient marker for another agent", async () => {
+    const res = await callStatePost(ambientBody({ agent_id: "claude-code" }));
+    assert.strictEqual(res.calls.updateSession.length, 1);
+    assert.strictEqual(res.calls.updateSession[0][3].codexInternalThread, undefined);
+  });
+});
+
 describe("server-route-state POST", () => {
   it("rejects a parsed old-turn compaction after HTTP hooks start a newer Codex turn", async () => {
     const CodexLogMonitor = require("../agents/codex-log-monitor");

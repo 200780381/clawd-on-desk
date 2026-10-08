@@ -2147,6 +2147,71 @@ describe("updateSession()", () => {
     assert.ok(!api.sessions.has("s1"));
   });
 
+  it("issue #1073 follow-up: deletes a local Codex session on SessionEnd without a completion cue", () => {
+    api.cleanup();
+    const sounds = [];
+    api = require("../src/state")(makeCtx({
+      processKill: () => true,
+      playSound: (name) => sounds.push(name),
+    }));
+
+    update(api, {
+      id: "codex-end",
+      state: "working",
+      event: "PreToolUse",
+      agentId: "codex",
+      profileId: "local",
+      rawSessionId: "codex:019d23d4-f1a9-7633-b9c7-758327137228",
+    });
+    update(api, {
+      id: "codex-end",
+      state: "sleeping",
+      event: "SessionEnd",
+      agentId: "codex",
+      profileId: "local",
+      rawSessionId: "codex:019d23d4-f1a9-7633-b9c7-758327137228",
+    });
+
+    assert.ok(!api.sessions.has("codex-end"));
+    assert.deepStrictEqual(sounds.filter((name) => name === "complete"), []);
+  });
+
+  it("issue #1073 follow-up: keeps a local Codex session when a replyable completion mapping exists", () => {
+    api.cleanup();
+    const sounds = [];
+    const lifecycle = [];
+    api = require("../src/state")(makeCtx({
+      processKill: () => true,
+      playSound: (name) => sounds.push(name),
+      onSessionAutomationLifecycleEnd: (payload) => lifecycle.push(payload),
+      hasReplyableCompletionMapping: (sessionId, session) =>
+        sessionId === "codex-reply" && !!session && session.agentId === "codex",
+    }));
+
+    update(api, {
+      id: "codex-reply",
+      state: "idle",
+      event: "Stop",
+      agentId: "codex",
+      profileId: "local",
+      rawSessionId: "codex:019d23d4-f1a9-7633-b9c7-758327137228",
+    });
+    const stateBefore = api.sessions.get("codex-reply").state;
+    update(api, {
+      id: "codex-reply",
+      state: "sleeping",
+      event: "SessionEnd",
+      agentId: "codex",
+      profileId: "local",
+      rawSessionId: "codex:019d23d4-f1a9-7633-b9c7-758327137228",
+    });
+
+    assert.ok(api.sessions.has("codex-reply"), "replyable session must survive SessionEnd");
+    assert.strictEqual(api.sessions.get("codex-reply").state, stateBefore);
+    assert.deepStrictEqual(lifecycle, []);
+    assert.deepStrictEqual(sounds.filter((name) => name === "complete"), []);
+  });
+
   it("clears session automation before a main SessionEnd but not a subagent lifecycle event", () => {
     api.cleanup();
     const lifecycle = [];
