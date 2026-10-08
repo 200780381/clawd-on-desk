@@ -14,6 +14,7 @@ module.exports = {
     PreToolUse: "working",
     PermissionRequest: "notification",
     PostToolUse: "working",
+    PreCompact: "sweeping",
     Stop: "codex-turn-end",
   },
   // JSONL record type:subtype → pet state mapping. The remote monitor keeps

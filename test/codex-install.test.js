@@ -20,6 +20,7 @@ const {
   materializeAppImageHookScript,
   materializeStableCodexHookLauncher,
   readStableCodexHookManifest,
+  registerCodexCommandHooks,
   removeStableCodexHookLauncher,
   stableCodexHookPaths,
   windowsPathToWslPath,
@@ -55,6 +56,29 @@ afterEach(() => {
 });
 
 describe("Codex official hook installer", () => {
+  it("adds PreCompact to a six-event installation and preserves a foreign compaction hook", () => {
+    const previousEvents = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"];
+    const codexDir = makeTempCodexDir({ hooks: {
+      PreCompact: [{ matcher: "manual", hooks: [{ type: "command", command: "user-compaction-hook", timeout: 9 }] }],
+    } });
+    registerCodexCommandHooks({ codexDir, silent: true, events: previousEvents,
+      marker: MARKER, scriptName: MARKER, stableLauncher: true });
+    const before = readJson(path.join(codexDir, "hooks.json"));
+    const result = registerCodexHooks({ codexDir, silent: true });
+    const after = readJson(path.join(codexDir, "hooks.json"));
+    assert.strictEqual(result.added, 1);
+    assert.deepStrictEqual(after.hooks.PreCompact[0], before.hooks.PreCompact[0]);
+    assert.strictEqual(after.hooks.PreCompact.length, 2);
+    assert.strictEqual(after.hooks.PreCompact[1].hooks[0].timeout, 30);
+    for (const event of previousEvents) assert.deepStrictEqual(after.hooks[event], before.hooks[event]);
+    const repeated = registerCodexHooks({ codexDir, silent: true });
+    assert.strictEqual(repeated.added, 0);
+    assert.strictEqual(repeated.updated, 0);
+    assert.deepStrictEqual(readJson(path.join(codexDir, "hooks.json")), after);
+    unregisterCodexHooks({ codexDir, silent: true });
+    assert.deepStrictEqual(readJson(path.join(codexDir, "hooks.json")).hooks.PreCompact, before.hooks.PreCompact);
+  });
+
   it("keeps one stable artifact path while packaged/dev targets change", () => {
     const codexDir = makeTempCodexDir({});
     const sourceRoot = path.join(path.dirname(codexDir), "sources");

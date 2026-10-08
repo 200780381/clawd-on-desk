@@ -45,13 +45,15 @@ function makeFakeMonitorClass(instances) {
   };
 }
 
-function makeRealStateHarness() {
+function makeRealStateHarness({ preserveThemeTimings = false } = {}) {
   themeLoader.init(SRC_DIR);
   const theme = JSON.parse(JSON.stringify(themeLoader.loadTheme("clawd")));
   // Composition tests assert lifecycle effects synchronously; animation hold
   // timers are state presentation policy and are covered in state.test.js.
-  theme.timings.minDisplay = {};
-  theme.timings.autoReturn = {};
+  if (!preserveThemeTimings) {
+    theme.timings.minDisplay = {};
+    theme.timings.autoReturn = {};
+  }
   const sounds = [];
   const stateChanges = [];
   const snapshots = [];
@@ -88,10 +90,117 @@ function makeRealStateHarness() {
     getCursorScreenPoint: () => ({ x: 100, y: 100 }),
     t: (key) => key,
   });
-  return { state, sounds, stateChanges, snapshots };
+  return { state, sounds, stateChanges, snapshots, theme };
 }
 
 describe("agent-runtime-main", () => {
+  it("presents manual compaction after Stop while continuing to reject late work", ({ mock }) => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const harness = makeRealStateHarness();
+    const instances = [];
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => makeFakeMonitorClass(instances),
+      loadCodexAgent: () => ({ id: "codex" }), codexSubagentClassifier: {},
+      getStateRuntime: () => harness.state,
+      updateSession: (...args) => harness.state.updateSession(...args),
+    });
+    const rawSessionId = "codex:manual-after-stop", sessionId = localSessionKey(rawSessionId);
+    const opts = { agentId: "codex", hookSource: "codex-official", turnId: "finished-turn",
+      sourcePid: 42, profileId: "local", rawSessionId };
+    try {
+      runtime.updateSessionFromServer(sessionId, "thinking", "UserPromptSubmit", opts);
+      runtime.updateSessionFromServer(sessionId, "idle", "Stop", opts);
+      runtime.updateSessionFromServer(sessionId, "sweeping", "PreCompact", opts);
+      assert.equal(harness.state.getCurrentState(), "sweeping");
+      const before = harness.stateChanges.length;
+      runtime.startCodexLogMonitor().emit(rawSessionId, "sweeping", "event_msg:context_compacted", {
+        turnId: opts.turnId, sourcePid: 42,
+      });
+      assert.deepEqual(harness.stateChanges.slice(before), ["sweeping"]);
+      runtime.updateSessionFromServer(sessionId, "idle", "SessionStart", opts);
+      assert.equal(harness.state.getCurrentState(), "idle");
+      runtime.updateSessionFromServer(sessionId, "working", "PostToolUse", opts);
+      assert.equal(harness.state.sessions.get(sessionId).state, "idle");
+    } finally { runtime.cleanup(); harness.state.cleanup(); }
+  });
+  it("replays a long compaction's completion cue before compact SessionStart can return idle", ({ mock }) => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const harness = makeRealStateHarness({ preserveThemeTimings: true });
+    const instances = [];
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => makeFakeMonitorClass(instances),
+      loadCodexAgent: () => ({ id: "codex" }),
+      codexSubagentClassifier: {}, getStateRuntime: () => harness.state,
+      updateSession: (...args) => harness.state.updateSession(...args),
+    });
+    const rawSessionId = "codex:long-compaction";
+    const sessionId = localSessionKey(rawSessionId);
+    const opts = { agentId: "codex", hookSource: "codex-official", turnId: "compact-turn",
+      sourcePid: 42, profileId: "local", rawSessionId };
+    const hold = harness.theme.timings.minDisplay.sweeping;
+    try {
+      runtime.updateSessionFromServer(sessionId, "sweeping", "PreCompact", opts);
+      assert.strictEqual(harness.state.getCurrentState(), "sweeping");
+      mock.timers.tick(hold + 1000);
+      const afterStart = harness.stateChanges.length;
+      runtime.updateSessionFromServer(sessionId, "sweeping", "PreCompact", opts);
+      assert.strictEqual(harness.stateChanges.length, afterStart,
+        "ordinary repeated start hooks must still dedupe");
+      const monitor = runtime.startCodexLogMonitor();
+      const before = harness.stateChanges.length;
+      monitor.emit(rawSessionId, "sweeping", "event_msg:context_compacted", {
+        turnId: opts.turnId, sourcePid: 42,
+      });
+      assert.deepStrictEqual(harness.stateChanges.slice(before), ["sweeping"],
+        "completion must restart the SVG timeline rather than dedupe the start cue");
+      mock.timers.tick(1000);
+      runtime.updateSessionFromServer(sessionId, "idle", "SessionStart", {
+        ...opts, sessionStartSource: "compact",
+      });
+      assert.strictEqual(harness.state.getCurrentState(), "sweeping");
+      assert.strictEqual(harness.state.sessions.get(sessionId).state, "idle");
+      mock.timers.tick(hold - 1001);
+      assert.strictEqual(harness.state.getCurrentState(), "sweeping",
+        "the minimum display duration must run from completion, not PreCompact");
+      mock.timers.tick(1);
+      assert.strictEqual(harness.state.getCurrentState(), "idle");
+      runtime.updateSessionFromServer(sessionId, "working", "PreToolUse", opts);
+      assert.strictEqual(harness.state.sessions.get(sessionId).state, "working",
+        "compaction must leave the turn open for subsequent tool activity");
+      assert.deepStrictEqual(harness.sounds, []);
+    } finally {
+      runtime.cleanup();
+      harness.state.cleanup();
+    }
+  });
+
+  it("shows sweeping for official PreCompact and keeps the Codex turn open", ({ mock }) => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const harness = makeRealStateHarness();
+    const runtime = createAgentRuntimeMain({
+      codexSubagentClassifier: {}, getStateRuntime: () => harness.state,
+      updateSession: (...args) => harness.state.updateSession(...args),
+    });
+    const sessionId = localSessionKey("codex:compact-start");
+    const opts = { agentId: "codex", hookSource: "codex-official", turnId: "compact-turn",
+      sourcePid: 42, profileId: "local", rawSessionId: "codex:compact-start" };
+    try {
+      runtime.updateSessionFromServer(sessionId, "thinking", "UserPromptSubmit", opts);
+      runtime.updateSessionFromServer(sessionId, "working", "PreToolUse", opts);
+      const before = harness.sounds.filter(name => name === "complete").length;
+      runtime.updateSessionFromServer(sessionId, "sweeping", "PreCompact", opts);
+      mock.timers.tick(1000);
+      assert.strictEqual(harness.state.getCurrentState(), "sweeping");
+      assert.ok(harness.stateChanges.includes("sweeping"));
+      assert.strictEqual(harness.sounds.filter(name => name === "complete").length, before);
+      runtime.updateSessionFromServer(sessionId, "working", "PostToolUse", opts);
+      assert.strictEqual(harness.state.sessions.get(sessionId).state, "working");
+    } finally {
+      runtime.cleanup();
+      harness.state.cleanup();
+    }
+  });
+
   it("keeps Codex monitor ownership and agent deferred wrappers out of main", () => {
     const mainSource = fs.readFileSync(path.join(SRC_DIR, "main.js"), "utf8");
 
