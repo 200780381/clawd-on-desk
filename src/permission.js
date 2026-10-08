@@ -2318,6 +2318,9 @@ function canAutoResolvePendingPermission(permEntry, options = {}) {
 
   if (
     permEntry.isCodex
+    && !(permEntry.codexAutoManual === true
+      && typeof ctx.getCodexPermissionMode === "function"
+      && ctx.getCodexPermissionMode() === "auto")
     && (
       typeof ctx.isCodexPermissionInterceptEnabled !== "function"
       || !ctx.isCodexPermissionInterceptEnabled()

@@ -576,6 +576,7 @@
     // Permission automation stays last: both automatic modes carry a broad
     // trust boundary and require an explicit confirmation.
     parent.appendChild(helpers.buildSection(t("sectionPermissions"), [
+      buildCodexApprovalOwnerRow(),
       buildPermissionAutomationRow(),
       // Reads as a modifier of the row above, and it is one: it only narrows
       // what the automatic modes allow on their own, so unlike them it needs no
@@ -689,6 +690,47 @@
         suppressFutureConfirmation: result.checkboxChecked === true,
       });
     });
+  }
+
+  function buildCodexApprovalOwnerRow() {
+    const row = document.createElement("div");
+    row.className = "row codex-approval-owner-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowCodexApprovalOwner");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t(readers.readAgentPermissionMode("codex") === "intercept"
+      ? "rowCodexApprovalOwnerInterceptDesc" : "rowCodexApprovalOwnerAutoDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+    const control = document.createElement("div");
+    control.className = "row-control";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn";
+    button.textContent = t("codexApprovalSettingsLink");
+    button.addEventListener("click", () => {
+      root.ClawdSettingsCore.runtime.agentsSubtab = readers.readAgentIntegrationInstalled("codex")
+        ? "connected" : "discover";
+      ops.selectTab("agents");
+      requestAnimationFrame(() => {
+        const target = state.mountedControls.agentPermissionModes.get("codex");
+        if (!target || !target.row || !document.body.contains(target.row)) return;
+        for (let parent = target.row.parentElement; parent; parent = parent.parentElement) {
+          if (typeof parent.expand === "function") parent.expand({ animate: false });
+        }
+        target.row.scrollIntoView({ block: "center" });
+        const active = target.row.querySelector("button.active");
+        if (active) active.focus({ preventScroll: true });
+      });
+    });
+    control.appendChild(button);
+    row.appendChild(control);
+    return row;
   }
 
   function buildPermissionAutomationRow() {

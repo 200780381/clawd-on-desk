@@ -11,7 +11,7 @@
   let helpers = null;
   let ops = null;
   const CODEX_PERMISSION_MODE_OPTIONS = [
-    { id: "native", labelKey: "codexPermissionModeNative" },
+    { id: "auto", labelKey: "codexPermissionModeAuto" },
     { id: "intercept", labelKey: "codexPermissionModeIntercept" },
   ];
   const INSTALL_HINT_CONFIDENCES = new Set(["high", "medium"]);
@@ -2056,11 +2056,8 @@
     if (flag === "enabled") return false;
     const masterOn = readers.readAgentFlagValue(agentId, "enabled");
     if (!masterOn) return true;
-    if (agentId === "codex" && flag === "permissionsEnabled") {
-      return readers.readAgentPermissionMode(agentId) !== "intercept";
-    }
     if (agentId === "codex" && flag === "nativeNotificationSoundEnabled") {
-      return readers.readAgentPermissionMode(agentId) !== "native";
+      return readers.readAgentPermissionMode(agentId) !== "auto";
     }
     // Subagent sub-gate sits under the permission switch: pointless to toggle
     // while the parent permission gate already suppresses every CC bubble.
