@@ -756,6 +756,34 @@ function createAgentRuntimeMain(options = {}) {
     );
   }
 
+  function touchLocalCodexProgress(sessionId, activityState, activity) {
+    if (!activity || activity.headless === true
+      || !CODEX_WORKING_LIKE_STATES.has(activityState)
+      || !Number.isSafeInteger(activity.recapOccurredAt)
+      || activity.recapOccurredAt < 0 || activity.recapOccurredAt > now() + 1500) return false;
+    const state = getStateRuntime();
+    const session = state?.sessions?.get(sessionId);
+    if (!isLocalCodexSessionRecord(session) || session.headless
+      || (session.state === "idle" && !Number.isFinite(session.codexWorkingTimeoutAt))) return false;
+    const lastActivityAt = session.state === "idle"
+      ? session.codexWorkingTimeoutActivityAt : session.updatedAt;
+    if (!Number.isFinite(lastActivityAt) || activity.recapOccurredAt < lastActivityAt) return false;
+    const snapshot = codexTurnFence.getSnapshot(sessionId);
+    const turnId = normalizeCodexTurnId(activity.turnId);
+    // Only the already accepted current turn can refresh/revive its row.
+    // Never create an owner from a stray model record or a late closed turn.
+    if (!turnId || !snapshot || snapshot.terminalLatch
+      || snapshot.currentTurnId !== turnId) return false;
+    const decision = codexTurnFence.observe({
+      sessionId, source: "jsonl", event: "CodexLiveProgress", state: activityState, turnId,
+    });
+    if (!decision.accept) return false;
+    return typeof state.touchSessionActivity === "function" && state.touchSessionActivity(sessionId, {
+      agentId: "codex", profileId: "local", localOnly: true, reviveIdle: true,
+      activityState, onlyWorkingTimeout: true, now: activity.recapOccurredAt,
+    });
+  }
+
   function uninstallIntegrationForAgent(agentId) {
     return callServer("uninstallIntegrationForAgent", agentId);
   }
@@ -907,6 +935,13 @@ function createAgentRuntimeMain(options = {}) {
         annotateCodexAccountQuota();
       }, {
         classifier: localCodexSubagentClassifier,
+        onActivity: (sid, activityState, _event, activity) => {
+          const sessionIdentity = resolveSessionIdentity(sid, "local");
+          if (shouldSuppressCodexArchive(sessionIdentity.rawSessionId, {
+            agentId: "codex", profileId: sessionIdentity.profileId,
+          }) || hasCodexSessionEndTombstone(sessionIdentity.sessionId)) return;
+          touchLocalCodexProgress(sessionIdentity.sessionId, activityState, activity);
+        },
         onUserInputRequest: (sid, request, extra) => {
           const sessionIdentity = resolveSessionIdentity(sid, "local");
           const sessionId = sessionIdentity.sessionId;

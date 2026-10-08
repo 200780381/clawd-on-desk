@@ -1599,12 +1599,24 @@ function touchSessionActivity(sessionId, opts = {}) {
   // than a late transcript record; never revive or extend it.
   if (session.requiresCompletionAck === true) return false;
 
-  if (session.agentId === "codex") cancelCodexExitProbe(id, "session-activity");
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
   const reviveIdle = opts.reviveIdle === true && session.state === "idle";
+  if (reviveIdle && opts.onlyWorkingTimeout === true) {
+    if (!Number.isFinite(session.codexWorkingTimeoutAt)) return false;
+    // Source time can precede the cleanup tick by one poll. Check the actual
+    // inactivity policy against that record, not the housekeeping idle stamp.
+    const decision = getStaleSessionDecision({ ...session,
+      state: opts.activityState === "thinking" ? "thinking" : "working", updatedAt: now, ackedAt: 0,
+    }, { now: Date.now(), isProcessAlive, deriveSessionBadge, shouldAutoClearDetachedSession,
+      staleConfig: typeof ctx.getStaleConfig === "function" ? ctx.getStaleConfig() : null });
+    if (decision.action) return false;
+  }
+  if (session.agentId === "codex") cancelCodexExitProbe(id, "session-activity");
   session.updatedAt = now;
   if (reviveIdle) {
-    session.state = "working";
+    session.state = opts.activityState === "thinking" ? "thinking" : "working";
+    delete session.codexWorkingTimeoutAt;
+    delete session.codexWorkingTimeoutActivityAt;
     session.displayHint = null;
     session.subagentTracker = clearSubagentTracker(cloneSubagentTracker(session));
     const resolved = resolveDisplayState();
@@ -2490,6 +2502,12 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcHeadless = headless || (existing && existing.headless) || false;
   const srcPlatform = platform || (existing && existing.platform) || null;
   observeCodexCompaction(sessionId, state, event, srcAgentId, srcHeadless);
+  // An accepted lifecycle owns the state again; only stale working expiry may
+  // leave a row eligible for activity-only Codex revival.
+  if (existing) {
+    delete existing.codexWorkingTimeoutAt;
+    delete existing.codexWorkingTimeoutActivityAt;
+  }
   const srcModel = model || (existing && existing.model) || null;
   const srcProvider = provider || (existing && existing.provider) || null;
   const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
@@ -3344,6 +3362,10 @@ function cleanStaleSessions() {
     if (decision.action === "idle") {
       releaseCodexCompaction(id);
       debugSession(`stale-idle ${decision.reason} ${describeSession(id, s)}`);
+      if (s.agentId === "codex" && decision.reason === "working-timeout") {
+        s.codexWorkingTimeoutAt = now;
+        s.codexWorkingTimeoutActivityAt = s.updatedAt;
+      }
       s.state = "idle"; s.displayHint = null;
       s.subagentTracker = clearSubagentTracker(cloneSubagentTracker(s));
       s.claudeBackgroundSubagentHoldAt = null;
