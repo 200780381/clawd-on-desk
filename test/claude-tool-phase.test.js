@@ -16,12 +16,49 @@ function batch(ledger, ids = ["tool-a"], extra = {}) {
 }
 
 describe("Claude main-session tool phase", () => {
+  it("backfills a retired first Pre only for the exact prompt once, including after a new prompt", () => {
+    const ledger = createClaudeToolPhaseLedger();
+    start(ledger, []); batch(ledger, ["late-tool"]); ledger.observe(event("Stop"));
+    assert.equal(ledger.observe(event("PreToolUse", { promptId: "wrong", toolUseId: "late-tool" })).countToolCall, false);
+    assert.equal(ledger.observe(event("PreToolUse", { promptId: null, toolUseId: "late-tool" })).countToolCall, false);
+    ledger.observe(event("UserPromptSubmit", { promptId: "new" }));
+    const late = ledger.observe(event("PreToolUse", { toolUseId: "late-tool" }));
+    assert.equal(late.countToolCall, true); assert.equal(late.retired, true);
+    assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "late-tool" })).countToolCall, false);
+  });
+
+  it("does not backfill observed or capacity-evicted retired tools", () => {
+    const ledger = createClaudeToolPhaseLedger({ maxTools: 1 });
+    start(ledger, []); batch(ledger, ["old"]); ledger.observe(event("Stop"));
+    ledger.observe(event("UserPromptSubmit", { promptId: "new" }));
+    ledger.observe(event("PreToolUse", { promptId: "new", toolUseId: "observed" }));
+    ledger.observe(event("Stop", { promptId: "new" }));
+    assert.notEqual(ledger.observe(event("PreToolUse", { toolUseId: "old" })).countToolCall, true);
+    assert.equal(ledger.observe(event("PreToolUse", { promptId: "new", toolUseId: "observed" })).countToolCall, false);
+  });
+
+  it("clears a settled early boundary so it cannot exhaust the next early-batch budget", () => {
+    const ledger = createClaudeToolPhaseLedger({ maxTools: 2 });
+    start(ledger, []);
+    assert.equal(batch(ledger, ["a"]).reason, "early-batch");
+    assert.equal(ledger.observe(event("PreToolUse", { toolUseId: "a" })).thinking, true);
+    assert.equal(batch(ledger, ["b", "c"]).reason, "early-batch");
+  });
+
+  it("never retains a retired tool in an unseen queued prompt", () => {
+    const ledger = createClaudeToolPhaseLedger({ maxTools: 1 });
+    start(ledger); ledger.observe(event("Stop"));
+    assert.equal(batch(ledger, ["tool-a"], { promptId: "queued" }).reason, "closed-turn");
+    assert.equal(batch(ledger, ["fresh"], { promptId: "queued" }).reason, "queued-batch");
+    assert.equal(ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "fresh" })).thinking, true);
+  });
+
   it("retains a queued first batch without reopening the closed turn, within a shared budget", () => {
     const ledger = createClaudeToolPhaseLedger({ maxTools: 2 });
     start(ledger);
     ledger.observe(event("Stop"));
     for (let i = 0; i < 10; i++) assert.equal(batch(ledger, ["queued-a", "queued-b"], { promptId: "queued" }).reason, "queued-batch");
-    assert.equal(batch(ledger, ["overflow"], { promptId: "another" }).accept, false);
+    assert.equal(batch(ledger, ["overflow"], { promptId: "another" }).reason, "closed-turn");
     assert.equal(batch(ledger).accept, false, "queued evidence does not reopen the closed original turn");
     assert.equal(ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "queued-a" })).thinking, undefined);
     assert.equal(ledger.observe(event("PreToolUse", { promptId: "queued", toolUseId: "queued-b" })).thinking, true);
