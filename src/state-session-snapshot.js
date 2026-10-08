@@ -324,14 +324,20 @@ function sessionUpdatedAtComparator(a, b) {
   return String(a.id).localeCompare(String(b.id));
 }
 
-// The DSH desktop app reopens the previous conversation on launch and the bridge
-// reports SessionStart before the user touches it. That row stays real (the
-// Dashboard still lists and opens it), but it must not reach the HUD until the
-// first action clears the marker.
-function isDshSessionAwaitingActivity(session) {
+// Desktop apps can reopen a previous conversation on launch and report only a
+// SessionStart before the user touches it. That row is real — the Dashboard
+// still lists and opens it — but it must not reach the HUD until the first
+// action clears the marker.
+//   - DSH desktop reopens the last conversation on launch.
+//   - Kimi Code desktop restores the last viewed conversation on launch, and
+//     opening an old conversation from the sidebar does the same; both only
+//     send a SessionStart.
+const AWAITING_ACTIVITY_AGENTS = new Set(["deepseek-harness", "kimi-cli"]);
+
+function isSessionAwaitingActivity(session) {
   return !!session
-    && session.agentId === "deepseek-harness"
-    && session.dshAwaitingActivity === true;
+    && AWAITING_ACTIVITY_AGENTS.has(session.agentId)
+    && session.awaitingActivity === true;
 }
 
 function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {}) {
@@ -356,7 +362,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
   // Dashboard can still list the conversation and open it on demand.
   const hiddenByExistingReason = shouldAutoClearDetachedSession(session, badge, options)
     || isSupersededLocalCodexProcessSession(id, session, options.latestLocalCodexProcessIds);
-  const hiddenFromHud = hiddenByExistingReason || isDshSessionAwaitingActivity(session);
+  const hiddenFromHud = hiddenByExistingReason || isSessionAwaitingActivity(session);
   const startupRecovered = !!(session && session.startupRecovered === true);
   const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenByExistingReason
     ? getSessionFocusTarget({ ...(session || {}), id }, {
@@ -685,7 +691,8 @@ module.exports = {
   isSessionInProgress,
   deriveSessionBadge,
   shouldAutoClearDetachedSession,
-  isDshSessionAwaitingActivity,
+  AWAITING_ACTIVITY_AGENTS,
+  isSessionAwaitingActivity,
   getSessionAliasEntry,
   getEffectiveSessionTitle,
   sessionDisplayFolder,

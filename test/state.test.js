@@ -7328,179 +7328,217 @@ describe("antigravity trailing PostToolUse filter", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// The DSH desktop app reopens the previous conversation on launch, so its
+// Desktop apps can reopen a previous conversation on launch, so their
 // SessionStart only means "opened", not "used". Clawd keeps that row out of the
 // HUD until the user does something, while the Dashboard keeps listing and
-// opening it.
+// opening it. DSH and Kimi Code both behave this way.
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe("DSH reopened conversation stays out of the HUD until activity", () => {
-  const DSH_ID = "deepseek-harness:conversation";
-  let api;
+describe("reopened conversation stays out of the HUD until activity", () => {
+  const CASES = [
+    {
+      label: "DSH",
+      agentId: "deepseek-harness",
+      sessionId: "deepseek-harness:conversation",
+      ghostId: "deepseek-harness:ghost",
+      extra: { dshCarrier: "desktop" },
+      focusTarget: { type: "dsh-desktop", url: "dsh://open" },
+    },
+    {
+      label: "Kimi Code",
+      agentId: "kimi-cli",
+      sessionId: "kimi-cli:conversation",
+      ghostId: "kimi-cli:ghost",
+      extra: { sourcePid: 4242 },
+      focusTarget: { type: "terminal", url: null },
+    },
+  ];
 
-  beforeEach(() => {
+  for (const testCase of CASES) {
+    describe(`${testCase.label}`, () => {
+      let api;
+
+      beforeEach(() => {
+        mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+        api = require("../src/state")(makeCtx());
+      });
+      afterEach(() => {
+        api.cleanup();
+        mock.timers.reset();
+      });
+
+      function sessionStart(overrides = {}) {
+        update(api, {
+          id: testCase.sessionId,
+          state: "idle",
+          event: "SessionStart",
+          agentId: testCase.agentId,
+          rawSessionId: "conversation",
+          ...testCase.extra,
+          ...overrides,
+        });
+      }
+
+      function snapshotEntry(snapshot) {
+        return snapshot.sessions.find((entry) => entry.id === testCase.sessionId);
+      }
+
+      it("hides a reopened conversation from the HUD but keeps it openable from the Dashboard", () => {
+        sessionStart();
+
+        assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, true);
+
+        const snapshot = api.buildSessionSnapshot();
+        const entry = snapshotEntry(snapshot);
+        assert.ok(entry, "the Dashboard snapshot still lists the reopened conversation");
+        assert.strictEqual(entry.hiddenFromHud, true);
+        assert.strictEqual(snapshot.hudTotalNonIdle, 0);
+        assert.strictEqual(snapshot.hudLastSessionId, null);
+        assert.strictEqual(isFocusableLocalHudSession(entry, { osPlatform: "darwin" }), false);
+        // The marker only hides the HUD; the Dashboard "open" button stays usable.
+        assert.strictEqual(entry.canFocus, true);
+        assert.deepStrictEqual(entry.focusTarget, testCase.focusTarget);
+      });
+
+      it("reveals the conversation once the user prompts, and moves the snapshot signature", () => {
+        sessionStart();
+        const hiddenSignature = sessionSnapshotSignature(api.buildSessionSnapshot());
+
+        update(api, {
+          id: testCase.sessionId,
+          state: "thinking",
+          event: "UserPromptSubmit",
+          agentId: testCase.agentId,
+          ...testCase.extra,
+        });
+
+        const session = api.sessions.get(testCase.sessionId);
+        assert.strictEqual(session.awaitingActivity, false);
+        const snapshot = api.buildSessionSnapshot();
+        const entry = snapshotEntry(snapshot);
+        assert.strictEqual(entry.hiddenFromHud, false);
+        assert.strictEqual(snapshot.hudTotalNonIdle, 1);
+        assert.strictEqual(isFocusableLocalHudSession(entry, { osPlatform: "darwin" }), true);
+        assert.notStrictEqual(sessionSnapshotSignature(snapshot), hiddenSignature);
+      });
+
+      it("treats a permission approval as activity and never creates a session from it", () => {
+        sessionStart();
+        assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, true);
+
+        api.updateSession(testCase.sessionId, "notification", "PermissionRequest", {
+          agentId: testCase.agentId,
+          ...testCase.extra,
+        });
+        assert.strictEqual(api.sessions.size, 1);
+        assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, false);
+        assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()).hiddenFromHud, false);
+
+        api.updateSession(testCase.ghostId, "notification", "PermissionRequest", {
+          agentId: testCase.agentId,
+        });
+        assert.strictEqual(api.sessions.has(testCase.ghostId), false);
+      });
+
+      it("broadcasts the approval snapshot itself, not only the trailing ack pass", () => {
+        const broadcasts = [];
+        const ctx = makeCtx({ broadcastSessionSnapshot: (snapshot) => broadcasts.push(snapshot) });
+        const localApi = require("../src/state")(ctx);
+        try {
+          update(localApi, {
+            id: testCase.sessionId,
+            state: "idle",
+            event: "SessionStart",
+            agentId: testCase.agentId,
+            rawSessionId: "conversation",
+            ...testCase.extra,
+          });
+          // Pre-seed a completion ack so the approval's own emit is observable: the
+          // trailing try/finally pass reconciles the ack afterwards and would
+          // otherwise dedupe away the approval emit.
+          localApi.sessions.get(testCase.sessionId).requiresCompletionAck = true;
+          broadcasts.length = 0;
+
+          localApi.updateSession(testCase.sessionId, "notification", "PermissionRequest", {
+            agentId: testCase.agentId,
+            ...testCase.extra,
+          });
+
+          assert.strictEqual(localApi.sessions.get(testCase.sessionId).awaitingActivity, false);
+          assert.strictEqual(broadcasts.length, 2, "the approval path emits before the finally pass");
+          const approval = broadcasts[0].sessions.find((s) => s.id === testCase.sessionId);
+          assert.ok(approval, "the approval snapshot still lists the conversation");
+          assert.strictEqual(approval.hiddenFromHud, false);
+          assert.strictEqual(approval.requiresCompletionAck, true, "the first emit is the approval path, before ack reconciliation");
+          assert.strictEqual(
+            broadcasts[1].sessions.find((s) => s.id === testCase.sessionId).hiddenFromHud,
+            false
+          );
+        } finally {
+          localApi.cleanup();
+        }
+      });
+
+      it("leaves the marker alone for metadata-only title updates", () => {
+        sessionStart();
+
+        assert.strictEqual(api.updateSessionMetadata(testCase.sessionId, { sessionTitle: "Greeting" }), true);
+
+        const session = api.sessions.get(testCase.sessionId);
+        assert.strictEqual(session.awaitingActivity, true);
+        assert.strictEqual(session.sessionTitle, "Greeting");
+        const entry = snapshotEntry(api.buildSessionSnapshot());
+        assert.strictEqual(entry.hiddenFromHud, true);
+        assert.strictEqual(entry.displayTitle, "Greeting");
+      });
+
+      it("re-marks an already-active conversation when it is reopened", () => {
+        update(api, {
+          id: testCase.sessionId,
+          state: "thinking",
+          event: "UserPromptSubmit",
+          agentId: testCase.agentId,
+          ...testCase.extra,
+        });
+        assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, false);
+
+        sessionStart();
+
+        assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, true);
+        assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()).hiddenFromHud, true);
+      });
+    });
+  }
+
+  it("leaves unlisted agents' SessionStart untouched", () => {
     mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
-    api = require("../src/state")(makeCtx());
-  });
-  afterEach(() => {
-    api.cleanup();
-    mock.timers.reset();
-  });
-
-  function dshSessionStart(overrides = {}) {
-    update(api, {
-      id: DSH_ID,
-      state: "idle",
-      event: "SessionStart",
-      agentId: "deepseek-harness",
-      dshCarrier: "desktop",
-      rawSessionId: "conversation",
-      ...overrides,
-    });
-  }
-
-  function snapshotEntry(snapshot) {
-    return snapshot.sessions.find((entry) => entry.id === DSH_ID);
-  }
-
-  it("hides a reopened conversation from the HUD but keeps it openable from the Dashboard", () => {
-    dshSessionStart();
-
-    assert.strictEqual(api.sessions.get(DSH_ID).dshAwaitingActivity, true);
-
-    const snapshot = api.buildSessionSnapshot();
-    const entry = snapshotEntry(snapshot);
-    assert.ok(entry, "the Dashboard snapshot still lists the reopened conversation");
-    assert.strictEqual(entry.hiddenFromHud, true);
-    assert.strictEqual(snapshot.hudTotalNonIdle, 0);
-    assert.strictEqual(snapshot.hudLastSessionId, null);
-    assert.strictEqual(isFocusableLocalHudSession(entry, { osPlatform: "darwin" }), false);
-    // The marker only hides the HUD; the Dashboard "open" button stays usable.
-    assert.strictEqual(entry.canFocus, true);
-    assert.deepStrictEqual(entry.focusTarget, { type: "dsh-desktop", url: "dsh://open" });
-  });
-
-  it("reveals the conversation once the user prompts, and moves the snapshot signature", () => {
-    dshSessionStart();
-    const hiddenSignature = sessionSnapshotSignature(api.buildSessionSnapshot());
-
-    update(api, {
-      id: DSH_ID,
-      state: "thinking",
-      event: "UserPromptSubmit",
-      agentId: "deepseek-harness",
-      dshCarrier: "desktop",
-    });
-
-    const session = api.sessions.get(DSH_ID);
-    assert.strictEqual(session.dshAwaitingActivity, false);
-    const snapshot = api.buildSessionSnapshot();
-    const entry = snapshotEntry(snapshot);
-    assert.strictEqual(entry.hiddenFromHud, false);
-    assert.strictEqual(snapshot.hudTotalNonIdle, 1);
-    assert.strictEqual(isFocusableLocalHudSession(entry, { osPlatform: "darwin" }), true);
-    assert.notStrictEqual(sessionSnapshotSignature(snapshot), hiddenSignature);
-  });
-
-  it("treats a permission approval as activity and never creates a session from it", () => {
-    dshSessionStart();
-    assert.strictEqual(api.sessions.get(DSH_ID).dshAwaitingActivity, true);
-
-    api.updateSession(DSH_ID, "notification", "PermissionRequest", {
-      agentId: "deepseek-harness",
-      dshCarrier: "desktop",
-    });
-    assert.strictEqual(api.sessions.size, 1);
-    assert.strictEqual(api.sessions.get(DSH_ID).dshAwaitingActivity, false);
-    assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()).hiddenFromHud, false);
-
-    api.updateSession("deepseek-harness:ghost", "notification", "PermissionRequest", {
-      agentId: "deepseek-harness",
-    });
-    assert.strictEqual(api.sessions.has("deepseek-harness:ghost"), false);
-  });
-
-  it("broadcasts the approval snapshot itself, not only the trailing ack pass", () => {
-    const broadcasts = [];
-    const ctx = makeCtx({ broadcastSessionSnapshot: (snapshot) => broadcasts.push(snapshot) });
-    const localApi = require("../src/state")(ctx);
+    const api = require("../src/state")(makeCtx());
     try {
-      update(localApi, {
-        id: DSH_ID,
+      update(api, {
+        id: "claude-1",
         state: "idle",
         event: "SessionStart",
-        agentId: "deepseek-harness",
-        dshCarrier: "desktop",
-        rawSessionId: "conversation",
+        agentId: "claude-code",
+        sourcePid: 4242,
       });
-      // Pre-seed a completion ack so the approval's own emit is observable: the
-      // trailing try/finally pass reconciles the ack afterwards and would
-      // otherwise dedupe away the approval emit.
-      localApi.sessions.get(DSH_ID).requiresCompletionAck = true;
-      broadcasts.length = 0;
-
-      localApi.updateSession(DSH_ID, "notification", "PermissionRequest", {
-        agentId: "deepseek-harness",
-        dshCarrier: "desktop",
+      update(api, {
+        id: "codex-1",
+        state: "idle",
+        event: "SessionStart",
+        agentId: "codex",
+        sourcePid: 4243,
       });
 
-      assert.strictEqual(localApi.sessions.get(DSH_ID).dshAwaitingActivity, false);
-      assert.strictEqual(broadcasts.length, 2, "the approval path emits before the finally pass");
-      const approval = broadcasts[0].sessions.find((s) => s.id === DSH_ID);
-      assert.ok(approval, "the approval snapshot still lists the conversation");
-      assert.strictEqual(approval.hiddenFromHud, false);
-      assert.strictEqual(approval.requiresCompletionAck, true, "the first emit is the approval path, before ack reconciliation");
-      assert.strictEqual(
-        broadcasts[1].sessions.find((s) => s.id === DSH_ID).hiddenFromHud,
-        false
-      );
+      for (const id of ["claude-1", "codex-1"]) {
+        assert.strictEqual(api.sessions.get(id).awaitingActivity, undefined);
+      }
+      const snapshot = api.buildSessionSnapshot();
+      assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "claude-1").hiddenFromHud, false);
+      assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex-1").hiddenFromHud, false);
+      assert.strictEqual(snapshot.hudTotalNonIdle, 2);
     } finally {
-      localApi.cleanup();
+      api.cleanup();
+      mock.timers.reset();
     }
-  });
-
-  it("leaves the marker alone for metadata-only title updates", () => {
-    dshSessionStart();
-
-    assert.strictEqual(api.updateSessionMetadata(DSH_ID, { sessionTitle: "Greeting" }), true);
-
-    const session = api.sessions.get(DSH_ID);
-    assert.strictEqual(session.dshAwaitingActivity, true);
-    assert.strictEqual(session.sessionTitle, "Greeting");
-    const entry = snapshotEntry(api.buildSessionSnapshot());
-    assert.strictEqual(entry.hiddenFromHud, true);
-    assert.strictEqual(entry.displayTitle, "Greeting");
-  });
-
-  it("re-marks an already-active conversation when it is reopened", () => {
-    update(api, {
-      id: DSH_ID,
-      state: "thinking",
-      event: "UserPromptSubmit",
-      agentId: "deepseek-harness",
-      dshCarrier: "desktop",
-    });
-    assert.strictEqual(api.sessions.get(DSH_ID).dshAwaitingActivity, false);
-
-    dshSessionStart();
-
-    assert.strictEqual(api.sessions.get(DSH_ID).dshAwaitingActivity, true);
-    assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()).hiddenFromHud, true);
-  });
-
-  it("leaves other agents' SessionStart untouched", () => {
-    update(api, {
-      id: "claude-1",
-      state: "idle",
-      event: "SessionStart",
-      agentId: "claude-code",
-      sourcePid: 4242,
-    });
-
-    const session = api.sessions.get("claude-1");
-    assert.strictEqual(session.dshAwaitingActivity, undefined);
-    const snapshot = api.buildSessionSnapshot();
-    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "claude-1").hiddenFromHud, false);
-    assert.strictEqual(snapshot.hudTotalNonIdle, 1);
   });
 });
