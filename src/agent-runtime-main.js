@@ -191,6 +191,21 @@ function createAgentRuntimeMain(options = {}) {
           state.updateSessionMetadata(sessionId, { sessionTitle: title, expectedAgentId: "workbuddy" });
         }
       },
+      updateContextUsage(sessionId, contextUsage) {
+        const session = localWorkBuddySession(sessionId);
+        const state = getStateRuntime();
+        if (!session || !state || typeof state.updateSessionMetadata !== "function") return;
+        if (contextUsage === null) {
+          // Unknown native usage must not erase another telemetry source.
+          if (session.contextUsageOrigin !== "workbuddy-native"
+            || session.contextUsage?.source !== "workbuddy") return;
+          state.updateSessionMetadata(sessionId, { clearContextUsage: true, expectedAgentId: "workbuddy" });
+        } else {
+          state.updateSessionMetadata(sessionId, {
+            contextUsage, contextUsageOrigin: "workbuddy-native", expectedAgentId: "workbuddy",
+          });
+        }
+      },
     });
   const captureGhosttyTerminalId = options.captureGhosttyTerminalId || null;
   const clearCodexNotifyBubbles = options.clearCodexNotifyBubbles || (() => {});

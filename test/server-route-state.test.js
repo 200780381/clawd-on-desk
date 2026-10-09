@@ -2263,6 +2263,24 @@ describe("server-route-state POST", () => {
     assert.strictEqual(res.calls.updateSession[0][3].contextUsage, null);
   });
 
+  it("accepts WorkBuddy usage without granting native provenance to HTTP state or metadata", async () => {
+    const usage = { used: 120000, limit: 300000, percent: 40, source: "workbuddy" };
+    for (const options of [{}, { remoteProfile: { profileId: "remote-1", displayHost: "remote-host" } }]) {
+      const body = { state: "working", session_id: "workbuddy-context-fixture", agent_id: "workbuddy",
+        event: "PreToolUse", context_usage: usage, context_usage_origin: "workbuddy-native" };
+      const state = await callStatePost(JSON.stringify(body), { options });
+      assert.deepStrictEqual(state.calls.updateSession[0][3].contextUsage, usage);
+      assert.strictEqual(state.calls.updateSession[0][3].contextUsageOrigin, null);
+      const metadataCalls = [];
+      const metadata = await callStatePost(JSON.stringify({ ...body, metadata_only: true }), {
+        options, ctx: { updateSessionMetadata: acceptedMetadataSpy(metadataCalls) },
+      });
+      assert.strictEqual(metadata.statusCode, 204);
+      assert.deepStrictEqual(metadataCalls[0][1].contextUsage, usage);
+      assert.strictEqual(metadataCalls[0][1].contextUsageOrigin, null);
+    }
+  });
+
   // Account quota is session-independent: any POST carrying it feeds the
   // per-source store (keyed by the reporting host, null = local), and it
   // never rides updateSession opts.
