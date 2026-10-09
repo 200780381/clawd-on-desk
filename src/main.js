@@ -2081,6 +2081,7 @@ const _permCtx = {
     _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) =>
     _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () =>
     _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   // The permission layer consumes one normalized runtime mode. DND,
@@ -3004,6 +3005,7 @@ const _serverCtx = {
   isAgentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
   setState,

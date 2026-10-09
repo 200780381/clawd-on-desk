@@ -229,7 +229,7 @@
   function readAgentPermissionMode(agentId) {
     const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
     if (agentId === "codex" && entry && entry.permissionMode === "intercept") return "intercept";
-    return "native";
+    return "auto";
   }
 
   function readAgentCustomPermissionUrl(agentId) {

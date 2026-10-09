@@ -220,9 +220,9 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.agents.pi.notificationHookEnabled, true);
   });
 
-  it("defaults Codex permissions to intercept mode", () => {
+  it("defaults Codex permissions to Auto mode", () => {
     const d = prefs.getDefaults();
-    assert.strictEqual(d.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(d.agents.codex.permissionMode, "auto");
     assert.strictEqual(d.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
@@ -783,13 +783,22 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
-  it("normalizes agents: drops invalid Codex permissionMode to intercept", () => {
+  it("migrates legacy Native to Auto while preserving the agent switches", () => {
+    const v = prefs.validate({ agents: { codex: { enabled: false, permissionsEnabled: false,
+      nativeNotificationSoundEnabled: true, permissionMode: "native" } } });
+    assert.strictEqual(v.agents.codex.permissionMode, "auto");
+    assert.strictEqual(v.agents.codex.enabled, false);
+    assert.strictEqual(v.agents.codex.permissionsEnabled, false);
+    assert.strictEqual(v.agents.codex.nativeNotificationSoundEnabled, true);
+  });
+
+  it("normalizes agents: drops invalid Codex permissionMode to Auto", () => {
     const v = prefs.validate({
       agents: {
-        codex: { enabled: true, permissionMode: "auto" },
+        codex: { enabled: true, permissionMode: "invalid" },
       },
     });
-    assert.strictEqual(v.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(v.agents.codex.permissionMode, "auto");
   });
 
   it("normalizes agents: fills missing notificationHookEnabled from defaults", () => {

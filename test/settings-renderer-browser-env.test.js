@@ -1636,7 +1636,7 @@ function loadAgentsTabForTest({
           rowStartWithCodexDesc: "Start with Codex desc",
           rowCodexPermissionMode: "Permission mode",
           rowCodexPermissionModeDesc: "Permission mode desc",
-          codexPermissionModeNative: "Native",
+          codexPermissionModeAuto: "Auto",
           codexPermissionModeIntercept: "Intercept",
           rowCodexNativeNotificationSound: "Native sound",
           rowCodexNativeNotificationSoundDesc: "Native sound desc",
@@ -16097,7 +16097,23 @@ describe("settings renderer browser environment", () => {
     );
   });
 
-  it("disables the Codex Permissions switch in place when Permission mode changes to Native", () => {
+  it("General exposes the Codex approval owner and links to its Agents control", () => {
+    for (const mode of ["auto", "intercept"]) {
+      const harness = loadGeneralTabForTest({ snapshot: { agents: { codex: {
+        integrationInstalled: true, enabled: true, permissionMode: mode } } } });
+      harness.renderContent();
+      const row = harness.content.querySelector(".codex-approval-owner-row");
+      assert.ok(row);
+      assert.ok(row.querySelector(".row-desc").textContent.includes(mode === "auto" ? "Auto" : "Intercept"));
+      const selected = [];
+      harness.core.ops.selectTab = (tab) => selected.push(tab);
+      row.querySelector("button").dispatchEvent({ type: "click" });
+      assert.deepStrictEqual(selected, ["agents"]);
+      assert.strictEqual(harness.core.runtime.agentsSubtab, "connected");
+    }
+  });
+
+  it("keeps manual Codex Permissions available when switching to Auto", () => {
     const harness = loadAgentsTabForTest({
       snapshot: {
         agents: {
@@ -16150,9 +16166,9 @@ describe("settings renderer browser environment", () => {
       .find((meta) => meta.agentId === "codex" && meta.flag === "permissionsEnabled");
     assert.ok(permissionsSwitch, "Codex Permissions switch should stay mounted");
     assert.strictEqual(harness.getContentRenderCount(), before);
-    assert.strictEqual(permissionsSwitch.element.classList.contains("disabled"), true);
-    assert.strictEqual(permissionsSwitch.element.attributes["aria-disabled"], "true");
-    assert.strictEqual(permissionsSwitch.element.attributes.tabindex, "-1");
+    assert.strictEqual(permissionsSwitch.element.classList.contains("disabled"), false);
+    assert.strictEqual(permissionsSwitch.element.attributes["aria-disabled"], "false");
+    assert.strictEqual(permissionsSwitch.element.attributes.tabindex, "0");
   });
 
   it("enables the Codex native sound switch only in Native permission mode", () => {

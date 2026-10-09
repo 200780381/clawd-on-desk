@@ -21,6 +21,7 @@ async function createPermissionIngressHarness({ render = false, ctxOverrides = {
     STATE_SVGS: { working: "working.svg" },
     isAgentEnabled: () => true,
     isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     isAgentSubagentPermissionsEnabled: () => true,
     getEffectivePermissionAutomationMode: () => "off",
     getBubblePolicy: () => ({ enabled: true, autoCloseMs: 0 }),

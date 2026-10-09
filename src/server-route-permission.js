@@ -1,5 +1,7 @@
 "use strict";
 
+const { resolveCodexApprovalRoute } = require("./codex-approval-routing");
+
 const {
   CLAWD_SERVER_HEADER,
   CLAWD_SERVER_ID,
@@ -144,9 +146,17 @@ function shouldBypassDshBubble(ctx) {
   return !ctx.isAgentPermissionsEnabled("deepseek-harness");
 }
 
-function shouldInterceptCodexPermission(ctx) {
-  if (typeof ctx.isCodexPermissionInterceptEnabled !== "function") return true;
-  return ctx.isCodexPermissionInterceptEnabled();
+function shouldInterceptCodexPermission(ctx, data) {
+  if (typeof ctx.getCodexPermissionMode === "function") {
+    const mode = ctx.getCodexPermissionMode();
+    if (mode === "intercept") return true;
+    if (mode !== "auto") return false;
+    return resolveCodexApprovalRoute(data).owner === "clawd";
+  }
+  // Old callers can still supply the explicit interception gate. With no
+  // authoritative settings reader, preserve Codex ownership.
+  return typeof ctx.isCodexPermissionInterceptEnabled === "function"
+    && ctx.isCodexPermissionInterceptEnabled();
 }
 
 function shouldMuteCodexNativeNotificationSound(ctx) {
@@ -1268,7 +1278,7 @@ function handlePermissionPost(req, res, options) {
           return;
         }
 
-        if (!shouldInterceptCodexPermission(ctx)) {
+        if (!shouldInterceptCodexPermission(ctx, data)) {
           codexSessionOptions = resolveCodexSessionProcessMetadata();
           const nativeSessionOptions = { ...codexSessionOptions };
           if (shouldMuteCodexNativeNotificationSound(ctx)) {
@@ -1314,6 +1324,8 @@ function handlePermissionPost(req, res, options) {
           sessionAutomationIdentity,
           agentId: "codex",
           isCodex: true,
+          codexAutoManual: typeof ctx.getCodexPermissionMode === "function"
+            && ctx.getCodexPermissionMode() === "auto",
           codexInteractiveSubagent: isCodexSubagent,
           headless: data.headless === true,
           codexSessionRole: codexSessionOptions.codexSessionRole || null,

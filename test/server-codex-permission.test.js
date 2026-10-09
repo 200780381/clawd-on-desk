@@ -96,6 +96,7 @@ function startServer(overrides = {}) {
     getBubblePolicy: () => ({ enabled: true, autoCloseMs: null }),
     isAgentEnabled: () => true,
     isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     updateSession: (...args) => updates.push(args),
     showPermissionBubble: (entry) => shown.push(entry),
     resolvePermissionEntry: (entry) => {
@@ -117,6 +118,23 @@ function startServer(overrides = {}) {
 }
 
 describe("Codex official /permission path", () => {
+  it("Auto delegates unknown and MCP requests before bubble or automation creation", async () => {
+    const { handler, pendingPermissions, shown } = startServer({
+      getCodexPermissionMode: () => "auto",
+      getPermissionAutomationMode: () => "unattended",
+    });
+    const res = await callPermission(handler, {
+      agent_id: "codex", hook_source: "codex-official",
+      session_id: "codex:01a119d3-1893-7f42-aadc-fa33ca4166a8",
+      tool_name: "mcp__github__get_issue", tool_input: { number: 199 },
+    });
+    assert.strictEqual(res.statusCode, 204);
+    assert.strictEqual(res.body, "");
+    assert.strictEqual(pendingPermissions.length, 0);
+    assert.strictEqual(shown.length, 0);
+  });
+
+
   it("returns no-decision for an archived local task before any bubble, state or automation", async () => {
     const { handler, pendingPermissions, updates, shown } = startServer({
       shouldSuppressCodexArchive: (raw) => raw === "codex:archived",
@@ -199,7 +217,7 @@ describe("Codex official /permission path", () => {
     assert.strictEqual(pendingPermissions.length, 0);
   });
 
-  it("defaults Codex PermissionRequest to a real approval bubble", async () => {
+  it("preserves the explicit Intercept approval bubble", async () => {
     const { handler, pendingPermissions, updates, shown } = startServer();
     const req = makeReq({
       agent_id: "codex",
