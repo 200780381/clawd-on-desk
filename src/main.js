@@ -5598,6 +5598,8 @@ const { enterMiniMode, exitMiniMode, enterMiniViaMenu, miniPeekIn, miniPeekOut,
 
 // ── Free Roam — initialized here after state and mini modules ──
 const _roamCtx = {
+  hasActiveSessions: anySessionInProgress,
+  resolveDisplayState,
   get win() { return win; },
   get dragLocked() { return petWindowRuntime.isDragLocked(); },
   getPetWindowBounds,

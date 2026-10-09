@@ -88,6 +88,16 @@ Codex CLI 状态同步（official hooks primary + JSONL fallback）：
     → agents/codex-log-monitor.js（fallback：hook 未覆盖事件、hook 禁用/不可用、历史兼容）
     → src/agent-runtime-main.js 对 hook-active session 做事件级 suppression，避免重复状态/重复气泡；本地 JSONL 路径不经过 HTTP server
 
+JSONL 的状态 suppression 与活跃时钟分离：monitor 对本机当前回合内、有可信记录时间的模型消息/推理、
+工具调用/结果发 activity-only callback，故 official hooks 覆盖的事件或重复 working 状态也能延续真实活跃。
+runtime 只触及已存在的非 headless、非 WSL/远程行，并须匹配 turn fence 已接受的当前回合；
+backfill、旧/未来时间、quota/title/文件 mtime、已结束或其他回合不能延长时钟。
+仅被 working-timeout 转 idle 的行保留私有 timeout 标记和最后真实活跃时间，当前回合新进度可按原 thinking/working
+恢复；普通 idle、Stop/abort/end 不可恢复，任一 accepted lifecycle 或恢复清掉标记。标记不进入 snapshot。
+无真实进度时仍遵守用户配置的 Codex inactivity timeout，不以 Desktop 长寿 PID 永久保活。
+自动自由漫步同时检查 canonical in-progress session；临时 idle/roam 视觉不放行忙碌会话，取消走动时按
+resolveDisplayState 恢复真实显示。手动拖拽、设置预览、DND 与 Mini 的原有入口和 gate 保留。
+
 Codex 桌面端 app-server 下的临时线程（无 transcript 且 hook 环境有非空
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`）既包含隐藏的「智能建议」后台线程，也包含
 用户自己的侧边聊天，两者 hook 字段完全相同；终端里直接跑的 `codex exec --ephemeral`
