@@ -842,6 +842,7 @@ opencode、MiMo Code、OpenClaw、Hermes 和 DeepSeek Harness 是 plugin 形式�
 
 - CJS hook 脚本通过 `hooks/shared-process.js` 的 `createPidResolver()` 与 lifecycle context 遍历进程树定位终端应用 PID（Windows Terminal、VS Code、iTerm2 等）；opencode-family plugin 保留自己的内部 resolver
 - 不要用 `process.ppid` 做轻量替代：Claude Code / hook 进程链里它通常只是临时 shell PID，不稳定也不可持久化
+- 本机 Windows Codex Desktop 的 lifecycle context 会以已验证的 app-server `agentPid` 作为 `source_pid` 和 v2 cache 的 `stablePid`，避免 `SessionStart` 的短命 PowerShell wrapper 退出后让 cache-only prompt 丢失身份。Desktop 判定只认 `codex-originator.js` 的已知 originator；本机 Windows 无 transcript 的 ephemeral hook 缺少 originator/source 且不是 headless/subagent 时，可用同一 allowlist 验证 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`，并上报 originator 供同进程多聊天去重与 server-side process routing 使用；显式 CLI / unknown originator 优先，环境变量不得把来源不明的 child permission 提升为交互式。WSL / interop / remote / headless 不走该偏好；其他 agent 和 Codex CLI 仍保持 terminal-first 与双 PID liveness，prompt / SessionEnd 永不补做快照，Stop 不删 cache。
 - `source_pid` 跟随状态更新送到 `main.js`，用于 Sessions 菜单聚焦
 - 右键 Sessions 子菜单点击后，`focusTerminalWindow()` 会用 PowerShell（Windows）或 `osascript`（macOS）聚焦终端
 - Windows 的 Cursor / VS Code 父进程窗口优先按项目标题唯一匹配；标题不匹配或缺少 cwd 时，仅在该进程的可见候选窗口唯一时兜底唤起。多窗口歧义或无可见候选时不以 `MainWindowHandle` 猜选。兜底不写 session HWND cache，`editor-parent-pid-window` / `editor-parent-pid-window-no-title` 即使成为前台也保持 `confirmed=false`：HUD / Dashboard 可以唤起 IDE，Telegram Direct Send 仍走手动粘贴回退，不能据此确认具体聊天或输入框。

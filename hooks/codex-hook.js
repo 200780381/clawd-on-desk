@@ -29,6 +29,7 @@ const {
 } = require("./shared-process");
 const {
   ROLE_UNKNOWN,
+  ROLE_SUBAGENT,
   classifyHookPayload,
   classifySessionMeta,
 } = require("./codex-subagent-fields");
@@ -290,10 +291,37 @@ function firstString(...values) {
   return "";
 }
 
-function applyCodexSessionMetaFields(body, payload, sessionMeta) {
+function resolveCodexOriginator(payload, sessionMeta, options = {}) {
   const source = payload && typeof payload === "object" ? payload : {};
   const meta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : {};
-  const originator = firstString(meta.originator, source.originator);
+  const explicit = firstString(meta.originator, source.originator);
+  if (explicit) return explicit;
+  // Desktop ephemeral hooks have no rollout/session_meta. Only an audited
+  // Desktop env value can supply their missing originator; an arbitrary client
+  // override must not change PID selection or server-side Desktop routing.
+  const env = options.env || process.env;
+  const inherited = firstString(env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE);
+  // Missing/blank string fields permit inheritance; a present malformed or
+  // structured value is declared provenance and must not become Desktop.
+  const hasDeclaredProvenance = [meta, source].some((record) =>
+    ["originator", "source"].some((key) => Object.prototype.hasOwnProperty.call(record, key)
+      && (typeof record[key] !== "string" || record[key].trim() !== "")));
+  return (options.platform || process.platform) === "win32"
+    && options.allowDesktopEnvOriginator !== false
+    && !env.CLAWD_REMOTE && !env.CLAWD_WSL_DISTRO
+    && source.headless !== true && meta.headless !== true
+    && !hasDeclaredProvenance
+    && classifyHookPayload(source) !== ROLE_SUBAGENT
+    && classifySessionMeta(meta) !== ROLE_SUBAGENT
+    && isCodexClientEphemeralPayload(source, { env })
+    && isCodexDesktopOriginator(inherited)
+    ? inherited : "";
+}
+
+function applyCodexSessionMetaFields(body, payload, sessionMeta, options = {}) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const meta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : {};
+  const originator = resolveCodexOriginator(payload, sessionMeta, options);
   let codexSource = firstString(meta.source, source.source);
   const metaSubagent = meta.source && typeof meta.source === "object"
     ? meta.source.subagent
@@ -336,10 +364,15 @@ function applyCodexSessionMetaFields(body, payload, sessionMeta) {
   if (parentThreadId) body.codex_parent_thread_id = parentThreadId.slice(0, 200);
 }
 
-function isCodexDesktopSession(payload, sessionMeta) {
-  const source = payload && typeof payload === "object" ? payload : {};
-  const meta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : {};
-  return isCodexDesktopOriginator(firstString(meta.originator, source.originator));
+function isCodexDesktopSession(payload, sessionMeta, options = {}) {
+  return isCodexDesktopOriginator(resolveCodexOriginator(payload, sessionMeta, options));
+}
+
+function shouldPreferCodexAgentPid(payload, sessionMeta, options) {
+  return options.allowDesktopPidPreference !== false
+    && payload.headless !== true
+    && !["exec", "internal"].includes(firstString(sessionMeta && sessionMeta.source, payload.source))
+    && isCodexDesktopSession(payload, sessionMeta, options);
 }
 
 function shouldReportForegroundWtHwnd(event) {
@@ -363,6 +396,7 @@ function applyLocalProcessFields(body, resolve, options = {}) {
     cacheCwd: body.cwd || "",
     lifecycle,
     cacheable: body.session_id !== "codex:default" && !!body.cwd,
+    ...(options.preferAgentPid ? { preferAgentPid: true } : {}),
   });
   const { stablePid, agentPid, detectedEditor, pidChain, foregroundWtHwnd, tmuxSocket, tmuxClient, headless } = metadata;
   const sourcePid = options.preferAgentPid && agentPid ? agentPid : stablePid;
@@ -471,7 +505,7 @@ function buildPermissionBody(payload, resolve, options = {}) {
   // fail-closes subagents whose originator is not an audited interactive client.
   const codexRole = resolveCodexSessionRole(payload, sessionMeta);
   if (codexRole !== ROLE_UNKNOWN) body.codex_session_role = codexRole;
-  applyCodexSessionMetaFields(body, payload, sessionMeta);
+  applyCodexSessionMetaFields(body, payload, sessionMeta, options);
 
   const toolUseId = normalizeToolUseId(payload.tool_use_id ?? payload.toolUseId ?? payload.toolUseID);
   const toolInputFingerprint = buildToolInputFingerprint(rawToolInput);
@@ -488,7 +522,7 @@ function buildPermissionBody(payload, resolve, options = {}) {
       applyOrcaPaneKey(body);
     } else {
       const metadata = applyLocalProcessFields(body, resolve, {
-        preferAgentPid: isCodexDesktopSession(payload, sessionMeta),
+        preferAgentPid: shouldPreferCodexAgentPid(payload, sessionMeta, options),
         event,
       });
       if (typeof options.onProcessMetadata === "function") options.onProcessMetadata(metadata);
@@ -542,7 +576,7 @@ function buildStateBody(payload, resolve, options = {}) {
   if (threadName) body.session_title = threadName;
   const codexRole = resolveCodexSessionRole(payload, sessionMeta);
   if (codexRole !== ROLE_UNKNOWN) body.codex_session_role = codexRole;
-  applyCodexSessionMetaFields(body, payload, sessionMeta);
+  applyCodexSessionMetaFields(body, payload, sessionMeta, options);
   applyCodexUpstreamFields(body, payload, sessionMeta);
 
   const toolName = typeof payload.tool_name === "string" && payload.tool_name ? payload.tool_name : null;
@@ -563,7 +597,7 @@ function buildStateBody(payload, resolve, options = {}) {
       applyOrcaPaneKey(body);
     } else {
       const metadata = applyLocalProcessFields(body, resolve, {
-        preferAgentPid: isCodexDesktopSession(payload, sessionMeta),
+        preferAgentPid: shouldPreferCodexAgentPid(payload, sessionMeta, options),
         event,
       });
       if (typeof options.onProcessMetadata === "function") options.onProcessMetadata(metadata);
@@ -658,11 +692,11 @@ async function runCodexHook(payload, options = {}) {
     const resolveHookWslDistro = options.resolveWslDistro || resolveWslDistro;
     wslDistro = resolveHookWslDistro();
   } catch {}
-  const mayUseWindowsProcessChain = platform === "win32"
-    && !env.CLAWD_REMOTE
+  const mayUseLocalProcess = !env.CLAWD_REMOTE
     && !env.CLAWD_WSL_DISTRO
     && !wslInterop
     && !wslDistro;
+  const mayUseWindowsProcessChain = platform === "win32" && mayUseLocalProcess;
   const readHookContext = options.readWindowsProcessChainHookContext
     || readWindowsProcessChainHookContext;
   const isAlive = options.processAlive || processAlive;
@@ -698,6 +732,7 @@ async function runCodexHook(payload, options = {}) {
     const resolverOptions = {
       agentNames: { win: new Set(["codex.exe"]), mac: new Set(["codex"]), linux: new Set(["codex"]) },
       platformConfig: config,
+      env,
       readRuntimeIdentity() {
         if (processChainAttempt && processChainAttempt.context) {
           return processChainAttempt.context.identity;
@@ -721,6 +756,10 @@ async function runCodexHook(payload, options = {}) {
     const permissionAttempt = createAttemptResolver(options.preferredPort || null, processChainAttempt);
     let legacyCacheSource = "none";
     const permissionBody = buildPermissionBody(payload, permissionAttempt.resolve, {
+      env,
+      platform,
+      allowDesktopEnvOriginator: mayUseWindowsProcessChain,
+      allowDesktopPidPreference: mayUseLocalProcess,
       authoritativeProcessChain: processChainAttempt.authoritative,
       onProcessMetadata: (metadata) => { legacyCacheSource = metadata && metadata.cacheSource || "none"; },
     });
@@ -780,6 +819,10 @@ async function runCodexHook(payload, options = {}) {
     const attempt = createAttemptResolver(preferredPort, processChainAttempt);
     let legacyCacheSource = "none";
     const body = buildStateBody(payload || {}, attempt.resolve, {
+      env,
+      platform,
+      allowDesktopEnvOriginator: mayUseWindowsProcessChain,
+      allowDesktopPidPreference: mayUseLocalProcess,
       authoritativeProcessChain: processChainAttempt.authoritative,
       codexInternalThread,
       onProcessMetadata: (metadata) => { legacyCacheSource = metadata && metadata.cacheSource || "none"; },
