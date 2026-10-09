@@ -9,6 +9,8 @@ const initPermission = require("../../src/permission");
 // runtime-file writes, remote clients, agent execution, or user preferences.
 // `ctxOverrides` lets a single harness instance flip gate inputs (DND,
 // agent-enabled, bubble policy) that the server snapshots at construction.
+// Rendering alone does not authorize a visible approval surface: the default
+// null pet owner keeps synthetic requests hidden while their real pages load.
 async function createPermissionIngressHarness({ render = false, ctxOverrides = {} } = {}) {
   const shown = [];
   const updates = [];

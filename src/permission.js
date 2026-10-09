@@ -817,6 +817,10 @@ let expandedPermissionEntry = null;
 // a bubble during its 250ms fade-out after the request has already been removed
 // from the pending list.
 const permissionBubbleWindows = new Set();
+// A hidden BrowserWindow starts at a provisional origin. Only a successful
+// presentation bounds write makes it eligible to show, including the
+// transactional first-show retry below.
+const positionedPermissionWindows = new WeakSet();
 const overflowPresentation = {
   mode: "normal",
   revision: 0,
@@ -1273,7 +1277,9 @@ function getLocalPresentationEntries() {
 function createPresentationGeometry() {
   if (!ctx.win || ctx.win.isDestroyed()) return null;
   const petBounds = ctx.getPetWindowBounds();
+  if (!isUsableRect(petBounds)) return null;
   const workArea = getAnchorWorkArea(petBounds);
+  if (!isUsableRect(workArea)) return null;
   const scale = getTextScale(workArea);
   const margin = Math.round(8 * scale);
   const gap = Math.round(6 * scale);
@@ -1589,10 +1595,24 @@ function setRequestWindowVisible(entry, visible, bounds, geometry) {
   const bubble = entry && entry.bubble;
   if (!isLiveBrowserWindow(bubble)) return;
   if (visible) {
-    try { applyZoomToWindow(bubble, geometry.scale); } catch {}
-    if (bounds && !bubble.__clawdMacImeEditing) {
-      try { bubble.setBounds(bounds); } catch {}
+    if (!bubble.__clawdMacImeEditing) {
+      positionedPermissionWindows.delete(bubble);
+      if (!geometry || !isUsableRect(bounds)) return;
+      try {
+        bubble.setBounds(bounds);
+        positionedPermissionWindows.add(bubble);
+      } catch {
+        // Keep the request pending. A later owner/display/measurement reflow
+        // retries placement; showing now would expose the provisional origin
+        // or bounds from a previous presentation.
+        return;
+      }
+    } else if (!positionedPermissionWindows.has(bubble)) {
+      // An editing card may preserve valid prior bounds, but an unpositioned
+      // window cannot use the IME freeze to bypass its first placement.
+      return;
     }
+    try { applyZoomToWindow(bubble, geometry.scale); } catch {}
     try {
       if (isWin) bubble.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
       if (isMac && !bubble.__clawdMacImeEditing) bubble.setAlwaysOnTop(true, MAC_TOPMOST_LEVEL);
@@ -1662,7 +1682,7 @@ function requestSlackRemeasureForNewlyVisible(candidates) {
 
 function showQueueWindow(bounds, geometry, options = {}) {
   const queueWindow = overflowPresentation.queueWindow;
-  if (!isLiveBrowserWindow(queueWindow) || !bounds) return false;
+  if (!isLiveBrowserWindow(queueWindow) || !geometry || !isUsableRect(bounds)) return false;
   try { applyZoomToWindow(queueWindow, geometry.scale); } catch {}
   try {
     queueWindow.setBounds(bounds);
@@ -2462,10 +2482,12 @@ function showPermissionBubble(permEntry) {
   const canOfferSessionTrust = typeof ctx.canOfferSessionTrust === "function"
     && ctx.canOfferSessionTrust(permEntry) === true;
   const sugCount = (permEntry.suggestions || []).length + (canOfferSessionTrust ? 1 : 0);
-  const wa = getAnchorWorkArea();
-  const scale = getTextScale(wa);
-  const bh = clampBubbleHeight(scaleHeight(estimateBubbleHeight(sugCount), scale), wa.height);
-  // Temporary position — repositionBubbles() will finalize after renderer reports real height
+  const initialGeometry = createPresentationGeometry();
+  const wa = initialGeometry && initialGeometry.workArea;
+  const scale = initialGeometry ? initialGeometry.scale : getTextScale();
+  const bh = clampBubbleHeight(scaleHeight(estimateBubbleHeight(sugCount), scale), wa && wa.height);
+  // Provisional bounds stay hidden until presentation applies a valid layout.
+  // Renderer measurements refine that first layout afterwards.
   const pos = { x: 0, y: 0, width: getBubbleWidth(scale, wa), height: bh };
 
   // Bubbles that host a text input (elicitation "Other", ExitPlanMode
@@ -2531,8 +2553,12 @@ function showPermissionBubble(permEntry) {
       permEntry.bubbleReady = true;
       // Explicit even though same-origin propagation usually covers it — a
       // stale partition-persisted factor must never win over prefs.
-      applyZoomToWindow(bub, getTextScale(getAnchorWorkArea()));
+      const geometry = createPresentationGeometry();
+      if (geometry) applyZoomToWindow(bub, geometry.scale);
       syncPermissionBubbleContent(permEntry);
+      // Loading provides another natural placement attempt if the owner or a
+      // native bounds write was temporarily unavailable during creation.
+      reconcilePermissionPresentation("bubble-ready");
       // Arrival never steals focus. Eligible Ask cards may already be visually
       // expanded, but controls receive focus only after an explicit local or
       // queue action.
@@ -2639,6 +2665,7 @@ function showPermissionBubble(permEntry) {
     if (
       !queueAlreadyRepresentsPending
       && !isEntryCutOffByPet(permEntry)
+      && positionedPermissionWindows.has(bub)
       && (typeof bub.isVisible !== "function" || !bub.isVisible())
       && typeof bub.showInactive === "function"
     ) {
