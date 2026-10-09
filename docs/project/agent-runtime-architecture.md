@@ -263,6 +263,8 @@ WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
   所以挂在 workbuddy-session-title 观察器上：一次轮询读到这两种生命周期就对该会话 dismissSession 撤卡（不响提示音、不算完成），并让 updateSessionFromServer 对随后的迟到事件
   同步重读当时判定用的那个所属库；仍是归档/删除就丢弃，取消归档或读不到就恢复正常接收。生命周期只认拥有 transcript 的那个库（transcript 不在任何已知家目录下、或没有 transcript 一律算“不知道”，
   绝不用别的库推断）；别的家目录里的同 ID 归档副本不参与判断；读不到数据库一律按“不知道”处理，绝不撤卡。
+  Windows WorkBuddy 的进程快照使用有界 5 秒超时（其他 adapter 默认仍为 3 秒）：5.7.6 真机观测到约 4.17 秒的快照，3 秒会丢失主 PID、无法按应用退出撤卡。
+  hook 先输出 `{}` 再探测；输出后的退出 backstop 为 7.5 秒，给快照后的 HTTP 上报留出时间。超过上限仍不返回降级 PID，按既有状态/超时逻辑处理。
 
   WorkBuddy's native `Notification` subtypes `idle_prompt` and `auth_success` are acknowledged with `{}` locally, before process resolution or HTTP delivery. `idle_prompt` is a "send another message" reminder, observed on 5.2.6 about 60 seconds after Stop (5.6.2's per-turn host exits before it can fire, so it was not observed there); `auth_success` is the login-success toast, emitted by 5.6.2 at the start of every turn. Forwarding either would create or settle a session — a phantom idle row before the first UserPromptSubmit, or knocking a running turn back to idle. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
 

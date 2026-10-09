@@ -203,6 +203,7 @@ function getPlatformConfig(options) {
 //   agentCmdlineNames    — Set<string> (optional; replaces DEFAULT_AGENT_CMDLINE_NAMES)
 //   startPid             — number (default process.ppid)
 //   maxDepth             — number (default 8)
+//   windowsSnapshotTimeoutMs — positive integer, capped at 5000 (default 3000)
 
 // The process names whose command line agentCmdlineCheck is run against when
 // the caller passes no agentCmdlineNames: every name a node process that never
@@ -268,7 +269,7 @@ $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Sel
 
 // One PS spawn per resolve, not per ancestor — PowerShell cold-start (~270 ms)
 // would dominate the walk otherwise. Returns an empty process map on failure.
-function getWindowsProcessSnapshot(execFileSync) {
+function getWindowsProcessSnapshot(execFileSync, timeoutMs = 3000) {
   try {
     const out = execFileSync(
       "powershell.exe",
@@ -280,7 +281,7 @@ function getWindowsProcessSnapshot(execFileSync) {
         "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
         WINDOWS_PROCESS_SNAPSHOT_SCRIPT,
       ],
-      { encoding: "utf8", timeout: 3000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+      { encoding: "utf8", timeout: timeoutMs, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
     );
     const trimmed = (out || "").trim();
     if (!trimmed) return { processes: new Map(), foregroundWtHwnd: null };
@@ -541,6 +542,10 @@ function createPidResolver(options) {
   const { terminalNames, systemBoundary, editorMap, editorPathChecks } = platformConfig;
   const startPid = options.startPid || process.ppid;
   const maxDepth = options.maxDepth || 8;
+  const windowsSnapshotTimeoutMs = Number.isInteger(options.windowsSnapshotTimeoutMs)
+    && options.windowsSnapshotTimeoutMs > 0
+    ? Math.min(options.windowsSnapshotTimeoutMs, 5000)
+    : 3000;
 
   const isWin = process.platform === "win32";
   const isLinux = process.platform === "linux";
@@ -606,7 +611,7 @@ function createPidResolver(options) {
     }
 
     const { execFileSync } = require("child_process");
-    const winSnapshotResult = isWin ? getWindowsProcessSnapshotFn(execFileSync) : null;
+    const winSnapshotResult = isWin ? getWindowsProcessSnapshotFn(execFileSync, windowsSnapshotTimeoutMs) : null;
     const winSnapshot = winSnapshotResult ? winSnapshotResult.processes : null;
     const foregroundWtHwnd = winSnapshotResult ? winSnapshotResult.foregroundWtHwnd : null;
 
