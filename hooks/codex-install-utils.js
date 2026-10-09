@@ -36,7 +36,10 @@ const CODEX_HOOK_EVENTS = [
   "PermissionRequest",
   "PostToolUse",
   "PreCompact",
+  "PostCompact",
   "Stop",
+  "Interrupt",
+  "SessionEnd",
 ];
 const CODEX_HOOKS_FEATURE_KEY = "hooks";
 const LEGACY_CODEX_HOOKS_FEATURE_KEY = "codex_hooks";
@@ -693,7 +696,10 @@ function removeStableCodexHookLauncher(options = {}) {
 }
 
 function timeoutForCodexEvent(event) {
-  return event === "PermissionRequest" ? 600 : 30;
+  if (event === "PermissionRequest") return 600;
+  // Upstream caps teardown/interruption hooks at three seconds.
+  if (event === "SessionEnd" || event === "Interrupt") return 3;
+  return 30;
 }
 
 function getCodexPaths(options = {}) {
