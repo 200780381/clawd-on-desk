@@ -70,7 +70,7 @@
 
 ## Codex approval routing
 
-Settings → Agents → Codex offers **Auto** (default) and **Intercept**. General's Permissions section links directly to this control. Intercept is an explicit Clawd-owned approval flow and can block Codex's Approve for me until the user responds. Existing explicit Intercept preferences are preserved; legacy Native values normalize to Auto.
+Settings → Agents → Codex offers **Auto** (default) and **Intercept**. General's Permissions section links directly to this control. Intercept is an explicit Clawd-owned approval flow and can block Codex's Approve for me until the user responds. Upgrading from an earlier version moves Codex to Auto once, whether the stored value was Intercept or Native, because earlier versions saved the old Intercept default to disk and an explicit choice cannot be told apart from it. Re-select Intercept after upgrading to keep it; that choice is preserved from then on.
 
 Auto uses a bounded read of the exact local hook transcript and matching session/turn to identify human-reviewed Bash/file approval. Automatic reviewers and uncertain evidence immediately return no-decision, never Allow/Deny. The public Codex hook contract does not expose an effective request reviewer (#23465); MCP/app requests can override turn settings, so they stay in Codex. Missing/old/unreadable transcripts, partial records, mode changes after the snapshot, long turns whose context falls outside the read budget, and remote/WSL requests also stay in Codex. Auto does not promise that every manual request will appear in Clawd.
 
