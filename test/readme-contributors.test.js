@@ -89,6 +89,8 @@ const VERIFIED_GITHUB_CONTRIBUTORS = [
   "gzx19990101",
   "ypjn",
   "jin-codes",
+  "LetitiaChan",
+  "sanzanazaman",
 ];
 
 function loadSettingsContributors() {
