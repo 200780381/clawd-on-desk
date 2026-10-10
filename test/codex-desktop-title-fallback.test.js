@@ -13,6 +13,10 @@ const {
 } = require("../src/state-session-snapshot");
 const { resolveCodexOfficialHookState } = require("../src/server-codex-official-turns");
 const CodexSubagentClassifier = require("../agents/codex-subagent-classifier");
+const { createSettingsController } = require("../src/settings-controller");
+const createSettingsEffectRouter = require("../src/settings-effect-router");
+const prefs = require("../src/prefs");
+const themeLoader = require("../src/theme-loader");
 
 const rawA = "codex:00000000-0000-4000-8000-000000000001";
 const rawB = "codex:00000000-0000-4000-8000-000000000002";
@@ -129,7 +133,7 @@ describe("Codex Desktop untitled display fallback", () => {
 });
 
 // Run the real row builder with synthetic DOM elements; no Electron/GUI/input.
-function renderRow(entry, feedback = "") {
+function renderRow(entry, feedback = "", language = "zh") {
   const source = fs.readFileSync(path.join(__dirname, "../src/session-hud-renderer.js"), "utf8");
   const names = ["titleFor", "untitledCodexTag", "titleUnits", "shortenHudTitle", "createRowForSession"];
   const functions = names.map((name) => {
@@ -142,7 +146,7 @@ function renderRow(entry, feedback = "") {
     appendChild(child) { this.children.push(child); }, setAttribute() {}, addEventListener() {},
   });
   const context = {
-    document: { createElement: element }, t: createTranslator(() => "zh"),
+    document: { createElement: element }, t: createTranslator(() => language),
     HUD_TITLE_MAX_UNITS: 15, snapshot: { hudShowElapsed: false }, unreadSessions: new Set(),
     sessionFeedbackText: () => feedback, stateChipInfo: () => null, usageChipInfo: () => null,
   };
@@ -181,5 +185,86 @@ describe("compact HUD fallback suffix", () => {
     const title = renderRow({ displayTitle: label, displaySessionTag: tag, id: idA, canFocus: true }, "Action failed");
     assert.equal(title.textContent, "Action failed");
     assert.equal(title.children.length, 0);
+  });
+});
+
+describe("settings language change for an idle untitled Desktop row", () => {
+  it("broadcasts fresh localized labels after dictionaries, preserving the tag, identity and inactivity", () => {
+    // Real controller/store/validators and real state snapshot owner; settings
+    // stay memory-only and rendering uses synthetic DOM, with no Electron UI.
+    const controller = createSettingsController({
+      loadResult: { snapshot: prefs.getDefaults(), locked: false },
+    });
+    const calls = [];
+    const delivered = [];
+    let rendererLang = "en";
+    themeLoader.init(path.join(__dirname, "../src"));
+    const ctx = {
+      lang: "en", theme: themeLoader.loadTheme("clawd"), focusHostPlatform: "win32",
+      broadcastSessionSnapshot(snapshot) {
+        calls.push("snapshot");
+        delivered.push(snapshot);
+      },
+    };
+    ctx.t = createTranslator(() => ctx.lang);
+    const state = require("../src/state")(ctx);
+    const idle = desktop({ state: "idle", lastStopAt: 1234, recentEvents: [{ event: "Stop", at: 1234 }] });
+    Object.defineProperty(idle, "prompt", { get() { throw new Error("language refresh must not read prompt"); } });
+    state.sessions.set(idA, idle);
+    const before = JSON.stringify(idle);
+    const router = createSettingsEffectRouter({
+      settingsController: controller,
+      BrowserWindow: { getAllWindows: () => [] },
+      updateMirrors(changes) {
+        calls.push("mirrors");
+        if ("lang" in changes) ctx.lang = changes.lang;
+      },
+      sendDashboardI18n: () => calls.push("dashboard-dictionary"),
+      sendSessionHudI18n() {
+        calls.push("hud-dictionary");
+        rendererLang = controller.get("lang");
+      },
+      syncWindowTitles: () => calls.push("window-titles"),
+      emitSessionSnapshot(options) {
+        assert.equal(options.force, true);
+        state.emitSessionSnapshot(options);
+      },
+    });
+    router.start();
+    try {
+      state.emitSessionSnapshot({ force: true });
+      const initial = delivered.at(-1).sessions[0];
+      const tag = initial.displaySessionTag;
+      assert.equal(renderRow(initial, "", rendererLang).children[1].textContent, tag);
+      for (const lang of ["zh", "ja"]) {
+        calls.length = 0;
+        const count = delivered.length;
+        assert.deepEqual(controller.applyUpdate("lang", lang), { status: "ok" });
+        assert.deepEqual(calls, ["mirrors", "dashboard-dictionary", "hud-dictionary", "window-titles", "snapshot"]);
+        assert.equal(delivered.length, count + 1);
+        const entry = delivered.at(-1).sessions[0];
+        assert.equal(entry.displayTitle, i18n[lang].sessionCodexUntitled.replace("{tag}", tag));
+        assert.equal(renderRow(entry, "", rendererLang).children[1].textContent, tag);
+        for (const field of ["id", "rawSessionId", "displaySessionTag", "updatedAt", "state", "badge", "lastEvent", "cwd", "focusTarget"]) {
+          assert.deepEqual(entry[field], initial[field], field);
+        }
+        assert.equal(JSON.stringify(idle), before);
+        assert.equal(state.sessions.size, 1);
+      }
+
+      assert.equal(state.updateSessionMetadata(idA, { sessionTitle: "Native title", expectedAgentId: "codex" }), true);
+      assert.deepEqual(controller.applyUpdate("lang", "ko"), { status: "ok" });
+      const named = delivered.at(-1).sessions[0];
+      assert.equal(named.displayTitle, "Native title");
+      assert.equal(renderRow(named, "", rendererLang).children.length, 0);
+      assert.equal(named.id, initial.id);
+      assert.equal(named.state, "idle");
+      assert.equal(named.updatedAt, initial.updatedAt);
+      assert.deepEqual(named.lastEvent, initial.lastEvent);
+      assert.equal(state.sessions.size, 1);
+    } finally {
+      router.dispose();
+      state.cleanup();
+    }
   });
 });
