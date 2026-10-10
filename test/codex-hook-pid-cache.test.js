@@ -137,6 +137,62 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
     });
   }
 
+  it("passes Codex's five-second deadline through the real shared snapshot helper only on fresh queries", async (t) => {
+    const alive = new Set([1001, 1002, 1003, 1004, 9000]);
+    t.mock.method(process, "kill", (pid, signal) => {
+      assert.equal(signal, 0);
+      if (!alive.has(Number(pid))) throw Object.assign(new Error("dead"), { code: "ESRCH" });
+      return true;
+    });
+    const deadlines = [];
+    let failSnapshot = false;
+    t.mock.method(require("node:child_process"), "execFileSync", (file, args, options) => {
+      assert.equal(file, "powershell.exe");
+      assert.equal(options.windowsHide, true);
+      assert.equal(args.includes("Hidden"), true);
+      deadlines.push(options.timeout);
+      if (failSnapshot) throw Object.assign(new Error("snapshot timed out"), { code: "ETIMEDOUT" });
+      return JSON.stringify([
+        { ProcessId: 1001, Name: "powershell.exe", ParentProcessId: 1002, CommandLine: "hook", StartIdentity: "wrapper-start" },
+        { ProcessId: 1002, Name: "codex.exe", ParentProcessId: 1003, CommandLine: "codex app-server", StartIdentity: "agent-start" },
+        { ProcessId: 1003, Name: "codexdesktop.exe", ParentProcessId: 1004, CommandLine: "desktop", StartIdentity: "desktop-start" },
+        { ProcessId: 1004, Name: "explorer.exe", ParentProcessId: 0, CommandLine: "" },
+      ]);
+    });
+    const identity = { ok: true, ownerPid: 9000, port: 23333 };
+    const factoryDeadlines = [];
+    const run = (event, extra = {}) => runCodexHook({ session_id: "snapshot-deadline", cwd: "C:/test/deadline", hook_event_name: event, ...extra }, {
+      env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" }, argv: [],
+      resolveWslDistro: () => null,
+      readWindowsProcessChainHookContext: () => ({ identity, observation: null }),
+      createPidResolver(base) {
+        factoryDeadlines.push(base.windowsSnapshotTimeoutMs);
+        return createPidResolver({ ...base, startPid: 1001, readRuntimeIdentity: () => identity });
+      },
+      postState(_body, _options, done) { done(true, 23333); },
+      readCodexAutoStartGate() { throw new Error("unexpected auto-start gate"); },
+    });
+    await run("SessionStart", { source: "fork" });
+    assert.deepEqual(deadlines, [5000]);
+    alive.delete(1001);
+    const prompt = await run("UserPromptSubmit");
+    assert.equal(prompt.body.source_pid, 1002);
+    assert.equal((await run("SessionEnd")).body.agent_pid, 1002);
+    assert.deepEqual(deadlines, [5000], "prompt/end never query");
+    assert.deepEqual(factoryDeadlines, [5000, 5000, 5000]);
+    createPidResolver({ platformConfig: getPlatformConfig(), startPid: 1001, env: {}, readRuntimeIdentity: () => identity })();
+    assert.deepEqual(deadlines, [5000, 3000], "generic callers keep the three-second default");
+    failSnapshot = true;
+    await run("SessionStart", { source: "fork" });
+    assert.equal(pc.readPidCacheV2("codex", "codex:snapshot-deadline", "C:/test/deadline"), null);
+    for (const event of ["UserPromptSubmit", "SessionEnd"]) {
+      const result = await run(event);
+      assert.equal(result.body.source_pid, null);
+      assert.equal(result.body.agent_pid, undefined);
+    }
+    assert.deepEqual(deadlines, [5000, 3000, 5000], "a timeout never retries or falls back on prompt/end");
+  });
+
   it("uses the current Desktop env alias and preserves ambient versus ordinary chat tagging", async (t) => {
     const h = harness(t, {
       env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "codex_work_desktop" },

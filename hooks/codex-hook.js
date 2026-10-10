@@ -742,6 +742,7 @@ async function runCodexHook(payload, options = {}) {
     const resolverOptions = {
       agentNames: { win: new Set(["codex.exe"]), mac: new Set(["codex"]), linux: new Set(["codex"]) },
       platformConfig: config,
+      windowsSnapshotTimeoutMs: 5000,
       env,
       readRuntimeIdentity() {
         if (processChainAttempt && processChainAttempt.context) {
