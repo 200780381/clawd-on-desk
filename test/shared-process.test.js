@@ -164,6 +164,57 @@ describe("createPidResolver()", () => {
   });
 });
 
+describe("createPidResolver() — POSIX Desktop preference boundary", () => {
+  const { loadSharedProcessWithMock } = require("./helpers/load-shared-process-with-mock");
+  const pidCache = require("../hooks/pid-cache");
+
+  for (const platform of ["darwin", "linux"]) {
+    it(`keeps the ${platform} terminal anchor before reading the Windows-only preference`, (t) => {
+      let preferenceReads = 0;
+      let windowsSnapshots = 0;
+      const tree = new Map([
+        [610, { name: "sh", parent: 620, command: "hook" }],
+        [620, { name: "codex", parent: 630, command: "codex app-server" }],
+        [630, { name: "terminal", parent: 640, command: "terminal" }],
+        [640, { name: "init", parent: 0, command: "init" }],
+      ]);
+      t.mock.method(pidCache, "cacheFilePathV2", () => { throw new Error("POSIX must not enter the V2 disk cache"); });
+      const { mod, cleanup } = loadSharedProcessWithMock({
+        platform,
+        env: { TMUX: undefined, TMUX_PANE: undefined },
+        execFileSyncMock(command, args) {
+          assert.strictEqual(command, "ps", "no real process command is allowed");
+          const row = tree.get(Number(args[3]));
+          assert.ok(row, `unexpected synthetic PID ${args[3]}`);
+          if (args[1] === "ppid=") return `${row.parent}\n`;
+          if (args[1] === "comm=") return `${row.name}\n`;
+          if (args[1] === "command=") return `${row.command}\n`;
+          throw new Error(`unexpected ps probe ${args[1]}`);
+        },
+      });
+      try {
+        const resolve = mod.createPidResolver({
+          startPid: 610,
+          platformConfig: { terminalNames: new Set(["terminal"]), systemBoundary: new Set(["init"]), editorMap: {}, editorPathChecks: [] },
+          agentNames: { mac: new Set(["codex"]), linux: new Set(["codex"]) },
+          readRuntimeIdentity: () => { throw new Error("POSIX must not read a Windows cache owner"); },
+          getWindowsProcessSnapshot: () => { windowsSnapshots++; throw new Error("POSIX must not take a Windows snapshot"); },
+        });
+        for (const lifecycle of ["start", "event", "prompt", "end"]) {
+          const result = resolve({ namespace: "codex", sessionId: "codex:posix-desktop", cacheCwd: "/synthetic/project",
+            cacheable: true, lifecycle, get preferAgentPid() { preferenceReads++; return true; } });
+          assert.strictEqual(result.stablePid, 630, lifecycle);
+          assert.strictEqual(result.terminalPid, 630, lifecycle);
+          assert.strictEqual(result.agentPid, 620, lifecycle);
+        }
+        assert.strictEqual(resolve().stablePid, 630);
+        assert.strictEqual(preferenceReads, 0, "!isWin must return before interpreting the preference");
+        assert.strictEqual(windowsSnapshots, 0);
+      } finally { cleanup(); }
+    });
+  }
+});
+
 describe("createPidResolver() — POSIX non-Node command-line probe", () => {
   const { loadSharedProcessWithMock } = require("./helpers/load-shared-process-with-mock");
 
