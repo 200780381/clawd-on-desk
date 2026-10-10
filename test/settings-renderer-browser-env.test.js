@@ -1650,6 +1650,7 @@ function loadAgentsTabForTest({
           dshNoticeFirstInstall: "Installed in DeepSeek Harness desktop. It loads automatically while the app is open; no restart needed.",
           dshNoticeManualCommand: "Run this in a terminal to finish. Clawd will not run it for you:",
           dshNoticeInstallFailed: "Not installed: {message}",
+          dshNoticeGenerationConflict: "DeepSeek Harness moved to a new version family. The Clawd plugin keeps working. To switch it to the new family, click Uninstall and then Install here, then restart any running dsh web.",
           dshNoticeUninstallFailed: "Not fully removed: {message}",
           dshNoticeOpenDoctor: "Open Doctor and click {fix}.",
           doctorFix: "Repair Now",
@@ -12696,6 +12697,23 @@ describe("settings renderer browser environment", () => {
     assert.match(collectText(rows[3]), /Web: Run this in a terminal to finish\./);
     assert.match(collectText(rows[3].querySelector(".agent-dsh-notice-commands")), /line1\s*\n\s*line2/);
     assert.match(collectText(rows[4]), /Desktop: Installed in DeepSeek Harness desktop\./);
+  });
+
+  it("guides DeepSeek Harness generation changes through Uninstall and Install while repairable failures keep Doctor", async () => {
+    const harness = loadDshNoticesHarness({ notices: [
+      { id: "g", profile: "web", kind: "failed-target", operation: "install", reason: "generation-conflict", message: "raw installer error" },
+      { id: "r", profile: "web", kind: "failed-target", operation: "install", reason: "repair-pending", message: "repair interrupted" },
+    ] });
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.match(collectText(rows[0]), /The Clawd plugin keeps working.*click Uninstall and then Install here.*restart any running dsh web/);
+    assert.doesNotMatch(collectText(rows[0]), /Open Doctor|Not installed:|raw installer error/);
+    assert.match(collectText(rows[1]), /Not installed: repair interrupted Open Doctor and click Repair Now/);
+    assert.strictEqual(collectText(harness.content.querySelector(".agent-integration-action")), "Uninstall");
+    harness.core.state.snapshot = { agents: { "deepseek-harness": { integrationInstalled: false, enabled: false } } };
+    harness.core.ops.requestRender({ content: true });
+    assert.strictEqual(collectText(harness.content.querySelector(".agent-integration-action")), "Install");
   });
 
   it("copies every manual command line from a DeepSeek Harness notice", async () => {

@@ -138,6 +138,18 @@ describe("i18n locales", () => {
     assertLocaleObjectParity(loadSettingsI18nStrings(), "settings");
   });
 
+  it("localizes DSH generation changes using the visible integration action names", () => {
+    const strings = loadSettingsI18nStrings();
+    for (const lang of SUPPORTED_LANGS) {
+      const locale = strings[lang];
+      assert.strictEqual(typeof locale.dshNoticeGenerationConflict, "string", lang);
+      assert.ok(locale.dshNoticeGenerationConflict.includes(locale.agentIntegrationUninstall), lang);
+      assert.ok(locale.dshNoticeGenerationConflict.includes(locale.agentIntegrationInstall), lang);
+      assert.match(locale.dshNoticeGenerationConflict, /dsh web/, lang);
+      assert.doesNotMatch(locale.dshNoticeGenerationConflict, /Doctor|\{message\}/, lang);
+    }
+  });
+
   it("describes Codex CLI queue delivery in every Settings locale", () => {
     const strings = loadSettingsI18nStrings();
     for (const lang of SUPPORTED_LANGS) {
