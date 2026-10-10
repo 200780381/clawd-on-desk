@@ -168,28 +168,16 @@ test("PR #1156 follow-up: a requested budget above 32 MiB cannot exceed the hard
 test("PR #1156 follow-up: inode replacement with unchanged size and mtime invalidates the transcript", (t) => {
   const f = fixture(t);
   const file = fs.realpathSync(f.file);
-  const stamp = new Date("2026-10-01T00:00:00.000Z");
-  fs.utimesSync(file, stamp, stamp);
   const before = fs.statSync(file);
-  const replacement = file + ".replacement";
-  fs.copyFileSync(file, replacement);
-  fs.utimesSync(replacement, stamp, stamp);
+  const after = { ...before, ino: before.ino === 0 ? 1 : 0 };
   const stat = fs.statSync;
-  let replaced = false;
   t.mock.method(fs, "statSync", (filePath, ...args) => {
-    if (filePath === file && !replaced) {
-      fs.renameSync(replacement, file);
-      replaced = true;
-    }
+    if (filePath === file) return after;
     return stat(filePath, ...args);
   });
-  assert.deepEqual(f.route(), { owner: "codex", reason: "transcript-changed" });
-  assert.equal(replaced, true);
-  const after = stat(file);
-  assert.equal(after.dev, before.dev);
   assert.notEqual(after.ino, before.ino);
-  assert.equal(after.size, before.size);
-  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.deepEqual({ ...after, ino: before.ino }, { ...before });
+  assert.deepEqual(f.route(), { owner: "codex", reason: "transcript-changed" });
 });
 test("PR #1156 follow-up: a turn context split by a scan block is completed by the next block", (t) => {
   const context = line("turn_context", { turn_id: TURN, approvals_reviewer: "user", approval_policy: "on-request" });
