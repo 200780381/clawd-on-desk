@@ -1636,13 +1636,20 @@ export function createOpencodeFamilyPlugin(config) {
       const nativeResult = await instance.client._client.post({ url: "/question/{requestID}/reply",
         path: { requestID: request.id }, body: { answers: reply.answers }, ...nativeOptions(),
         headers: { "Content-Type": "application/json" } });
-      // MiMo's native route also returns true for an already-absent request.
-      // Confirm the exact native replied event as well as RPC completion; an
-      // HTTP success or a disappeared pending ID alone is not delivery proof.
-      if (!nativeResult?.error && nativeResult?.data === true
-        && JSON.stringify(target.observedNativeReply) === JSON.stringify(reply.answers)) outcome = "accepted";
-      else if (target.nativeResolved || nativeResult?.response?.status === 404) outcome = "resolved-elsewhere";
-      else outcome = nativeResult?.error ? "native-fallback" : "unknown";
+      if (AGENT_ID === "opencode") {
+        // OpenCode v1's reply handler returns true only after delivery and 404
+        // for an absent request. Event delivery can lag behind this RPC.
+        if (!nativeResult?.error && nativeResult?.data === true) outcome = "accepted";
+        else if (nativeResult?.response?.status === 404) outcome = "resolved-elsewhere";
+        else outcome = nativeResult?.error ? "native-fallback" : "unknown";
+      } else {
+        // MiMo also returns true for an absent request, so its exact replied
+        // event remains necessary to confirm the selected answers.
+        if (!nativeResult?.error && nativeResult?.data === true
+          && JSON.stringify(target.observedNativeReply) === JSON.stringify(reply.answers)) outcome = "accepted";
+        else if (target.nativeResolved || nativeResult?.response?.status === 404) outcome = "resolved-elsewhere";
+        else outcome = nativeResult?.error ? "native-fallback" : "unknown";
+      }
     })().catch(() => {
       // No answer on transport errors, schema errors or cancellation. The
       // original native question remains available; never call reject().
@@ -1651,7 +1658,8 @@ export function createOpencodeFamilyPlugin(config) {
     }).finally(async () => {
       clearTimeout(timer);
       if (confirmationToken && packet && ownerPort) {
-        if (outcome !== "accepted" && target.nativeResolved) outcome = "resolved-elsewhere";
+        if (outcome !== "accepted" && target.nativeResolved
+          && (!target.submitting || AGENT_ID !== "opencode")) outcome = "resolved-elsewhere";
         const receiptController = new AbortController();
         const receiptTimer = setTimeout(() => receiptController.abort(), 2000);
         receiptTimer.unref?.();

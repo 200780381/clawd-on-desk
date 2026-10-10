@@ -42,6 +42,63 @@ test("real question HTTP response contains exact answers and no approval decisio
   assert.equal(h.permission.pendingPermissions.length, 0);
 });
 
+test("notification bubbles off alone do not suppress either family's question cards", async t => {
+  const h = await createPermissionIngressHarness({ ctxOverrides: {
+    getBubblePolicy: kind => ({ enabled: kind !== "notification", autoCloseMs: 0 }),
+  } });
+  t.after(() => h.close());
+  for (const agent of ["opencode", "mimocode"]) {
+    const pending = postPermission(h.port, payload(agent), {}, "/question");
+    await waitUntil(() => h.permission.pendingPermissions.length === 1, "permission-enabled question should show");
+    const entry = h.permission.pendingPermissions[0];
+    assert.equal(entry.agentId, agent);
+    h.permission.resolvePermissionEntry(entry, "no-decision");
+    assert.equal((await pending.response).status, 204);
+  }
+  assert.equal(h.shown.length, 2);
+});
+
+test("global permission bubble switch off keeps both families native", async t => {
+  const h = await createPermissionIngressHarness({ ctxOverrides: {
+    getBubblePolicy: kind => ({ enabled: kind !== "permission", autoCloseMs: 0 }),
+  } });
+  t.after(() => h.close());
+  for (const agent of ["opencode", "mimocode"]) {
+    const response = await postPermission(h.port, payload(agent), {}, "/question").response;
+    assert.equal(response.status, 204); assert.equal(response.body, "");
+  }
+  assert.equal(h.shown.length, 0); assert.equal(h.permission.pendingPermissions.length, 0);
+});
+
+test("family permission sub-gates remain per-agent for question cards", async t => {
+  for (const disabledAgent of ["opencode", "mimocode"]) {
+    const h = await createPermissionIngressHarness({ ctxOverrides: {
+      isAgentPermissionsEnabled: agent => agent !== disabledAgent,
+    } });
+    try {
+      const disabled = await postPermission(h.port, payload(disabledAgent), {}, "/question").response;
+      assert.equal(disabled.status, 204); assert.equal(h.shown.length, 0);
+      const enabledAgent = disabledAgent === "opencode" ? "mimocode" : "opencode";
+      const pending = postPermission(h.port, payload(enabledAgent), {}, "/question");
+      await waitUntil(() => h.permission.pendingPermissions.length === 1, "other family's switch remains enabled");
+      assert.equal(h.shown[0].agentId, enabledAgent);
+      h.permission.resolvePermissionEntry(h.shown[0], "no-decision"); await pending.response;
+    } finally { await h.close(); }
+  }
+});
+
+test("DND and disabled-agent guards still keep questions native", async t => {
+  for (const ctxOverrides of [{ doNotDisturb: true }, { isAgentEnabled: () => false }]) {
+    const h = await createPermissionIngressHarness({ ctxOverrides });
+    try {
+      for (const agent of ["opencode", "mimocode"]) {
+        assert.equal((await postPermission(h.port, payload(agent), {}, "/question").response).status, 204);
+      }
+      assert.equal(h.shown.length, 0);
+    } finally { await h.close(); }
+  }
+});
+
 test("invalid or approval-shaped actions only return no decision", async t => {
   const h = await createPermissionIngressHarness(); t.after(() => h.close());
   for (const [index, action] of ["allow", "deny", "family-always", { type: "elicitation-submit", answers: {} },

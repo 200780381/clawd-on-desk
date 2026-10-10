@@ -31,12 +31,15 @@ Module._load = originalLoad;
 const realFetch = globalThis.fetch;
 let createPlugin;
 let activeClawd;
+let receiptOutcomes = [];
 before(async () => {
   globalThis.fetch = (url, options) => {
     const target = new URL(url);
     // Map the synthetic runtime owner to this test's ephemeral server. Never
     // contact a developer's real 23333 listener or scan other ports.
     if (target.origin === "http://127.0.0.1:23333" && target.pathname === "/question") {
+      const packet = JSON.parse(options.body);
+      if (packet.question_result) receiptOutcomes.push(packet.question_result);
       return realFetch(`http://127.0.0.1:${activeClawd.port}/question`, options);
     }
     return Promise.resolve(new Response("", { status: 503 }));
@@ -58,7 +61,7 @@ function nativeQuestion(id = "que_test", sessionID = "ses_test") {
 
 async function nativeHost(t, version) {
   const pending = new Map(); const posts = []; const sdkCalls = [];
-  const callbacks = { beforeResponse: null, failPost: false };
+  const callbacks = { beforeResponse: null, beforePost: null, failPost: false, replyValue: true };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/global/health") {
@@ -71,12 +74,13 @@ async function nativeHost(t, version) {
       let body = ""; for await (const chunk of req) body += chunk;
       const id = url.pathname.split("/")[2];
       posts.push({ id, body: JSON.parse(body), directory: url.searchParams.get("directory") });
+      if (callbacks.beforePost) await callbacks.beforePost(id);
       if (callbacks.failPost) { res.writeHead(500); res.end(); return; }
       if (!pending.has(id)) { res.writeHead(404); res.end(); return; }
       const question = pending.get(id);
       pending.delete(id);
       if (callbacks.beforeResponse) await callbacks.beforeResponse(id, question, JSON.parse(body).answers);
-      res.writeHead(200, { "Content-Type": "application/json" }); res.end("true"); return;
+      res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(callbacks.replyValue)); return;
     }
     res.writeHead(404); res.end();
   });
@@ -100,6 +104,7 @@ async function nativeHost(t, version) {
 }
 
 async function setup(t, agentId = "opencode", version = "1.18.31") {
+  receiptOutcomes = [];
   const h = activeClawd = await createPermissionIngressHarness();
   t.after(() => h.close());
   const host = await nativeHost(t, version);
@@ -117,12 +122,12 @@ async function setup(t, agentId = "opencode", version = "1.18.31") {
     entry.bubble = { isDestroyed: () => false };
     h.permission.handleDecide({ sender: { __window: entry.bubble } }, { type: "elicitation-submit", answers: values });
   }
-  return { h, host, plugin, hooks, ask, answer };
+  return { h, host, plugin, hooks, ask, answer, receipts: receiptOutcomes };
 }
 
 for (const [agent, version] of [["opencode", "1.18.31"], ["mimocode", "0.1.15"]]) {
   test(`${agent} full HTTP round trip sends exact ordered arrays once`, async t => {
-    const { h, host, plugin, ask, answer } = await setup(t, agent, version);
+    const { h, host, plugin, ask, answer, receipts } = await setup(t, agent, version);
     const question = nativeQuestion();
     await ask(question); const target = plugin.__test._questionsById.get(question.id);
     await ask(question); // duplicate native event cannot create another waiter
@@ -130,9 +135,49 @@ for (const [agent, version] of [["opencode", "1.18.31"], ["mimocode", "0.1.15"]]
     answer(h.shown[0]); answer(h.shown[0]); await target.completion;
     assert.deepEqual(host.posts, [{ id: question.id, directory: "/synthetic/project", body: { answers: [["A, B", "C"], ["User text"]] } }]);
     assert.equal(plugin.__test._questionsById.size, 0);
+    assert.deepEqual(receipts, ["accepted"]);
     assert.ok(host.sdkCalls.every(call => call.baseUrl.startsWith("http://127.0.0.1:")), "wildcard client rewritten per call");
   });
 }
+
+test("OpenCode accepts RPC true before a delayed native replied event arrives", async t => {
+  const { h, host, plugin, hooks, ask, answer, receipts } = await setup(t, "opencode", "1.18.35");
+  host.callbacks.beforeResponse = null;
+  const question = nativeQuestion(); await ask(question); const target = plugin.__test._questionsById.get(question.id);
+  await waitUntil(() => h.shown.length === 1, "question must reach Clawd");
+  answer(h.shown[0]); await target.completion;
+  assert.equal(target.observedNativeReply, null);
+  assert.deepEqual(receipts, ["accepted"]);
+  assert.equal(h.permission.pendingPermissions.length, 0);
+  await hooks.event({ event: { type: "question.replied", properties: {
+    requestID: question.id, sessionID: question.sessionID, answers: host.posts[0].body.answers,
+  } } });
+  assert.equal(host.posts.length, 1); assert.deepEqual(receipts, ["accepted"]);
+});
+
+test("OpenCode RPC 404 resolves elsewhere without a native replied event", async t => {
+  const { h, host, plugin, ask, answer, receipts } = await setup(t);
+  host.callbacks.beforeResponse = null;
+  host.callbacks.beforePost = id => { host.pending.delete(id); };
+  const question = nativeQuestion(); await ask(question); const target = plugin.__test._questionsById.get(question.id);
+  await waitUntil(() => h.shown.length === 1, "question must reach Clawd");
+  answer(h.shown[0]); await target.completion;
+  assert.equal(target.observedNativeReply, null);
+  assert.deepEqual(receipts, ["resolved-elsewhere"]);
+  assert.equal(host.posts.length, 1); assert.equal(h.permission.pendingPermissions.length, 0);
+});
+
+test("OpenCode false RPC stays unknown even if an event arrived before it", async t => {
+  const { h, host, plugin, ask, answer, receipts } = await setup(t);
+  host.callbacks.replyValue = false;
+  const question = nativeQuestion(); await ask(question); const target = plugin.__test._questionsById.get(question.id);
+  await waitUntil(() => h.shown.length === 1, "question must reach Clawd");
+  answer(h.shown[0]); await target.completion;
+  assert.deepEqual(target.observedNativeReply, host.posts[0].body.answers);
+  assert.deepEqual(receipts, ["unknown"]);
+  assert.equal(h.shown[0].questionDeliveryUnconfirmed, true);
+  assert.equal(host.posts.length, 1);
+});
 
 test("own native resolution event does not abort the reply before its tool waiter completes", async t => {
   const { h, host, plugin, hooks, ask, answer } = await setup(t);
@@ -162,26 +207,35 @@ test("native answer/cancel clears the matching card without a second answer", as
 });
 
 test("native API failure keeps a non-resubmittable fallback and never retries", async t => {
-  const { h, host, plugin, ask, answer } = await setup(t);
+  const { h, host, plugin, ask, answer, receipts } = await setup(t);
   host.callbacks.failPost = true;
   const question = nativeQuestion(); await ask(question); const target = plugin.__test._questionsById.get(question.id);
   await waitUntil(() => h.shown.length === 1, "question must reach Clawd");
   answer(h.shown[0]); await target.completion;
   assert.equal(host.posts.length, 1);
+  assert.deepEqual(receipts, ["native-fallback"]);
   assert.ok(host.pending.has(question.id));
   assert.equal(h.shown[0].questionDeliveryUnconfirmed, true);
   assert.equal(h.shown[0].interaction.capabilities.answerQuestions, false);
   answer(h.shown[0]); assert.equal(host.posts.length, 1);
 });
 
-test("native HTTP true without its exact replied event is not confirmation", async t => {
-  const { h, host, plugin, ask, answer } = await setup(t, "mimocode", "0.1.15");
+test("MiMo RPC true without its exact event stays unconfirmed after a late event", async t => {
+  const { h, host, plugin, hooks, ask, answer, receipts } = await setup(t, "mimocode", "0.1.15");
   host.callbacks.beforeResponse = null;
   const question = nativeQuestion(); await ask(question); const target = plugin.__test._questionsById.get(question.id);
   await waitUntil(() => h.shown.length === 1, "question must reach Clawd");
   answer(h.shown[0]); await target.completion;
   assert.equal(host.posts.length, 1);
+  assert.deepEqual(receipts, ["unknown"]);
   assert.equal(h.shown[0].questionDeliveryUnconfirmed, true);
+  await hooks.event({ event: { type: "question.replied", properties: {
+    requestID: question.id, sessionID: question.sessionID, answers: host.posts[0].body.answers,
+  } } });
+  assert.equal(h.permission.pendingPermissions.length, 1);
+  assert.equal(h.shown[0].interaction.capabilities.answerQuestions, false);
+  assert.equal(h.shown[0].questionDeliveryUnconfirmed, true);
+  assert.deepEqual(receipts, ["unknown"]);
 });
 
 test("changed native questions and unknown versions never receive an answer", async t => {

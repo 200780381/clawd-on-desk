@@ -5,6 +5,7 @@ const { SOURCES, PROTOCOL, supportedVersion, prepareQuestionRequest } = require(
 const { classifyPermissionInteraction } = require("./permission-automation-policy");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { resolveSessionIdentity, LOCAL_SESSION_PROFILE_ID } = require("./session-key");
+const { arePermissionBubblesEnabled, shouldBypassFamilyBubble } = require("./server-route-permission");
 
 function showUnconfirmedQuestion(entry, ctx) {
   if (!ctx.pendingPermissions.includes(entry)) return;
@@ -67,7 +68,7 @@ function handleQuestionPost(req, res, { ctx, remoteProfile }) {
       fallback(); return;
     }
     if (ctx.doNotDisturb || (typeof ctx.isAgentEnabled === "function" && !ctx.isAgentEnabled(agentId))
-      || (typeof ctx.getBubblePolicy === "function" && ctx.getBubblePolicy("notification")?.enabled === false)) {
+      || !arePermissionBubblesEnabled(ctx) || shouldBypassFamilyBubble(ctx, agentId)) {
       fallback(); return;
     }
     const duplicate = ctx.pendingPermissions.some(entry => entry.isFamilyQuestion
