@@ -192,6 +192,48 @@ credit and original authorship remain in Settings About and every README variant
 
 ### Validation Status
 
-Pending. Draft packaged-asset smoke results, exact platforms and host versions,
-signing/updater checks, and any **Not tested** items will be added after draft
-validation.
+Checked with the v1.3.0 draft assets:
+
+- **Release CI** — the manual Build & Release run on `54d359ef` and the tag
+  build passed every job: full test suites on Linux, macOS and Windows with no
+  failures, native-package audits for all five targets, Koffi packaged smoke,
+  updater metadata, and the retired Telegram sidecar assertion. The 13 draft
+  assets match the v1.2.0 set, and all three `latest*.yml` files point at
+  1.3.0 artifacts.
+- **macOS signing** — both DMGs contain Developer ID signed, notarized apps;
+  on the arm64 app, `codesign`, `spctl` (Notarized Developer ID) and
+  `stapler validate` passed.
+- **Windows x64 (real machine)** — silent upgrade over an installed v1.2.0
+  (`/S /allusers --updated`). The installed app reports 1.3.0 and contains
+  one `win32_x64` Koffi binary, NOTICE and the bundled theme catalog. Startup
+  migrated preferences from version 20 to 21, moved Codex from Intercept to
+  Auto once, left other settings unchanged, and kept user and third-party
+  Claude/Codex hooks. Launched from the Start menu: the pet appeared,
+  Settings → About showed v1.3.0, and the Codex hooks passed `/hooks` review.
+- **macOS arm64 (real machine)** — the draft DMG (hash checked) installed over
+  v1.2.0 and launched from `/Applications` after the standard first-launch
+  confirmation. Preferences migrated to version 21 with Codex Auto unchanged.
+  Claude hooks moved to the installed app with user entries preserved; the
+  Codex hooks (10 events) were unchanged. About showed v1.3.0 with the new
+  contributors, quota reminders were off by default, and a real Codex session
+  reported activity and turn completion. The DeepSeek Harness desktop notice
+  asked for a restart after the one-time plugin update.
+- **In-app update (macOS arm64)** — a signed v1.2.0 found, downloaded and
+  installed v1.3.0 through Restart Now; the restarted app stayed signed and
+  notarized, and its hooks pointed at the installed app.
+- **Codex Auto evidence (#1169)** — a packaged build showed the Clawd bubble
+  for a request 2 MiB after its turn context. Replaying 25 real local
+  rollouts as human-reviewed turns raised the share routed to Clawd from
+  49.6% to 99.1%, with no request lost.
+
+**Not tested**:
+- The in-app update on Windows and macOS x64, and the Later → quit → reopen
+  path on macOS.
+- macOS x64 and Windows ARM64 on real hardware (CI only).
+- Linux on real hardware: AppImage FUSE shutdown, tmpfs/TMPDIR handling and
+  the deb package. CI covered the Wayland/XWayland and AppImage contracts.
+- A real Codex "Ask me" session with a long turn and a compaction, and the
+  wording of the Windows tray notice when only the new Codex hooks await
+  review. Logs confirmed that this case is detected.
+- A real DeepSeek Harness host-family change from 0.1 to 0.2.
+- Other checks in the release smoke checklist that are not listed above.
