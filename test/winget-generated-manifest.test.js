@@ -1,4 +1,5 @@
 const assert = require("node:assert");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -17,13 +18,14 @@ const {
   runCli,
 } = require("../scripts/verify-winget-generated-manifest.js");
 
-const VERSION = "1.2.3";
+// Installer fixture follows the actual generated-installer-1.3.0.yaml prepare output.
+const VERSION = "1.3.0";
 const TAG = `v${VERSION}`;
 const BASE_URL =
   `https://github.com/rullerzhou-afk/clawd-on-desk/releases/download/${TAG}`;
 const DIGESTS = {
-  x64: `sha256:${"a".repeat(64)}`,
-  arm64: `sha256:${"b".repeat(64)}`,
+  x64: "sha256:a3b1a03e9c4fed681ebe6792da6cd99253e0a226a5c3cbebad501b980aae38d3",
+  arm64: "sha256:2798c52d0ca11c0d746bf14ba83004543197bdc274fe8775d2b4c77819625dea",
 };
 
 function manifestSource(type, value) {
@@ -84,7 +86,7 @@ function fixture({ mutateContract, mutateDocuments, extraFile = "" } = {}) {
       InstallerSwitches: { Upgrade: "--updated" },
       UpgradeBehavior: "install",
       ProductCode: PRODUCT_CODE,
-      ReleaseDate: "2026-09-20",
+      ReleaseDate: "2026-10-10",
       AppsAndFeaturesEntries: [
         { DisplayName: `Clawd on Desk ${VERSION}`, ProductCode: PRODUCT_CODE },
       ],
@@ -182,6 +184,8 @@ describe("generated WinGet manifest gate", () => {
   it("normalizes locale metadata and verifies the exact four-entry matrix", () => {
     const testFixture = fixture();
     try {
+      const installerPath = path.join(testFixture.manifestDirectory, MANIFEST_FILES.installer);
+      const before = fs.readFileSync(installerPath);
       const report = normalizeAndVerifyGeneratedManifest({
         architectureContract: testFixture.contractPath,
         generatedRoot: testFixture.generatedRoot,
@@ -191,6 +195,8 @@ describe("generated WinGet manifest gate", () => {
       assert.equal(report.summary.files, 4);
       assert.equal(report.summary.installers, 4);
       assert.equal(report.normalizedFiles.length, 2);
+      assert.ok(!report.normalizedFiles.includes(path.relative(testFixture.generatedRoot, installerPath)));
+      assert.deepEqual(fs.readFileSync(installerPath), before);
       assert.equal(Object.keys(report.fileDigests).length, 4);
 
       for (const type of ["defaultLocale", "locale"]) {
@@ -209,6 +215,100 @@ describe("generated WinGet manifest gate", () => {
       cleanup(testFixture);
     }
   });
+
+  it("v1.3.0 WinGet follow-up: restores missing root switches in order and hashes the written bytes", () => {
+    const testFixture = fixture({
+      mutateDocuments(documents) {
+        delete documents.installer.InstallerSwitches;
+      },
+    });
+    try {
+      const installerPath = path.join(testFixture.manifestDirectory, MANIFEST_FILES.installer);
+      const before = fs.readFileSync(installerPath);
+      const input = {
+        architectureContract: testFixture.contractPath,
+        generatedRoot: testFixture.generatedRoot,
+        releaseTag: TAG,
+      };
+      const report = normalizeAndVerifyGeneratedManifest(input);
+      assert.deepEqual(report.errors, [], report.errors.join("\n"));
+      const written = fs.readFileSync(installerPath);
+      assert.notDeepEqual(written, before);
+      assert.deepEqual(readManifest(testFixture, "installer").InstallerSwitches, { Upgrade: "--updated" });
+      assert.match(
+        written.toString("utf8"),
+        /InstallerType: nullsoft\nInstallerSwitches:\n  Upgrade: '--updated'\nUpgradeBehavior: install\n/,
+      );
+      assert.ok(written.toString("utf8").startsWith("# Created with komac v2.16.0\n"));
+      const relative = path.relative(testFixture.generatedRoot, installerPath);
+      assert.ok(report.normalizedFiles.includes(relative));
+      assert.equal(
+        report.fileDigests[relative],
+        `sha256:${crypto.createHash("sha256").update(written).digest("hex")}`,
+      );
+      const second = normalizeAndVerifyGeneratedManifest(input);
+      assert.deepEqual(second.errors, []);
+      assert.deepEqual(fs.readFileSync(installerPath), written);
+      assert.ok(!second.normalizedFiles.includes(relative));
+      assert.deepEqual(second.fileDigests, report.fileDigests);
+    } finally {
+      cleanup(testFixture);
+    }
+  });
+
+  it("v1.3.0 WinGet follow-up: restores Upgrade in an empty root switch object", () => {
+    const testFixture = fixture({
+      mutateDocuments(documents) {
+        documents.installer.InstallerSwitches = {};
+      },
+    });
+    try {
+      const report = normalizeAndVerifyGeneratedManifest({
+        architectureContract: testFixture.contractPath,
+        generatedRoot: testFixture.generatedRoot,
+        releaseTag: TAG,
+      });
+      assert.deepEqual(report.errors, [], report.errors.join("\n"));
+      assert.deepEqual(readManifest(testFixture, "installer").InstallerSwitches, { Upgrade: "--updated" });
+      assert.ok(report.normalizedFiles.includes(
+        path.relative(testFixture.generatedRoot, path.join(testFixture.manifestDirectory, MANIFEST_FILES.installer)),
+      ));
+    } finally {
+      cleanup(testFixture);
+    }
+  });
+
+  for (const [label, switches, error] of [
+    ["wrong Upgrade", { Upgrade: "--something-else" }, "installer upgrade switch"],
+    ["unknown switch without Upgrade", { Silent: "/S" }, "installer.InstallerSwitches contains unsupported keys: Silent"],
+    ["unknown switch beside Upgrade", { Upgrade: "--updated", Silent: "/S" }, "installer.InstallerSwitches contains unsupported keys: Silent"],
+    ["null switches", null, "installer.InstallerSwitches must be an object"],
+    ["array switches", [], "installer.InstallerSwitches must be an object"],
+    ["string switches", "--updated", "installer.InstallerSwitches must be an object"],
+  ]) {
+    it(`v1.3.0 WinGet follow-up: rejects ${label} without rewriting`, () => {
+      const testFixture = fixture({
+        mutateDocuments(documents) {
+          documents.installer.InstallerSwitches = switches;
+        },
+      });
+      try {
+        const installerPath = path.join(testFixture.manifestDirectory, MANIFEST_FILES.installer);
+        const before = fs.readFileSync(installerPath);
+        const report = normalizeAndVerifyGeneratedManifest({
+          architectureContract: testFixture.contractPath,
+          generatedRoot: testFixture.generatedRoot,
+          releaseTag: TAG,
+        });
+        assert.ok(report.errors.some((entry) => entry.includes(error)), report.errors.join("\n"));
+        assert.deepEqual(fs.readFileSync(installerPath), before);
+        assert.deepEqual(report.normalizedFiles, []);
+        assert.deepEqual(report.fileDigests, {});
+      } finally {
+        cleanup(testFixture);
+      }
+    });
+  }
 
   it("is byte-for-byte idempotent after normalization", () => {
     const testFixture = fixture();
@@ -241,9 +341,12 @@ describe("generated WinGet manifest gate", () => {
     const testFixture = fixture({
       mutateDocuments(documents) {
         documents.installer.Installers.pop();
+        delete documents.installer.InstallerSwitches;
       },
     });
     try {
+      const installerPath = path.join(testFixture.manifestDirectory, MANIFEST_FILES.installer);
+      const installerBefore = fs.readFileSync(installerPath);
       const before = fs.readFileSync(
         path.join(testFixture.manifestDirectory, MANIFEST_FILES.defaultLocale),
         "utf8",
@@ -254,6 +357,9 @@ describe("generated WinGet manifest gate", () => {
         releaseTag: TAG,
       });
       assert.ok(report.errors.some((error) => error.includes("exactly four entries")));
+      assert.deepEqual(fs.readFileSync(installerPath), installerBefore);
+      assert.deepEqual(report.normalizedFiles, []);
+      assert.deepEqual(report.fileDigests, {});
       assert.equal(
         fs.readFileSync(
           path.join(testFixture.manifestDirectory, MANIFEST_FILES.defaultLocale),

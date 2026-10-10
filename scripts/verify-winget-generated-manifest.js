@@ -222,6 +222,24 @@ function validateCommon(errors, document, expectedType, version, label) {
   pushEqual(errors, value.ManifestVersion, MANIFEST_VERSION, `${label}.ManifestVersion`);
 }
 
+function normalizeInstaller(document) {
+  if (!document) return false;
+  const value = document.value;
+  if (!Object.hasOwn(value, "InstallerSwitches")) {
+    const entries = Object.entries(value);
+    const installerTypeIndex = entries.findIndex(([key]) => key === "InstallerType");
+    if (installerTypeIndex === -1) return false;
+    // Keep the established key order: InstallerSwitches follows InstallerType.
+    entries.splice(installerTypeIndex + 1, 0, ["InstallerSwitches", { Upgrade: "--updated" }]);
+    document.value = Object.fromEntries(entries);
+    return true;
+  }
+  if (!isPlainObject(value.InstallerSwitches) ||
+      Object.keys(value.InstallerSwitches).length !== 0) return false;
+  value.InstallerSwitches.Upgrade = "--updated";
+  return true;
+}
+
 function normalizeLocale(document, releaseTag) {
   if (!document) return;
   document.value.License = LICENSE;
@@ -522,8 +540,10 @@ function normalizeAndVerifyGeneratedManifest({
     }
   }
 
-  // These are the only normalizations automation is allowed to make. Everything
-  // else must already be correct in Komac's output or the gate fails closed.
+  // Only locale metadata and a missing installer upgrade switch may be normalized.
+  // Komac copies previous manifests, which third-party submissions may leave without the switch.
+  // Everything else must already be correct in Komac's output or the gate fails closed.
+  const installerNormalized = normalizeInstaller(documents.installer);
   normalizeLocale(documents.defaultLocale, releaseTag);
   normalizeLocale(documents.locale, releaseTag);
 
@@ -532,6 +552,11 @@ function normalizeAndVerifyGeneratedManifest({
 
   const normalizedFiles = [];
   if (errors.length === 0) {
+    if (installerNormalized) {
+      const document = documents.installer;
+      atomicWrite(document.filePath, serializeManifest(document, "installer"));
+      normalizedFiles.push(path.relative(root, document.filePath));
+    }
     for (const type of ["defaultLocale", "locale"]) {
       const document = documents[type];
       atomicWrite(document.filePath, serializeManifest(document, type));

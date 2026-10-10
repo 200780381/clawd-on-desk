@@ -506,7 +506,9 @@ installer supports (`build.nsis` sets `oneClick: false` and no `perMachine`).
    Komac overwrites `License` from the repository's current `licenseInfo.spdxId`,
    which GitHub reports as `AGPL-3.0`, not the `AGPL-3.0-only` in `package.json`,
    so the gate rewrites and then asserts these fields rather than accepting the
-   raw output. It writes normalization only after the complete tree passes, emits
+   raw output. The gate also restores missing `InstallerSwitches.Upgrade` to
+   `--updated`; all other inconsistencies still fail closed.
+   It writes normalization only after the complete tree passes, emits
    a SHA256 evidence report, rejects unsupported root/nested keys, and is
    byte-for-byte idempotent. The submission process recalculates all four hashes
    against that report immediately before copying the files.
