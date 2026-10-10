@@ -173,6 +173,32 @@ describe("issue #655: WorkBuddy Windows agent_pid", () => {
     } finally { cleanup(); }
   });
 
+  it("issue #655: recovers the main PID when a snapshot needs more than the shared 3s budget", () => {
+    const timeouts = [];
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      platform: "win32",
+      execFileSyncMock: (_file, _args, options) => {
+        timeouts.push(options.timeout);
+        if (options.timeout < 4170) throw Object.assign(new Error("snapshot timed out"), { code: "ETIMEDOUT" });
+        return snapshotJson([
+          { pid: 10, name: "WorkBuddy.exe", ppid: 40, cmd: TURN_HOST },
+          { pid: 40, name: "WorkBuddy.exe", ppid: 0, cmd: MAIN },
+        ]);
+      },
+    });
+    const cfg = getWorkBuddyPlatformConfig(mod.getPlatformConfig);
+    const gate = { startPid: 10, env: {}, readRuntimeIdentity: () => ({ ok: true, ownerPid: process.pid }) };
+    try {
+      const defaultResult = mod.createPidResolver({ ...gate, platformConfig: cfg })();
+      assert.strictEqual(defaultResult.agentPid, null, "a failed default snapshot must not invent a PID");
+      assert.strictEqual(defaultResult.skipReason, "snapshot-failed");
+      const result = mod.createPidResolver({ ...gate, ...getWorkBuddyPidResolverOptions(cfg, "win32") })();
+      assert.strictEqual(result.agentPid, 40);
+      assert.strictEqual(result.stablePid, 40);
+      assert.deepStrictEqual(timeouts, [3000, 5000], "only WorkBuddy opts into the longer deadline");
+    } finally { cleanup(); }
+  });
+
   it("issue #655: credits the main process on the 5.2.6 conversation chain", () => {
     const { resolve, cleanup } = resolveWindowsChain([
       { pid: 10, name: "WorkBuddy.exe", ppid: 40, cmd: CONVERSATION },

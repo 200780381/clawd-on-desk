@@ -60,11 +60,22 @@ function sameTranscriptIdentity(a, b) {
   return !!a && !!b && a.dev === b.dev && a.ino === b.ino;
 }
 
-// Reads one home's matching row. Returns { title, archived } (archived is
-// true/false, or null when the table predates the lifecycle columns) or null
-// for no row, a cwd mismatch, or any read failure. A table without `status`
-// falls back to the original title-only query so native titles still work.
-function readWorkBuddyHomeSession(openDatabase, dir, input) {
+function normalizeWorkBuddyContextUsage(row) {
+  if (!row || typeof row.used !== "number" || typeof row.size !== "number"
+    || !Number.isSafeInteger(row.used) || !Number.isSafeInteger(row.size)
+    || row.used < 0 || row.size <= 0) return null;
+  return {
+    used: row.used,
+    limit: row.size,
+    percent: Math.max(0, Math.min(100, Math.round((row.used / row.size) * 100))),
+    source: "workbuddy",
+  };
+}
+
+// Reads one home's matching row. archived is true/false, or null for an older
+// lifecycle schema. Optional contextUsage is read separately on the same handle
+// only for the owning home, so unsupported usage cannot alter title/lifecycle.
+function readWorkBuddyHomeSession(openDatabase, dir, input, readContextUsage = false) {
   const filePath = path.join(dir, "workbuddy.db");
   let db;
   try {
@@ -100,7 +111,26 @@ function readWorkBuddyHomeSession(openDatabase, dir, input) {
       ? null
       : normalizeSessionTitle(row.custom_title) || normalizeSessionTitle(row.title);
     const archived = hasLifecycle ? (row.status === "archived" || deleted) : null;
-    return { title, archived };
+    const result = { title, archived };
+    if (readContextUsage && !deleted && archived !== true) {
+      try {
+        // WorkBuddy persists the same current context gauge shown by its UI.
+        // Its effective size can differ from the optional model override on
+        // sessions. Never read credit_json or sum transcript billing counters.
+        const usage = db.prepare("SELECT used, size FROM session_usage WHERE session_id = ?")
+          .get(input.rawSessionId);
+        // Native cost-only events carry numeric 0/0. Some older backends persist
+        // that pair, but WorkBuddy's UI ignores it rather than clearing context.
+        // Keep the same last-known gauge; a genuine 0/positive-size is still 0%.
+        if (!(usage && usage.used === 0 && usage.size === 0)) {
+          // A readable missing/invalid value is unknown, not 0%. A missing table,
+          // old schema or failed query leaves the field absent and preserves the
+          // last observation without affecting title/lifecycle discovery.
+          result.contextUsage = normalizeWorkBuddyContextUsage(usage);
+        }
+      } catch {}
+    }
+    return result;
   } catch {
     // Older Node, locked/corrupt DBs, or unknown schemas use JSONL instead.
     return null;
@@ -135,15 +165,18 @@ function readWorkBuddyDatabaseSession(input, options = {}) {
   const reads = new Map();
   let title = null;
   for (const dir of dirs) {
-    const result = readWorkBuddyHomeSession(openDatabase, dir, input);
+    const result = readWorkBuddyHomeSession(openDatabase, dir, input, dir === lifecycleHome);
     reads.set(dir, result);
     if (title === null && result && result.title) title = result.title;
   }
 
   const lifecycleRead = lifecycleHome ? reads.get(lifecycleHome) : null;
   const archived = lifecycleRead ? lifecycleRead.archived : null;
-  if (title === null && archived === null) return null;
-  return { title, archived, home: lifecycleHome };
+  const hasContextUsage = !!lifecycleRead && Object.hasOwn(lifecycleRead, "contextUsage");
+  if (title === null && archived === null && !hasContextUsage) return null;
+  const result = { title, archived, home: lifecycleHome };
+  if (hasContextUsage) result.contextUsage = lifecycleRead.contextUsage;
+  return result;
 }
 
 function readWorkBuddyDatabaseTitle(input, options = {}) {
@@ -155,6 +188,7 @@ function createWorkBuddySessionTitleTracker(options = {}) {
   const entries = new Map();
   const getSession = options.getSession || (() => null);
   const updateTitle = options.updateTitle || (() => {});
+  const updateContextUsage = options.updateContextUsage || (() => {});
   // Invoked when the database marks an observed conversation archived or
   // deleted. The observer stops watching it and the runtime retires the card;
   // this is a lifecycle end, not a completion.
@@ -170,14 +204,14 @@ function createWorkBuddySessionTitleTracker(options = {}) {
   });
   const readTitle = options.readTitle || (async (entry) => {
     const row = readWorkBuddyDatabaseSession(entry, options);
-    if (row && row.archived === true) return { title: row.title, archived: true, home: row.home || null };
-    if (row && row.title) return { title: row.title, home: row.home || null };
+    if (row && (row.archived === true || row.title)) return row;
     // Only SQLite can report the lifecycle; the JSONL fallback supplies a
     // title only and never retires a card.
-    if (!entry.transcriptPath) return null;
-    return jsonl.resolve({
+    if (!entry.transcriptPath) return row;
+    const title = await jsonl.resolve({
       event: "Stop", sessionId: entry.rawSessionId, transcriptPath: entry.transcriptPath,
     });
+    return row ? { ...row, title } : title;
   });
   let timer = null;
 
@@ -268,7 +302,11 @@ function createWorkBuddySessionTitleTracker(options = {}) {
           return;
         }
         if (title) updateTitle(entry.sessionId, title);
-      } catch {} // Title discovery never breaks state delivery.
+        if (read && typeof read === "object" && Object.hasOwn(read, "contextUsage")
+          && entries.get(entry.sessionId) === entry && getSession(entry.sessionId) === live) {
+          updateContextUsage(entry.sessionId, read.contextUsage);
+        }
+      } catch {} // Metadata discovery never breaks state delivery.
     })();
     try { await entry.pending; }
     finally { entry.pending = null; }

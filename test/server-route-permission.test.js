@@ -92,6 +92,7 @@ function makeCtx(overrides = {}) {
     permLog: (message) => calls.logs.push(message),
     isAgentEnabled: () => true,
     isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     isAgentSubagentPermissionsEnabled: () => true,
     updateSession: (...args) => calls.updateSession.push(args),
     showPermissionBubble: (entry) => calls.showPermissionBubble.push(entry),
@@ -284,6 +285,7 @@ describe("server-route-permission helpers", () => {
     }), true);
     assert.strictEqual(shouldBypassCopilotBubble({
       isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     }), false);
   });
 

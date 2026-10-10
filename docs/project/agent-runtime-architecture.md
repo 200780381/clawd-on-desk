@@ -88,6 +88,16 @@ Codex CLI 状态同步（official hooks primary + JSONL fallback）：
     → agents/codex-log-monitor.js（fallback：hook 未覆盖事件、hook 禁用/不可用、历史兼容）
     → src/agent-runtime-main.js 对 hook-active session 做事件级 suppression，避免重复状态/重复气泡；本地 JSONL 路径不经过 HTTP server
 
+JSONL 的状态 suppression 与活跃时钟分离：monitor 对本机当前回合内、有可信记录时间的模型消息/推理、
+工具调用/结果发 activity-only callback，故 official hooks 覆盖的事件或重复 working 状态也能延续真实活跃。
+runtime 只触及已存在的非 headless、非 WSL/远程行，并须匹配 turn fence 已接受的当前回合；
+backfill、旧/未来时间、quota/title/文件 mtime、已结束或其他回合不能延长时钟。
+仅被 working-timeout 转 idle 的行保留私有 timeout 标记和最后真实活跃时间，当前回合新进度可按原 thinking/working
+恢复；普通 idle、Stop/abort/end 不可恢复，任一 accepted lifecycle 或恢复清掉标记。标记不进入 snapshot。
+无真实进度时仍遵守用户配置的 Codex inactivity timeout，不以 Desktop 长寿 PID 永久保活。
+自动自由漫步同时检查 canonical in-progress session；临时 idle/roam 视觉不放行忙碌会话，取消走动时按
+resolveDisplayState 恢复真实显示。手动拖拽、设置预览、DND 与 Mini 的原有入口和 gate 保留。
+
 Codex 桌面端 app-server 下的临时线程（无 transcript 且 hook 环境有非空
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`）既包含隐藏的「智能建议」后台线程，也包含
 用户自己的侧边聊天，两者 hook 字段完全相同；终端里直接跑的 `codex exec --ephemeral`
@@ -131,14 +141,22 @@ Codex 压缩开始通过 official `PreCompact` hook 触发既有 `sweeping` 动�
 开始/完成清扫和持有记录重算都须让位于其他会话的活跃工作；完成重播不能清掉
 最小显示时长内排队的完成、错误或输入提示。此规则只保护进入清扫的请求，
 不会把完成提示改写成清扫，设置动画预览继续保持其显式展示行为。
-不改 session snapshot 合约。完成、同会话恢复工作/思考、SessionStart、Stop/abort/end、
+不改 session snapshot 合约。official `PostCompact` 和 JSONL completion 共用完成清扫，
+同一已识别回合的两种通道只重播一次；实际记录时间早于下一次压缩开始的 JSONL 完成不能释放新持有。
+完成、同会话恢复工作/思考、SessionStart、Stop/Interrupt/abort/end、
 过期清理、隐藏/禁用/移除会话均释放；缺失完成事件最多持有 10 分钟，重复开始不延长。
 headless 压缩不占全局动画；DND、禁用清扫、确认审批锁与更高优先级显示仍受保护。
 手动压缩可发生在回合结束后，turn fence 将精确的开始/完成清扫事件视为 housekeeping，
 不重开回合、不放行旧工具尾事件；新回合已打开时，带不同 turn ID 的压缩信号不能覆盖
 新回合，只有当前回合或无 ID 的兼容信号可进入。JSONL timestamp/backfill 保护不变。
+本机非 WSL 会话失败后的 JSONL terminal 即使遇到 recent official hook，也可结束仍在压缩的当前回合；
+本机 rollout 不释放相同 raw ID 的 WSL/远程持有，所属 official hook 仍可释放。
+已关闭回合的重复 terminal 只在回合 ID 与当前持有相同、且记录时间不早于压缩开始时
+释放清扫，不重开回合、不重新播完成、不更新时间或历史；其他会话和无法确认的旧事件不受影响。
+已删除后重建的 owner 不受旧计时回调影响，重复开始不延长原有上限。
 它不结束回合、不产生控制决定。已有安装在下次集成同步时
-增量注册该事件，保留用户 hook；新增命令仍须遵守 Codex 原生 hook review。
+增量注册 `PostCompact` 和 `Interrupt`，保留用户 hook；新增命令仍须遵守 Codex 原生 hook review。
+`Interrupt` 超时遵循上游的 3 秒上限，不发审批决定或完成声音。
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版
 `event_msg:item_completed`（`payload.item.type === "ContextCompaction"`）。本地与
 Remote SSH monitor 共用 `hooks/codex-log-event.js`，把后者归一化到旧事件键，沿用
@@ -263,6 +281,8 @@ WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
   所以挂在 workbuddy-session-title 观察器上：一次轮询读到这两种生命周期就对该会话 dismissSession 撤卡（不响提示音、不算完成），并让 updateSessionFromServer 对随后的迟到事件
   同步重读当时判定用的那个所属库；仍是归档/删除就丢弃，取消归档或读不到就恢复正常接收。生命周期只认拥有 transcript 的那个库（transcript 不在任何已知家目录下、或没有 transcript 一律算“不知道”，
   绝不用别的库推断）；别的家目录里的同 ID 归档副本不参与判断；读不到数据库一律按“不知道”处理，绝不撤卡。
+  Windows WorkBuddy 的进程快照使用有界 5 秒超时（其他 adapter 默认仍为 3 秒）：5.7.6 真机观测到约 4.17 秒的快照，3 秒会丢失主 PID、无法按应用退出撤卡。
+  hook 先输出 `{}` 再探测；输出后的退出 backstop 为 7.5 秒，给快照后的 HTTP 上报留出时间。超过上限仍不返回降级 PID，按既有状态/超时逻辑处理。
 
   WorkBuddy's native `Notification` subtypes `idle_prompt` and `auth_success` are acknowledged with `{}` locally, before process resolution or HTTP delivery. `idle_prompt` is a "send another message" reminder, observed on 5.2.6 about 60 seconds after Stop (5.6.2's per-turn host exits before it can fire, so it was not observed there); `auth_success` is the login-success toast, emitted by 5.6.2 at the start of every turn. Forwarding either would create or settle a session — a phantom idle row before the first UserPromptSubmit, or knocking a running turn back to idle. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
 
@@ -537,8 +557,9 @@ WSL 状态同步（本机 loopback，但 PID 属于 Linux VM）：
 权限决策流（Codex official PermissionRequest command hook，阻塞）：
   Codex PermissionRequest
     → hooks/codex-hook.js POST /permission { tool_name, tool_input, tool_input_description, session_id, turn_id }
-    → 默认 intercept 模式：main.js 创建普通 Allow / Deny bubble，用户点击后 codex-hook.js stdout 输出官方 JSON decision
-    → 显式 native 模式：server 记录 notification 并立即返回 no-decision，Codex AutoReview / 原生审批继续处理
+    → 默认 auto 模式：准确的本机 session / turn 记录确认 user reviewer 时才由 Clawd 展示 Allow / Deny；自动 reviewer、MCP / app 覆盖、远程 / WSL、无法确认或过期记录立即 no-decision，Codex 继续处理
+    → 显式 intercept 模式：main.js 创建普通 Allow / Deny bubble，用户点击后 codex-hook.js stdout 输出官方 JSON decision
+    → 旧 native 偏好规范化为 auto；显式 intercept 不被升级覆盖。General 权限区提供 Agents → Codex 路由设置入口
     → DND / disabled / bubble hidden / Clawd unavailable 时 stdout "{}"，Codex 回到原生审批提示
 ```
 
@@ -638,6 +659,8 @@ After a local WorkBuddy session has been accepted, `src/agent-runtime-main.js` o
 When SQLite is unavailable or the database cannot supply a title, the observer reads session-scoped `ai-title` / `custom-title` JSONL metadata using `src/jsonl-session-title.js`, the incremental reader shared with Qoder. Only SQLite can report the archive/delete lifecycle; the JSONL fallback supplies a title only. WorkBuddy reads at most 1 MiB of new transcript bytes per scan, retains bounded partial lines, and ignores other sessions and message records. A two-second poll discovers delayed generated titles and idle renames without requiring a new hook. Immediate reads are rate-limited to one per poll window per session, and a `SessionStart` (WorkBuddy 5.6.x sends one every turn) replaces the observer identity — so a read started before the turn cannot annotate the resumed lifecycle — while carrying the rate-limit window over. It keeps the JSONL reader's accumulated progress only for the same file, not merely the same path: the observer samples the transcript's `dev`+`ino` once per event, records exactly that sample, and resets the reader when the file was replaced or the identity cannot be read — while preserving the conversation's rate-limit window. At most 256 surviving local sessions are observed; `track` and `beginTurn` share that cap. End, disable/uninstall, eviction, same-id resume, and shutdown invalidate pending reads; remote, WSL, and headless sessions never read local WorkBuddy storage.
 
 Native titles enter `updateSessionMetadata` with an explicit WorkBuddy ownership guard. They use the existing session snapshot consumed by HUD/Dashboard and do not refresh activity timestamps, change state, replay completion, or create missing sessions.
+
+The same two-second observer also reads `session_usage.used` and `session_usage.size` through the already-open read-only database handle, after matching the session row and cwd. Context is taken only from the known transcript-owning or pinned home; another home's same-id row can supply a title but never context. Missing cwd retains the existing exact-session/home scope, while a known contradictory cwd is rejected. These are WorkBuddy's native displayed context gauge and effective budget, including its own estimates and compaction resets, rather than accumulated billing tokens. `sessions.context_window` is an optional override, not the effective denominator; neither model limits nor transcript cache counters are guessed. Safe integer `used >= 0` and `size > 0` become `contextUsage` with source `workbuddy`; over-budget percentages clamp to 100. Native numeric `0/0` is a cost-only event ignored by WorkBuddy's UI, so an older backend persisting it preserves the last-known gauge (or stays unknown before the first gauge); `0/positive-size` is a real 0%. Other readable missing or invalid usage rows clear only prior `workbuddy-native` context, while unavailable SQLite, missing usage tables/columns, and read failures preserve it. Archived/deleted rows retire before any context callback. Context can update without a title or another hook, with the existing async lifecycle/scope fences, cap and local-only gates. It annotates live sessions through `updateSessionMetadata` without changing state or activity timestamps; HTTP/remote usage never gains the native provenance merely by naming WorkBuddy.
 
 ## Cursor Hook Commands And Session Titles
 

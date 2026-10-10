@@ -220,9 +220,9 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.agents.pi.notificationHookEnabled, true);
   });
 
-  it("defaults Codex permissions to intercept mode", () => {
+  it("defaults Codex permissions to Auto mode", () => {
     const d = prefs.getDefaults();
-    assert.strictEqual(d.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(d.agents.codex.permissionMode, "auto");
     assert.strictEqual(d.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
@@ -783,13 +783,22 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
-  it("normalizes agents: drops invalid Codex permissionMode to intercept", () => {
+  it("migrates legacy Native to Auto while preserving the agent switches", () => {
+    const v = prefs.validate({ agents: { codex: { enabled: false, permissionsEnabled: false,
+      nativeNotificationSoundEnabled: true, permissionMode: "native" } } });
+    assert.strictEqual(v.agents.codex.permissionMode, "auto");
+    assert.strictEqual(v.agents.codex.enabled, false);
+    assert.strictEqual(v.agents.codex.permissionsEnabled, false);
+    assert.strictEqual(v.agents.codex.nativeNotificationSoundEnabled, true);
+  });
+
+  it("normalizes agents: drops invalid Codex permissionMode to Auto", () => {
     const v = prefs.validate({
       agents: {
-        codex: { enabled: true, permissionMode: "auto" },
+        codex: { enabled: true, permissionMode: "invalid" },
       },
     });
-    assert.strictEqual(v.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(v.agents.codex.permissionMode, "auto");
   });
 
   it("normalizes agents: fills missing notificationHookEnabled from defaults", () => {
@@ -1622,6 +1631,64 @@ describe("prefs.migrate v19 → v20 (Telegram reply submission opt-in)", () => {
   });
 });
 
+describe("prefs.migrate v20 → v21 (Codex Auto approval routing)", () => {
+  it("moves the persisted Intercept default to Auto", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 20,
+      agents: { codex: { enabled: true, permissionsEnabled: false, permissionMode: "intercept" } },
+    }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.agents.codex.permissionMode, "auto");
+    assert.strictEqual(upgraded.agents.codex.enabled, true);
+    assert.strictEqual(upgraded.agents.codex.permissionsEnabled, false);
+  });
+
+  it("moves legacy Native to Auto", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 20,
+      agents: { codex: { permissionMode: "native" } },
+    }));
+    assert.strictEqual(upgraded.agents.codex.permissionMode, "auto");
+  });
+
+  it("does not mutate the raw input or touch other agents", () => {
+    const raw = {
+      version: 20,
+      agents: { codex: { permissionMode: "intercept" }, "claude-code": { enabled: false } },
+    };
+    const upgraded = prefs.validate(prefs.migrate(raw));
+    assert.strictEqual(raw.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(upgraded.agents["claude-code"].enabled, false);
+  });
+
+  it("tolerates a missing or malformed agents map", () => {
+    assert.strictEqual(prefs.migrate({ version: 20 }).version, 21);
+    assert.strictEqual(prefs.migrate({ version: 20, agents: [] }).version, 21);
+    assert.strictEqual(prefs.migrate({ version: 20, agents: { codex: null } }).version, 21);
+  });
+
+  it("keeps an Intercept choice made after the migration", () => {
+    const current = prefs.validate(prefs.migrate({
+      version: 21,
+      agents: { codex: { permissionMode: "intercept" } },
+    }));
+    assert.strictEqual(current.agents.codex.permissionMode, "intercept");
+  });
+
+  it("migrates an upgraded prefs file once and persists the new version", () => {
+    const p = makeTempPath("codex-auto.json");
+    fs.writeFileSync(p, JSON.stringify({
+      version: 20,
+      agents: { codex: { permissionMode: "intercept" } },
+    }), "utf8");
+    const { snapshot } = prefs.load(p);
+    assert.strictEqual(snapshot.agents.codex.permissionMode, "auto");
+    prefs.save(p, { ...snapshot, agents: { ...snapshot.agents,
+      codex: { ...snapshot.agents.codex, permissionMode: "intercept" } } });
+    assert.strictEqual(prefs.load(p).snapshot.agents.codex.permissionMode, "intercept");
+  });
+});
+
 describe("prefs.migrate v12 → v13 (Settings window bounds)", () => {
   it("advances the schema without inventing geometry for existing users", () => {
     const upgraded = prefs.validate(prefs.migrate({ version: 12, lang: "zh" }));
@@ -1942,22 +2009,22 @@ describe("prefs.load", () => {
     }
   });
 
-  it("accepts the current v20 schema and locks an explicit v21 file", () => {
-    const currentPath = makeTempPath("v20.json");
-    fs.writeFileSync(currentPath, JSON.stringify({ version: 20, lang: "zh" }), "utf8");
+  it("accepts the current v21 schema and locks an explicit v22 file", () => {
+    const currentPath = makeTempPath("v21.json");
+    fs.writeFileSync(currentPath, JSON.stringify({ version: 21, lang: "zh" }), "utf8");
     const current = prefs.load(currentPath);
     assert.strictEqual(current.locked, false);
-    assert.strictEqual(current.snapshot.version, 20);
+    assert.strictEqual(current.snapshot.version, 21);
     assert.strictEqual(current.snapshot.lang, "zh");
 
-    const futurePath = makeTempPath("v21.json");
-    fs.writeFileSync(futurePath, JSON.stringify({ version: 21, lang: "ja" }), "utf8");
+    const futurePath = makeTempPath("v22.json");
+    fs.writeFileSync(futurePath, JSON.stringify({ version: 22, lang: "ja" }), "utf8");
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
       const future = prefs.load(futurePath);
       assert.strictEqual(future.locked, true);
-      assert.strictEqual(future.snapshot.version, 21);
+      assert.strictEqual(future.snapshot.version, 22);
       assert.strictEqual(future.snapshot.lang, "ja");
     } finally {
       console.warn = originalWarn;

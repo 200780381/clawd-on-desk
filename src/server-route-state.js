@@ -147,7 +147,7 @@ function normalizeContextUsage(value) {
     out.percent = Math.max(0, Math.min(100, Math.round((used / out.limit) * 100)));
   }
 
-  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode") out.source = value.source;
+  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode" || value.source === "workbuddy") out.source = value.source;
   return out;
 }
 

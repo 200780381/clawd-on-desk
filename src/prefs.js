@@ -64,7 +64,7 @@ const {
   PET_MOUTH_ACCESSORY_IDS,
 } = require("./pet-customization-catalog");
 
-const CURRENT_VERSION = 20;
+const CURRENT_VERSION = 21;
 const DEFAULT_INTEGRATION_INSTALLED_IDS = Object.freeze(["claude-code", "codex"]);
 const DEFAULT_INTEGRATION_INSTALLED_SET = new Set(DEFAULT_INTEGRATION_INSTALLED_IDS);
 
@@ -411,7 +411,7 @@ const SCHEMA = {
       // normalizeAgents drops it for agents whose default entry lacks it.
       "claude-code": { integrationInstalled: true, enabled: true, permissionsEnabled: true, subagentPermissionsEnabled: true, notificationHookEnabled: true },
       "deepseek-harness": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
-      "codex": { integrationInstalled: true, enabled: true, permissionsEnabled: true, notificationHookEnabled: true, permissionMode: "intercept", nativeNotificationSoundEnabled: false },
+      "codex": { integrationInstalled: true, enabled: true, permissionsEnabled: true, notificationHookEnabled: true, permissionMode: "auto", nativeNotificationSoundEnabled: false },
       "copilot-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "cursor-agent": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
       "gemini-cli": { integrationInstalled: false, enabled: false, permissionsEnabled: true, notificationHookEnabled: true },
@@ -966,6 +966,21 @@ function migrate(raw) {
     }
     out.version = 20;
   }
+  // v20 -> v21: Codex approval routing gained Auto (#1155). save() bakes the
+  // full snapshot, so every earlier install has the old default "intercept"
+  // on disk and an explicit choice cannot be told apart from it. Move every
+  // upgrading user to Auto once; Intercept chosen after this release is kept.
+  // Fresh installs never run migrate() and already use the Auto default.
+  if (out.version < 21) {
+    const agents = out.agents;
+    const codex = agents && typeof agents === "object" && !Array.isArray(agents)
+      ? agents.codex : null;
+    if (codex && typeof codex === "object" && !Array.isArray(codex)
+      && (codex.permissionMode === "intercept" || codex.permissionMode === "native")) {
+      out.agents = { ...agents, codex: { ...codex, permissionMode: "auto" } };
+    }
+    out.version = 21;
+  }
   if ((typeof out.version === "number" ? out.version : 0) < CURRENT_VERSION) {
     out.version = CURRENT_VERSION;
   }
@@ -981,7 +996,7 @@ const AGENT_FLAGS = [
   "notificationHookEnabled",
   "nativeNotificationSoundEnabled",
 ];
-const CODEX_PERMISSION_MODES = ["native", "intercept"];
+const CODEX_PERMISSION_MODES = ["auto", "intercept"];
 const MAX_CUSTOM_DISCOVERY_PATHS = 64;
 const MAX_CUSTOM_DISCOVERY_PATH_LENGTH = 2048;
 
