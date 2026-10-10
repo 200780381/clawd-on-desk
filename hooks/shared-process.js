@@ -256,7 +256,7 @@ if ($fg -ne [IntPtr]::Zero) {
   [void][ClawdWin32]::GetClassName($fg, $sb, $sb.Capacity)
   $fgClass = $sb.ToString()
 }
-$processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId, Name, CommandLine, @{Name='StartIdentity';Expression={try { $_.CreationDate.ToUniversalTime().Ticks.ToString() } catch { $null }}})
+$processes = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId, Name, CommandLine, @{Name='StartIdentity';Expression={try { $_.CreationDate.ToUniversalTime().Ticks.ToString() } catch { $null }}})
 [pscustomobject]@{
   processes = $processes
   foreground = [pscustomobject]@{

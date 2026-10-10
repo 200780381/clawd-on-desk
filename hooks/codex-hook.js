@@ -742,7 +742,8 @@ async function runCodexHook(payload, options = {}) {
     const resolverOptions = {
       agentNames: { win: new Set(["codex.exe"]), mac: new Set(["codex"]), linux: new Set(["codex"]) },
       platformConfig: config,
-      windowsSnapshotTimeoutMs: 5000,
+      // Interrupt's upstream outer timeout remains three seconds.
+      windowsSnapshotTimeoutMs: payload && payload.hook_event_name === "Interrupt" ? 3000 : 5000,
       env,
       readRuntimeIdentity() {
         if (processChainAttempt && processChainAttempt.context) {

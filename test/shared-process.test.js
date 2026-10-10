@@ -656,6 +656,42 @@ describe("createPidResolver() — Windows PowerShell path", { skip: process.plat
     assert.deepStrictEqual(seen, [3000, 3000, 3000, 3000, 3000, 3000, 5000, 5000]);
   });
 
+  it("requests only the required CIM properties while preserving full CLI and foreground metadata", () => {
+    let seen;
+    withMockedExec((file, args, options) => {
+      seen = { file, args, options };
+      return snapshotEnvelopeJson([
+        { pid: 300, name: "powershell.exe", ppid: 301, startIdentity: "wrapper-start" },
+        { pid: 301, name: "codex.exe", ppid: 302, cmd: "codex --model test", startIdentity: "agent-start" },
+        { pid: 302, name: "windowsterminal.exe", ppid: 303, startIdentity: "terminal-start" },
+        { pid: 303, name: "explorer.exe", ppid: 0 },
+      ], { hwnd: "123456", pid: 302, className: "CASCADIA_HOSTING_WINDOW_CLASS" });
+    }, () => {
+      const result = createPidResolver({ ...LIVE_GATE, platformConfig: getPlatformConfig(), startPid: 300,
+        agentNames: { win: new Set(["codex.exe"]) } })();
+      assert.strictEqual(seen.file, "powershell.exe");
+      assert.deepStrictEqual(seen.args.slice(0, 5), ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]);
+      const script = seen.args[5];
+      assert.strictEqual(script.includes("Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate -ErrorAction SilentlyContinue"), true, "CIM requests exactly the required five properties");
+      assert.match(script, /Select-Object ProcessId, ParentProcessId, Name, CommandLine, @\{Name='StartIdentity';Expression=\{try \{ \$_\.CreationDate\.ToUniversalTime\(\)\.Ticks\.ToString\(\)/);
+      assert.match(script, /Add-Type -TypeDefinition \$typeDef/);
+      assert.match(script, /\[ClawdWin32\]::GetForegroundWindow\(\)/);
+      assert.match(script, /\[ClawdWin32\]::GetWindowThreadProcessId/);
+      assert.strictEqual(result.stablePid, 302, "CLI/noarg retains the terminal anchor");
+      assert.strictEqual(result.agentPid, 301);
+      assert.strictEqual(result.agentCommandLine, "codex --model test");
+      assert.strictEqual(result.foregroundWtHwnd, "123456");
+      assert.deepStrictEqual(result.pidChain, [300, 301, 302, 303]);
+      assert.strictEqual(result.agentProcessStartIdentity, "win32:agent-start");
+      assert.strictEqual(result.sourceProcessStartIdentity, "win32:terminal-start");
+      assert.strictEqual(Object.getOwnPropertyDescriptor(result, "agentProcessStartIdentity").enumerable, false);
+      assert.strictEqual(Object.getOwnPropertyDescriptor(result, "sourceProcessStartIdentity").enumerable, false);
+      assert.strictEqual(seen.options.timeout, 3000, "generic default is unchanged");
+      assert.strictEqual(seen.options.windowsHide, true);
+      assert.strictEqual(seen.options.maxBuffer, 8 * 1024 * 1024);
+    });
+  });
+
   it("populates pidChain by walking the snapshot Map", () => {
     const cfg = getPlatformConfig();
     const resolve = createPidResolver({ ...LIVE_GATE, platformConfig: cfg, startPid: 1000 });

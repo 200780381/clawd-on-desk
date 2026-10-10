@@ -191,6 +191,11 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
       assert.equal(result.body.agent_pid, undefined);
     }
     assert.deepEqual(deadlines, [5000, 3000, 5000], "a timeout never retries or falls back on prompt/end");
+    const interrupt = await run("Interrupt");
+    assert.equal(interrupt.body.source_pid, null);
+    assert.equal(interrupt.body.agent_pid, undefined);
+    assert.deepEqual(deadlines, [5000, 3000, 5000, 3000], "Interrupt respects the three-second outer cap on a cache miss");
+    assert.equal(factoryDeadlines.at(-1), 3000);
   });
 
   it("uses the current Desktop env alias and preserves ambient versus ordinary chat tagging", async (t) => {
