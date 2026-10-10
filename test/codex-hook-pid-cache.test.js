@@ -89,7 +89,7 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
 
   it("keeps a prewarmed side-chat app-server anchor after the SessionStart wrapper exits", async (t) => {
     const h = harness(t);
-    const start = await h.run("SessionStart");
+    const start = await h.run("SessionStart", { source: "startup" });
     assert.equal(start.body, null);
     assert.equal(h.deliveries.length, 0);
     assert.ok(h.readCache(), JSON.stringify(h.metadata));
@@ -117,6 +117,25 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
     assert.equal(h.snapshots(), 1, "end never takes a new snapshot");
     assert.equal(h.readCache(), null);
   });
+
+  for (const source of ["startup", "resume", "clear", "compact", "fork"]) {
+    it(`keeps the first prompt PID after a ${source} SessionStart wrapper exits`, async (t) => {
+      const h = harness(t);
+      await h.run("SessionStart", { source });
+      h.nextWrapper();
+      const prompt = await h.run("UserPromptSubmit");
+      assert.equal(prompt.body.source_pid, 1002);
+      assert.equal(prompt.body.agent_pid, 1002);
+      assert.equal(prompt.body.codex_originator, "Codex Desktop");
+      assert.equal(prompt.body.codex_source, undefined, "a start cause is not session provenance");
+      assert.equal(h.readCache().stablePid, 1002);
+      assert.equal(h.metadata.at(-1).cacheSource, "v2");
+      assert.equal(h.snapshots(), 1, "the first prompt remains cache-only");
+      h.alive.delete(1002);
+      assert.equal((await h.run("UserPromptSubmit")).body.source_pid, null);
+      assert.equal(h.snapshots(), 1, "agent death cannot cause a prompt fallback");
+    });
+  }
 
   it("uses the current Desktop env alias and preserves ambient versus ordinary chat tagging", async (t) => {
     const h = harness(t, {
@@ -219,7 +238,7 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
   for (const originator of ["codex-tui", "codex_cli_rs", "unknown-client"]) {
     it(`preserves terminal/editor focus for explicit ${originator} despite inherited Desktop env`, async (t) => {
       const h = harness(t, { payload: { originator }, parentName: "code.exe" });
-      await h.run("SessionStart");
+      await h.run("SessionStart", { source: "startup" });
       assert.equal(h.readCache().stablePid, 1003);
       assert.equal(h.metadata[0].sourceProcessStartIdentity, "desktop-start");
       h.nextWrapper();
@@ -249,12 +268,25 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
 
   it("does not replace the headless anchor with an inherited Desktop app-server", async (t) => {
     const h = harness(t, { payload: { headless: true } });
-    await h.run("SessionStart");
+    await h.run("SessionStart", { source: "startup" });
     assert.equal(h.readCache().stablePid, 1001);
     h.nextWrapper();
     assert.equal((await h.run("UserPromptSubmit")).body.source_pid, null);
     assert.equal(h.snapshots(), 1);
   });
+
+  for (const source of ["unknown", "Startup", " startup ", { type: "startup" }, null]) {
+    it(`does not exempt an unknown or malformed SessionStart source ${JSON.stringify(source)}`, async (t) => {
+      const h = harness(t);
+      await h.run("SessionStart", { source });
+      assert.equal(h.readCache().stablePid, 1001);
+      h.nextWrapper();
+      const prompt = await h.run("UserPromptSubmit");
+      assert.equal(prompt.body.source_pid, null);
+      assert.equal(prompt.body.agent_pid, undefined);
+      assert.equal(h.snapshots(), 1);
+    });
+  }
 
   for (const [label, env, options] of [
     ["WSL env", { CLAWD_WSL_DISTRO: "Ubuntu" }, {}],
@@ -263,7 +295,7 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
   ]) {
     it(`does not use the native Desktop anchor under ${label}`, async (t) => {
       const h = harness(t, { env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop", ...env }, options });
-      await h.run("SessionStart");
+      await h.run("SessionStart", { source: "startup" });
       assert.equal(h.readCache().stablePid, 1001);
       assert.equal((await h.run("UserPromptSubmit")).body.source_pid, 1001);
       h.nextWrapper();
@@ -274,7 +306,7 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
 
   it("never resolves or anchors the local tree in remote mode", async (t) => {
     const h = harness(t, { env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop", CLAWD_REMOTE: "1" } });
-    await h.run("SessionStart");
+    await h.run("SessionStart", { source: "startup" });
     assert.equal(h.readCache(), null);
     assert.equal((await h.run("UserPromptSubmit")).body.source_pid, null);
     assert.equal(h.snapshots(), 0);
@@ -336,6 +368,37 @@ describe("Codex Desktop Windows PID cache", { skip: process.platform !== "win32"
 
 describe("Codex Desktop PID preference provenance", () => {
   const mockResolve = () => ({ stablePid: 11, agentPid: 22, detectedEditor: "code", pidChain: [11, 22] });
+  for (const source of ["startup", "resume", "clear", "compact", "fork"]) {
+    it(`separates the ${source} SessionStart cause from session and permission provenance`, () => {
+      const options = { platform: "win32", env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" } };
+      const payload = { hook_event_name: "SessionStart", session_id: "client", source };
+      const state = buildStateBody(payload, mockResolve, options);
+      assert.equal(state.source_pid, 22);
+      assert.equal(state.codex_originator, "Codex Desktop");
+      assert.equal(state.codex_source, undefined);
+      assert.equal(payload.source, source, "the lifecycle cause stays on the original payload");
+      assert.equal(isCodexDesktopSession(payload, { source }, options), false, "session_meta.source remains declared provenance");
+      for (const provenance of [{ source: "cli" }, { source: { type: "exec" } }, { originator: null }]) {
+        assert.equal(isCodexDesktopSession(payload, provenance, options), false);
+      }
+      for (const originator of ["codex-tui", "unknown-client"]) {
+        const explicit = buildStateBody({ ...payload, originator }, mockResolve, options);
+        assert.equal(explicit.source_pid, 11);
+        assert.equal(explicit.codex_originator, originator);
+        assert.equal(explicit.codex_source, undefined);
+      }
+      const child = buildStateBody({ ...payload, codex_session_role: "subagent" }, mockResolve, options);
+      assert.equal(child.source_pid, 11);
+      assert.equal(child.codex_originator, undefined);
+      for (const event of ["Stop", "PermissionRequest", "sessionstart"]) {
+        assert.equal(isCodexDesktopSession({ ...payload, hook_event_name: event }, null, options), false);
+      }
+      const permission = buildPermissionBody({ ...payload, hook_event_name: "PermissionRequest", tool_name: "Bash" }, mockResolve, options);
+      assert.equal(permission.source_pid, 11);
+      assert.equal(permission.codex_originator, undefined);
+      assert.equal(permission.codex_source, source, "permission provenance is never exempted");
+    });
+  }
   for (const originator of ["Codex Desktop", "codex_work_desktop"]) {
     it(`uses the audited ${originator} env alias for state and permission source fields`, () => {
       const options = { platform: "win32", env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: originator } };

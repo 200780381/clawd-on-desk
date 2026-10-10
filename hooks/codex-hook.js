@@ -291,6 +291,13 @@ function firstString(...values) {
   return "";
 }
 
+function isCodexSessionStartLifecycleSource(payload) {
+  // Official SessionStart.source describes the lifecycle cause, not the
+  // session_meta source (CLI, exec, internal, or structured child provenance).
+  return payload.hook_event_name === "SessionStart"
+    && ["startup", "resume", "clear", "compact", "fork"].includes(payload.source);
+}
+
 function resolveCodexOriginator(payload, sessionMeta, options = {}) {
   const source = payload && typeof payload === "object" ? payload : {};
   const meta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : {};
@@ -303,8 +310,9 @@ function resolveCodexOriginator(payload, sessionMeta, options = {}) {
   const inherited = firstString(env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE);
   // Missing/blank string fields permit inheritance; a present malformed or
   // structured value is declared provenance and must not become Desktop.
-  const hasDeclaredProvenance = [meta, source].some((record) =>
+  const hasDeclaredProvenance = [meta, source].some((record, index) =>
     ["originator", "source"].some((key) => Object.prototype.hasOwnProperty.call(record, key)
+      && !(index === 1 && key === "source" && isCodexSessionStartLifecycleSource(source))
       && (typeof record[key] !== "string" || record[key].trim() !== "")));
   return (options.platform || process.platform) === "win32"
     && options.allowDesktopEnvOriginator !== false
@@ -322,7 +330,9 @@ function applyCodexSessionMetaFields(body, payload, sessionMeta, options = {}) {
   const source = payload && typeof payload === "object" ? payload : {};
   const meta = sessionMeta && typeof sessionMeta === "object" ? sessionMeta : {};
   const originator = resolveCodexOriginator(payload, sessionMeta, options);
-  let codexSource = firstString(meta.source, source.source);
+  // Keep the event's lifecycle cause separate from outgoing session provenance.
+  let codexSource = firstString(meta.source,
+    isCodexSessionStartLifecycleSource(source) ? "" : source.source);
   const metaSubagent = meta.source && typeof meta.source === "object"
     ? meta.source.subagent
     : null;

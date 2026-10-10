@@ -498,6 +498,7 @@ describe("Codex official /permission path", () => {
       { originator: null, codex_session_role: "subagent" },
       { source: { type: "exec" }, codex_session_role: "subagent" },
       { source: { role: "unknown" }, codex_session_role: "subagent" },
+      ...["startup", "resume", "clear", "compact", "fork"].map((source) => ({ source, codex_session_role: "subagent" })),
     ];
     for (const payload of payloads) {
       const { handler, pendingPermissions, updates, shown } = startServer({
