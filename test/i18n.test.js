@@ -88,6 +88,16 @@ describe("i18n locales", () => {
     assertLocaleObjectParity(i18n, "runtime");
   });
 
+  it("localizes optional Codex hook review notices in every runtime locale", () => {
+    for (const lang of SUPPORTED_LANGS) {
+      for (const key of ["codexHookHealthOptionalNudgeTitle", "codexHookHealthOptionalNudgeBody"]) {
+        assert.strictEqual(typeof i18n[lang][key], "string", `${lang}.${key}`);
+        assert.ok(i18n[lang][key].length > 0, `${lang}.${key}`);
+      }
+      assert.match(i18n[lang].codexHookHealthOptionalNudgeBody, /\/hooks/);
+    }
+  });
+
   it("localizes the DSH desktop open action in every supported language", () => {
     assert.deepStrictEqual(
       Object.fromEntries(SUPPORTED_LANGS.map((lang) => [lang, i18n[lang].dashboardOpenDshDesktop])),
