@@ -1047,7 +1047,6 @@
     "plugin-disabled-in-dsh",
     "repair-pending",
     "inspection-required",
-    "generation-conflict",
   ]);
 
   function dshNoticeProfileLabel(profile) {
@@ -1063,6 +1062,7 @@
       case "manual-command":
         return t("dshNoticeManualCommand");
       case "failed-target": {
+        if (notice.reason === "generation-conflict") return t("dshNoticeGenerationConflict");
         const message = notice.message == null ? "" : String(notice.message);
         const key = notice.operation === "uninstall" ? "dshNoticeUninstallFailed" : "dshNoticeInstallFailed";
         let body = t(key).replace("{message}", message);
