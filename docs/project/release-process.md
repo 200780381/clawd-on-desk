@@ -6,7 +6,7 @@ Use this flow when preparing a Clawd app release.
 
 1. Update `package.json` to the release version.
 2. Add `docs/releases/release-vX.Y.Z.md` and a matching `!` allowlist line in
-   `.gitignore` (for example `!docs/releases/release-v1.2.0.md`). Without the
+   `.gitignore` (for example `!docs/releases/release-v1.3.0.md`). Without the
    allowlist, `git add` silently skips the note and CI's `validate-release`
    skips all three platform builds.
 3. Run the local tests that match the change scope. For full release prep, run:
@@ -75,31 +75,85 @@ Download and smoke-test the draft release assets before publishing the draft.
 If the draft is wrong, fix the issue before publishing; do not publish a known
 bad draft release.
 
-### v1.2.0 Draft Smoke Checklist
+### v1.3.0 Draft Smoke Checklist
 
-Use the draft release installer or package artifact, not `npm start`. Windows
-required items are the primary publish gate. If macOS or Linux hardware is not
-available, record that platform as not real-machine validated in the release
-notes.
+Use the draft release installer or package artifact, not `npm start`, and record
+platform, architecture, host version, and result for each selected check.
+Windows applicable required items are the primary publish gate; unavailable
+macOS/Linux hardware must be recorded as **Not tested** in the release notes.
 
-Before launching:
+#### 本版必测（Required for this release）
 
-- Download the draft release asset for the platform being tested.
-- On macOS, download each DMG through a browser so it carries quarantine
-  metadata. Confirm it opens without a Privacy & Security override, then verify
-  the copied app with `spctl` and `stapler` as documented in the signing guide.
-- Confirm the packaged app shows `1.2.0` metadata.
-- Confirm packaged resources include `app.asar.unpacked/hooks`,
-  `app.asar.unpacked/agents`, `app.asar.unpacked/extensions`,
-  and `app.asar.unpacked/themes`.
-- Confirm the retirement assertion passes and neither
-  `sidecars/cc-connect-clawd` nor any `cc-connect-clawd(.exe)` exists.
-- Confirm Windows artifacts are architecture-specific x64 / ARM64 installers,
-  not a universal NSIS installer.
-- Download the native-package, Koffi prune/smoke, and updater metadata manifests.
-  Confirm the target has one matching `koffi.node`, no foreign native payload,
-  and no unreviewed exception. Confirm each updater metadata `version` and every
-  listed artifact filename identify `1.2.0`.
+These checks cover changes since v1.2.0 and the recurring release gates; CI
+artifact evidence can satisfy static package checks, while GUI and host checks
+need the actual packaged app.
+
+- **All platforms:** download the matching draft asset and confirm the packaged app shows `1.3.0` metadata.
+- **All targets:** confirm packaged resources include `app.asar.unpacked/hooks`, `app.asar.unpacked/agents`, `app.asar.unpacked/extensions`, `app.asar.unpacked/themes`, NOTICE, and the bundled official catalog snapshot, with no optional official-theme media or retired `sidecars/cc-connect-clawd` / `cc-connect-clawd(.exe)` payload.
+- **Windows x64/ARM64:** confirm separate architecture-specific NSIS installers and the intended user/machine installation paths.
+- **All targets:** inspect native-package and Koffi prune/smoke manifests for exactly one matching `koffi.node`, a successful packaged positive call, no foreign native payload, and no unreviewed exception.
+- **All targets:** confirm updater metadata versions and listed artifact filenames identify `1.3.0` and match the generated assets.
+- **macOS x64/arm64:** download each DMG through a browser to retain quarantine, install without a Privacy & Security override, and validate the copied app with `codesign`, `spctl`, and `stapler` as described in the signing guide.
+- **Windows/macOS/Linux:** fresh-install and launch the packaged app with a visible pet and no error dialog.
+- **Windows/macOS/Linux:** save the v1.2.0 prefs before upgrading, install over v1.2.0, and confirm the app launches while preserving agent installation/enabled flags and theme/animation choices except the documented Codex migration.
+- **Windows/macOS/Linux:** confirm Settings -> About shows `v1.3.0`, sourced from `app.getVersion()`, with every v1.3.0 contributor and all previous contributors.
+- **Windows; macOS on available architectures:** validate a real v1.2.0 → v1.3.0 updater pair including Restart Now and Later/quit/reopen, recording versions and asset hashes rather than treating a source run or mocked updater as acceptance.
+- **Codex/DSH/OpenCode/MiMo supported platforms:** exercise manual Allow/Deny and DND, disabled bubbles, disconnect, and Clawd shutdown as applicable, confirming each no-decision path returns to the host without inventing Allow/Deny or a remote timeout decision.
+- **Windows/macOS/Linux:** upgrade a v20 profile to prefs v21 with Codex Intercept/Native migrated to Auto once, then re-select Intercept and restart to confirm that new choice persists (#1156, #1167).
+- **Codex supported platforms:** compare human-reviewed local shell/file requests with automatic reviewers, MCP/app, unknown evidence, and remote/WSL requests, confirming only proved local human requests enter Clawd or mirrored approvals in Auto (#1156).
+- **Windows/macOS + local Codex:** run a real long Ask me turn whose turn_context is more than 1 MiB behind the request, compact and continue with unchanged approval settings, and confirm Auto still shows a Clawd bubble within its bounded evidence window (#1169).
+- **Codex supported platforms:** sync and review PreCompact, PostCompact, Interrupt, and SessionEnd in `/hooks`, confirm Agents/Doctor recover to healthy after review, and before review confirm compaction has only its JSONL completion cue while an already-trusted PermissionRequest still works (#1129, #1158, #1160).
+- **Windows + Codex:** leave only the four new state hooks unreviewed and confirm the tray notice says approvals still work and directs the user to `/hooks`, while Doctor reports pending review instead of blaming connectivity (#1169).
+- **Codex supported platforms:** exercise manual/automatic compaction start, success, interruption, and fast completion alongside busy and completing peer sessions, confirming holds release and sweeping yields without losing peers' completion cues (#1110, #1129, #1160).
+- **Codex Desktop on supported platforms:** confirm recognized ambient-suggestion threads stay hidden, ordinary side chats remain visible, and SessionEnd retires rows without stale lifecycle replay except those retained for a replyable completion mapping (#1158).
+- **Windows/macOS/Linux + local Codex:** rename or generate a native title without rollout growth and confirm HUD/Dashboard refresh through the normal approximately 1.5-second poll without changing activity or completion (#1111).
+- **Windows/macOS/Linux:** keep genuine current-turn Codex model/tool progress running through a long wait, then stop it, confirming the card does not expire early and all agents' busy sessions block roaming until work ends (#1162).
+- **Windows/macOS/Linux + Claude:** verify PostToolBatch is written only at ≥2.1.280 and UserPromptExpansion only at ≥2.1.265, older hosts can still read settings, foreign hook entries remain intact, and owned env hooks migrate only when a usable local Node is found (#1070, #1084, #1123).
+- **Windows/macOS/Linux + Claude ≥2.1.280:** run serial/parallel tools, queued prompts, results before starts, subagents, failures, Stop, pending approvals, and DND, confirming accepted batches return to thinking without reviving completed work and comparing Footprints tool counts with real calls (#1123, #1150, #1153, #1154).
+- **Windows/macOS + Claude ≥2.1.265:** use `/design` in Clawd with a saved head accessory, confirm painting and completion heart eyes preserve supported accessories, and check Calico/Cloudling fallback (#1084).
+- **Windows/macOS/Linux + Claude CLI/VS Code:** confirm manual titles outrank AI titles and prompt-first-line fallback, including resume and a Clawd restart (#1127).
+- **Windows + Claude:** leave a live interactive session idle for more than ten minutes, resume work and restart Clawd, confirming one canonical recovered row and no reuse of another process's identity (#1108).
+- **macOS/Windows + DSH:** upgrade the v1.2.0 web/desktop bridge once across the verified 0.1/0.2 families, restart hosts, and confirm another Clawd restart does not replace healthy generations again (#1128, #1130, #1131).
+- **macOS/Windows + DSH:** open a desktop-only installation once to initialize its profile, then exercise Install/Repair/Uninstall with both carriers and confirm one Doctor row, per-profile notices, and preservation of the other profile when one side fails or is removed (#1131).
+- **macOS/Windows + DSH:** run real desktop state and Allow/Deny requests, restart after a generation update, and test `dsh://open` from foreground, minimized, and closed windows plus the unique-install launch fallback without promising a conversation-specific jump (#1131, #1132).
+- **Linux + DSH web:** confirm web Install, Doctor, approvals, and upgrade remain usable without a desktop carrier (#1130, #1131).
+- **macOS/Windows + DSH:** change the host from the 0.1 to 0.2 family while Clawd stays on the same version and confirm the localized Settings notice directs Uninstall then Install using the visible button names (#1169).
+- **macOS/Windows + DSH/Kimi desktop and supported CLI/web platforms:** confirm SessionStart-only conversations remain in Dashboard and out of HUD until real activity, with metadata unable to reveal them early (#1133, #1159).
+- **macOS/Windows + WorkBuddy:** install against the current or compatible legacy home and confirm completed cards survive per-turn host exit, late SessionStart, auth_success, and idle_prompt until the configured idle timeout or app exit, with native approval untouched (#1136, #1138).
+- **macOS/Windows + WorkBuddy:** compare native titles, idle renames, empty-title context, model/window changes, and post-compaction usage with HUD/Dashboard, confirming unreadable databases preserve the previous gauge and another home's same ID does not own lifecycle (#1135, #1168).
+- **macOS/Windows + WorkBuddy:** archive/delete a conversation and confirm retirement within one approximately two-second poll when readable, then unarchive and send a new message to restore it without late archived events recreating the row (#1140).
+- **Windows + WorkBuddy/CodeBuddy:** exercise slow process snapshots and confirm immediate legal stdout followed by completed state delivery, including WorkBuddy main-process identity when resolution succeeds and cleanup after app exit (#1104, #1146).
+- **CodeBuddy supported platforms:** confirm command hooks return `{}` without a tool decision and an independent real HTTP PermissionRequest still round-trips through manual approval (#1115).
+- **macOS/Windows + Qoder/QoderWork:** confirm native session titles still display after the shared incremental-reader refactor (#1135).
+- **Windows/macOS/Linux:** set a session to Ask every time under global unattended, then use a request with failed identity verification and confirm the stricter session policy prevents automatic approval (#1114).
+- **Windows/macOS/Linux, including multiple displays or high DPI:** confirm a permission bubble's first visible frame is already positioned and transient geometry failure keeps it pending without flashing at the provisional origin (#1161).
+- **OpenCode v1/v2 and MiMo supported platforms:** close an unanswered bubble window and confirm the host's native prompt remains available without a tool denial (#1121).
+- **Windows/macOS/Linux:** enable the destructive-operation reminder and compare recognized git/gh `$(cat <<'EOF' …)` message arguments with a plain/unrecognized heredoc and a destructive trailing command, confirming only message text avoids the false hold (#1096).
+- **Windows/macOS/Linux:** inspect Dashboard history grouping, fallback first-prompt titles, short IDs, worktree transcripts, visible-row scope, and automation-unavailable explanations with picker focus preserved (#1085, #1086, #1116, #971).
+- **Windows/macOS/Linux:** open Themes offline with no cache, confirm bundled catalog cards, banner and Retry, restore connectivity, and download a theme while preserving hover/scroll/focus and correct completion after tab change or Settings reload (#1124, #1088, #1098).
+- **Windows/macOS/Linux:** move the pet across displays and use the size slider during roaming, confirming actual-size readout including `100%+`, no roaming overwrite, and nearest-tick/max-clamped size when Keep size across displays is disabled (#1091, #1092, #1093).
+- **Windows/macOS/Linux:** compare Cloudling normal/mini visuals and slider limits after upgrade, recording the approximately 29% normal-size reduction and unchanged saved selection (#1094).
+- **Windows/macOS/Linux:** verify quota reminders default off, then exercise four timing presets, threshold/window labels, confirmed recovery, failed-send backoff, OS silence/DND, Test, and click-to-Settings with platform notification permission recorded (#1126, #1151, #1152).
+- **Windows/macOS/Linux:** restart with a large retained Footprints journal and activity arriving during reconciliation, toggle/clear recording, and confirm counts do not return after clearing, unsupported metrics remain a dash, and Sessions started is absent (#1143, #1144).
+- **Windows/macOS + Remote SSH:** re-Deploy/Repair a v1.2.0 target with the new Codex hooks and shared helper closure, review its hooks, and confirm remote Codex monitoring and Claude batch delivery still work (#1110, #1123, #1158, #1160).
+- **Linux X11/Wayland/XWayland + FUSE AppImage:** terminate only test-owned wrappers before Electron, verify `/state` still responds, then use SIGTERM or desktop shutdown and confirm independent temporary copies survive until process-group exit and are cleaned afterward (#1058).
+- **Linux + AppImage:** exercise tmpfs, a non-executable or undersized TMPDIR, a valid executable non-FUSE TMPDIR, a manually extracted AppDir, and the Homebrew cask path, recording startup I/O, single/relaunch peak space, forced-supervisor residuals, and Bazzite reporter confirmation (#1058).
+- **Linux + deb:** install, launch, and uninstall the package and inspect `dpkg -c` for AppRun/supervisor packaging without assuming the FUSE AppImage path runs in deb (#1058).
+- **Feishu/Lark supported platforms:** use the existing network configuration for a real SDK REST/WebSocket/card-callback round trip and disconnect fallback after the axios update (#1102).
+- **Windows:** cold-start twice at the saved upgrade position, exercise fullscreen overlay clicks/drag, and lock/sleep/wake with low-power mode, confirming position, focus, eye tracking, and size remain stable through the size-runtime changes (#1091).
+- **Release CI, all targets:** run the manual Build & Release and Wayland smoke workflows, require relevant Test jobs to pass, and compare the bundled official catalog snapshot with the published catalog before tagging (#1058, #1099, #1124).
+
+#### 老功能抽测（Regression sampling）
+
+Sample a few items on each release; record every item not run on the release
+page as **Not tested** rather than carrying forward an earlier pass.
+These retain older behavior checks and historical migrations; their former
+Required/Recommended labels do not make the entire matrix a v1.3.0 gate.
+Historical migration fixtures below are separate from the required v1.2.0
+upgrade path.
+
+**Historical migration and fixture preparation**
+
 - For migration smoke, install v0.16.0 first and save a copy of the old
   `clawd-prefs.json` before upgrading.
 - For legacy Feishu/Lark migration smoke, enable remote approval in v0.15.0 with saved
@@ -109,18 +163,9 @@ Before launching:
   `<Reasonix home>/` exists (`%APPDATA%\reasonix` on Windows,
   `~/.reasonix` on macOS/Linux). A skipped install because Reasonix is missing
   does not validate the packaged hook path.
-- For Remote SSH smoke, prepare at least one saved profile that can connect
-  through an SSH reverse tunnel.
 
-Required all-platform checks:
+**All-platform behavior**
 
-- Fresh install, launch, pet appears, no error dialog.
-- Footprints is enabled by default. Confirm Today/Week/Month/Year show local
-  accepted activity and coverage, preserve unsupported metrics as a dash, and
-  add no content or raw identifiers to storage. Turn recording off/on and clear
-  during a pending completion: old counts must not reappear, while the normal
-  completion animation still works. Recovered/locked preferences must visibly
-  report recording paused until an explicit, permitted Settings action resumes it.
 - Move the system timezone west after recording, then inspect Today/Week.
   Recorded activity and coverage at the frozen local hour remain visible.
 - With enough permission requests to overflow a small display, exercise queue
@@ -130,10 +175,6 @@ Required all-platform checks:
   It must not revive A or extend turn B. Real current-turn questions still keep
   an active task alive. Upgrade a profile with a long generic working timeout
   and no Codex-specific value: preserve its previous effective Codex duration.
-
-- Upgrade install over v1.1.0, launch, pet appears, no error dialog. Existing
-  agent installation/enabled flags and user theme/animation choices remain intact.
-- Settings -> About shows `v1.2.0`, sourced from `app.getVersion()`.
 - First-run tutorial opens once for a fresh profile; Finish, Skip, and OS close
   each persist `tutorialSeen=true` and do not reopen on restart.
 - Upgrade profile with no `tutorialSeen` sees the tutorial once; an already-seen
@@ -142,8 +183,6 @@ Required all-platform checks:
   macOS installs default to pet + menu-bar accessory with no Dock tile.
 - Settings -> General / Agents / Animation & Sound render correctly in all supported
   languages, including sidebar SVG icons and the folded Animation Map subtab.
-- Settings -> About contributors include every v1.2.0 contributor named in the
-  release note while preserving all previous contributors.
 - Make `clawd-prefs.json` temporarily unreadable and launch once. Confirm the
   startup warning and Doctor critical item both explain that agent events and
   approvals are paused; restore access and restart before continuing.
@@ -156,10 +195,6 @@ Required all-platform checks:
   created. Confirm the primary file remains byte-for-byte unchanged, Settings
   writes stay locked, and startup/Doctor report backup failure without claiming
   that a backup exists.
-- Reinstall one existing hook-based agent, such as Codex, and confirm the
-  packaged hook script can `require()` its dependencies.
-- Run one real Claude Code or Codex session and confirm the pet reacts to state
-  changes and still plays completion happy on Stop.
 - Confirm a completed turn uses the distinct default completion sound rather
   than the ordinary confirmation cue.
 - Run one real OpenCode session through a title rename, tool activity, and
@@ -168,34 +203,23 @@ Required all-platform checks:
 - Stop Clawd while OpenCode is running, trigger a permission request, and confirm
   the plugin leaves the decision in OpenCode's native UI without POSTing its
   reverse-bridge credentials to another listener in the Clawd port range.
-- Restart Clawd during an active Claude session, then let the real hook resume
-  and end it. Dashboard/HUD must keep one canonical session throughout and
-  remove it cleanly on SessionEnd, with no duplicate or ghost recovery row.
 - Exercise manual accessories on normal, interrupt, sleep, idle, reaction, and
   mini animations. Animation Map overrides must keep the wardrobe available;
   a frame without safe geometry hides only that frame's accessory. Toggle the
   holiday option and confirm it temporarily overrides, then restores, the
   saved manual accessory.
-- Exercise Ask every time, Question prompts only, and Auto-approve at both the
-  global and live-session scopes. Confirmation gates must appear where required,
-  and the unattended runtime elevation must downgrade after restart.
 - Feed Claude and Codex quota data from local plus Remote SSH sources. Confirm
   per-source values appear in Dashboard and the configurable pet Orbit ring,
   merge-across-machines can be turned both on and off, and an occupied third-party
   Claude statusline is preserved unless explicit chaining is enabled.
 - Trigger a long CJK Claude or Codex completion and confirm the Stop event reaches
   Clawd without a 413 and the happy animation is not dropped.
-- Codex official hook health: disable hooks / leave hooks unreviewed, confirm
-  Agents badge or startup nudge reports attention, then repair/review and
-  confirm it returns healthy.
 - Claude hook health: delete one managed hook script and atomically replace
   `settings.json`; confirm the watcher/periodic audit repairs supported damage,
   while a still-missing declared core event is never reported as a successful Fix.
 - Register two custom HTTP agents and send the same raw `session_id` from both;
   confirm Dashboard keeps separate sessions, then disable/delete one and confirm
   the other remains intact. Forged/stale `custom-` ids must be rejected.
-- Install WorkBuddy against the current `~/.workbuddy-ai/settings.json` path and
-  confirm state + Notification events arrive without Clawd taking over approval.
 - Install MiMo Code into a commented/trailing-comma JSONC config, exercise
   Allow/Always/Deny and DND fallback, then uninstall and confirm user config is preserved.
 - Install, enable inside MiniMax (`mcode plugin enable clawd-state@local` or the
@@ -262,24 +286,6 @@ Required all-platform checks:
   and Doctor reports the binding problem. Re-save the selected platform and
   App ID/App Secret, then re-save the approver; restart and confirm the client
   becomes ready without another warning.
-- Install the DeepSeek Harness bridge with its managed root reached through a
-  filesystem symlink. Confirm install and Doctor both report the verified
-  generation as healthy; foreign same-name packages must still fail closed.
-  Check 0.1.5-rc.1 and rc.3 session titles and context usage when available.
-- Exercise the DeepSeek Harness desktop app once on macOS and once on Windows:
-  install when both carriers are present and confirm the "installed in desktop"
-  notice; confirm Doctor shows one row with both sides; run a real desktop-app
-  session and take one Allow and one Deny; after a plugin update (generation
-  change), confirm the "restart desktop" notice appears, a desktop restart keeps
-  sessions working, and the notice clears only after the user clicks "Got it";
-  with DND on, confirm the desktop app shows its own approval dialog.
-- Turn on the destructive-operation reminder, then exercise recognized
-  destructive commands under auto-tools and unattended: each must pause for a
-  person instead of auto-allowing. Turn it off and confirm normal policy
-  resumes. Include a `git commit -m "$(cat <<'EOF' ... EOF)"` whose body has an
-  odd quote count or `(#N)` and confirm it is not held; then a plain
-  `cat <<EOF` heredoc with the same body, and confirm the documented
-  conservative hold and the Settings explanation.
 - Queue Slack notifications while its sender is busy; confirm none are lost
   and a permission alert can use its separate lane.
 - End a Claude turn and deliver a trailing `SubagentStop`; completion animation
@@ -295,7 +301,7 @@ Required all-platform checks:
   animations use the repository-hosted GIFs, and disabling the option returns
   to state-based presence.
 
-Recommended all-platform checks:
+**Other desktop and notification sampling**
 
 - Free roam: enable it, wait idle, confirm the pet moves, keeps hitbox/HUD/bubble
   alignment, and cancels on mouse move, state change, drag, mini mode, and DND.
@@ -318,92 +324,75 @@ Recommended all-platform checks:
 - Right-click Hide pet / Show pet still works; while hidden, a newly arriving
   permission request still shows a bubble, by design.
 - Settings -> About -> Check for updates completes without an error.
-- Update labels never show a duplicated prefix such as `vv1.2.0`.
+- Update labels never show a duplicated prefix such as `vv1.3.0`.
 - Telegram approval cards show the final outcome for decisions made on Telegram
   and for approvals resolved elsewhere.
 - Scan the mobile PWA pairing URL on a phone and confirm session cards appear.
 - Regenerate or reset the mobile token and confirm the phone can reconnect with
   the new token.
 
-Windows checks:
+**Windows sampling**
 
-- Required: run real packaged OpenCode 1.18.31 and 2.x sessions. Verify v1
+- run real packaged OpenCode 1.18.31 and 2.x sessions. Verify v1
   `plugin` and v2 `plugins` registration, one state stream and one permission
   request per interaction, Allow/Deny/Always decisions, interruption cleanup,
   compound-command warnings, and uninstall preservation. Include a host path
   with non-ASCII characters under code page 936 and confirm detection; for 2.x,
   also run `opencode service restart`. Record the exact 2.x version and any
   packaging differences from the macOS v2.0.15 source check.
-- Required: displace Claude's managed hooks as CC Switch can, then observe the
+- displace Claude's managed hooks as CC Switch can, then observe the
   Agents attention badge and reason for paused repair, repeated repair failure,
   or a missing script. Confirm the one-time tray notice on repair pause and a
   healthy badge after a verified repair.
-- Required: run a WSL agent session and confirm its PID is not probed on the
+- run a WSL agent session and confirm its PID is not probed on the
   Windows host or aliased to an unrelated local process.
-- Required: enable fullscreen auto-hide, enter a fullscreen application, and
+- enable fullscreen auto-hide, enter a fullscreen application, and
   send a new permission request. Local surfaces stay hidden; leaving fullscreen
   restores only requests still pending. Manual Hide pet keeps its separate
   behavior for new requests; remote approval and configured auto-close still work.
-- Required: cold-start the packaged app twice with a saved upgrade position;
-  the first rendered pet visual must appear at that position without using
-  "Bring Pet to Primary Display" / "将桌宠拉回主屏".
-- Required: fullscreen/borderless game or video app smoke. The pet should float
-  over the fullscreen app when overlay mode is on; clicking or dragging the pet
-  must not kick the app out of fullscreen.
-- Required: lock/sleep/resume or display wake smoke with low-power idle enabled;
-  eye tracking should recover after the renderer reports wake recovery.
-- Required: drag a folder onto the pet and confirm a terminal opens in that
+- drag a folder onto the pet and confirm a terminal opens in that
   directory.
-- Required: right-click New Session starts Claude Code without `0x800700c1`.
-- Required: prompt submission under Windows Terminal produces no visible
+- right-click New Session starts Claude Code without `0x800700c1`.
+- prompt submission under Windows Terminal produces no visible
   PowerShell flash; cloak/sleep/display-wake recovery restores the pet and tray
   icon without a transient size jump.
-- Recommended: focus jump targets the correct terminal.
-- Recommended: after restart, the pet restores its saved position and Keep size
+- focus jump targets the correct terminal.
+- after restart, the pet restores its saved position and Keep size
   across displays does not grow after DPI/display-scale changes.
 
-macOS checks:
+**macOS sampling**
 
-- Required when macOS hardware is available: manually install the signed v1.2.0
-  DMG over v1.1.0 once, preserving app data. Validate a signed A→B updater pair
-  from an update-capable build on each available architecture, including
-  Restart Now and Later/quit/reopen; record exact versions and asset hashes.
-  A source run or a mocked updater does not complete this gate.
-- Required when macOS hardware is available: toggle menu-bar and Dock visibility,
+- toggle menu-bar and Dock visibility,
   restart, and confirm both preferences persist and Settings can still regain focus.
-- Required when macOS hardware is available: test Dock left/right/bottom plus
+- test Dock left/right/bottom plus
   auto-hide and confirm physical-edge pinning stays on-screen across displays.
-- Required when macOS hardware is available: Ghostty cross-Space focus switches
+- Ghostty cross-Space focus switches
   to the target Space without yanking the Ghostty window to the current desktop.
-- Required when macOS hardware is available: answer a permission with
+- answer a permission with
   Ctrl+Shift+Y or Ctrl+Shift+N and confirm focus is not stolen back to the agent
   terminal.
-- Required when macOS hardware is available: while editing text in a permission
+- while editing text in a permission
   or elicitation bubble, the pet drops behind the input surface and the IME
   candidate window remains visible; ending edit restores stationary behavior.
-- Required when macOS hardware is available: put Clawd in the background, then
+- put Clawd in the background, then
   click Settings and Dashboard once each. The first click must reach the page.
-- Required when macOS hardware is available: restart Remote SSH monitoring
+- restart Remote SSH monitoring
   during a Codex Desktop thread and replay real turn-split rollouts. Confirm
   one card per thread, no invented idle row, and no finished turn revived as
   working. Record whether the full SSH deploy/tunnel/approval path was tested.
-- Recommended: jumping back to a session restores a minimized terminal window.
-- Recommended: dragging a folder onto the pet does not open a terminal and does
+- jumping back to a session restores a minimized terminal window.
+- dragging a folder onto the pet does not open a terminal and does
   not crash. This is intentionally disabled on macOS.
 
-Linux checks:
+**Linux sampling**
 
-- Required when Linux hardware is available: Wayland session launches
-  successfully and relaunches under XWayland when available; pet transparency
-  and positioning work.
-- Required when Linux hardware is available: MiMo JSONC install/uninstall keeps
+- MiMo JSONC install/uninstall keeps
   executable modes and comment-preserving writes correct on a POSIX filesystem.
-- Recommended for tmux users: focus jumps to the correct tmux pane.
+- focus jumps to the correct tmux pane.
 
-All required Windows items must pass before publishing the draft. Required macOS
-and Linux items must pass when those machines are available. If any required
-item fails, fix it and create a new draft release; do not publish a known-bad
-draft.
+Applicable required items must pass before publishing; fix a failed gate and
+create a new draft, and report unavailable hardware and deferred historical
+samples accurately in the release note.
 
 ## Retired Telegram Sidecar Guard
 

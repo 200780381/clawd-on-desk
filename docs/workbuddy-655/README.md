@@ -1,8 +1,34 @@
 # WorkBuddy / #655 review bundle
 
+> **Do not apply this patch directly.** `workbuddy-support.zip` is kept only as
+> a historical reference. The bundled `workbuddy-support.patch` diverges from
+> the shipped WorkBuddy integration in several material ways and must not be
+> applied to the current tree:
+>
+> - **PreToolUse allow (patch line 226):** the patch emits
+>   `{"decision":"allow"}`. The mainline `hooks/workbuddy-hook.js` only ever
+>   emits `{}`, because an explicit allow can bypass WorkBuddy's own permission
+>   UI (PR #618).
+> - **session_id fallback (patch line 262):** the patch falls back to
+>   `"default"` when `session_id` is missing. The mainline drops events that
+>   carry no `session_id`.
+> - **Permission registration (patch line 457 onward):** the patch registers a
+>   `PermissionRequest` hook. The mainline WorkBuddy integration never registers
+>   `/permission`; approvals stay inside WorkBuddy's native UI.
+> - **Author header:** the patch's `From:` line is
+>   `rullerzhou-afk <rullerzhou-afk@users.noreply.github.com>`, so applying it
+>   with `git am` would credit that account for the work.
+> - **Encoding:** the patch file is UTF-16LE with CRLF line endings and must be
+>   transcoded before any `git apply`.
+>
+> The mainline WorkBuddy integration is **state + Notification only**: it
+> reports state and notifications and deliberately leaves approval to
+> WorkBuddy.
+
 This directory contains the locally preserved WorkBuddy integration patch and
-the smallest runtime evidence available for issue #655. The branch is based on
-the current `origin/main` at `9367b8c3` (including #1014).
+the smallest runtime evidence available for issue #655. The branch was based on
+the then-current `origin/main` at `9367b8c3` (including #1014) when it was
+submitted; that baseline is now out of date.
 
 ## Included material
 

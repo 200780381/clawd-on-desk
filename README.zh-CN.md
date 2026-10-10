@@ -62,6 +62,7 @@ Clawd 住在你的桌面上，实时感知 AI 编程助手正在做什么。发�
 - **QwenWork（千问办公）** — 可选 hook-only / state-only command hooks，写入 `~/.QwenWorkCN/settings.json`（从 Settings → Agents 安装，或执行 `npm run install:qwenwork-hooks`，卸载用 `npm run uninstall:qwenwork-hooks`）；当前只支持 macOS / Windows 桌面端——[qwenwork.cn/download](https://qwenwork.cn/download) 没有 Linux 客户端，因此也不提供 WSL Pair。Phase 1 驱动动画与 Session HUD；`PermissionRequest` / `PermissionDenied` 仅作观察并映射为 `working`，hook stdout 恒为 `{}`，Clawd 不产生 allow/deny，权限唯一决策者是 QwenWork 原生流程。无 startup recovery：桌面主进程是长驻进程，不代表正在跑任务
 - **DeepSeek Harness** — 实验性集成，支持 DSH 的 web profile 与 DeepSeek Harness 桌面版（macOS / Windows），通过 Clawd 管理的 DSH 进程内插件工作。公开 session 事件按 session 顺序驱动 Clawd 状态，公开的阻塞式 `approval/request` 可显示 Allow Once / Deny 气泡；无决定时始终交还给 DSH 自己的审批流程（web 的 answerer，或桌面版自己的审批框）。`ask_user_question` 完全留在 DSH 原生 provider，Clawd 从不读取 DSH projection 存储。详见 [DeepSeek Harness 指南](docs/guides/dsh-setup.md)
 - **TraeCode (Trae CN)** — 实验性、仅状态同步的 hook 集成，写入 `~/.trae-cn/hooks.json`（从 Settings → Agents 安装，或执行 `npm run install:traecode-hooks`；卸载用 `npm run uninstall:traecode-hooks`）。需在 Trae 中手动开启 hooks（**Settings → Hooks → Enable**，运行模式选 **Sandbox**；见 [Trae 官方 hooks 文档](https://docs.trae.cn/ide/automate-actions-with-hooks)）。首版仅支持 Trae 中国版；Clawd 从首条提问推导会话标题，不接管权限，也没有 `SessionEnd`，关闭的会话由桌面端空闲超时清理。
+- **MiniMax Code** — 实验性、仅状态同步的本地插件，写入 `<MINIMAX_DATA_DIR 或 MAVIS_DATA_DIR 或 ~/.minimax>/plugins/clawd-state/`（从 Settings → Agents 安装，或执行 `npm run install:minimax-hooks`；卸载用 `npm run uninstall:minimax-hooks`）。支持 mcode CLI 与桌面应用，上报 10 个状态事件（含 `SessionEnd`）；每个 handler 仅有 1–10 秒执行上限，故不注册 `PermissionRequest`，stdout 恒为 `{}`，审批留在 MiniMax 原生流程。若未加载，请运行 `mcode plugin enable clawd-state@local` 或在插件面板启用；会话标题取首条提问并保持不变
 - **多 Agent 共存** — 多个 Agent 可同时运行，Clawd 独立追踪每个会话
 
 ### 动画与交互
@@ -367,6 +368,8 @@ Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 P
 <a href="https://github.com/gzx19990101"><img src="https://github.com/gzx19990101.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/ypjn"><img src="https://github.com/ypjn.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/jin-codes"><img src="https://github.com/jin-codes.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/LetitiaChan"><img src="https://github.com/LetitiaChan.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/sanzanazaman"><img src="https://github.com/sanzanazaman.png" width="50" style="border-radius:50%" /></a>
 
 ## 致谢
 
