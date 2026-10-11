@@ -1896,7 +1896,7 @@
     text.appendChild(preflightStatus);
     const picker = helpers.buildSegmentedRadio({
       id: "feishu-id-type",
-      ariaLabel: t("feishuApprovalApproverLabel"),
+      ariaLabel: t("feishuApprovalIdTypeLabel"),
       className: "feishu-approval-id-type",
       value: draft.idType,
       disabled: allFeishuControlsBlocked(),

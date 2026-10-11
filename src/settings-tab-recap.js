@@ -1335,6 +1335,9 @@
       onExit() {
         clearLoadingIndicator();
         clearInteraction();
+        // Bumping requestSeq drops an in-flight background refresh; queue it
+        // again so returning to Recap fetches the data it would have shown.
+        if (view.refreshInFlight) view.refreshQueued = true;
         view.requestSeq += 1;
         if (view.status === "loading") view.status = "idle";
         if (mountedHost) mountedHost.dispose();

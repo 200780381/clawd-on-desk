@@ -2862,6 +2862,31 @@ describe("settings renderer browser environment", () => {
     assert.equal(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-week");
   });
 
+  it("re-queues a background recap refresh that was dropped by leaving the page", async () => {
+    const queries = [];
+    const harness = loadRecapTabForTest({ queryRecap: (period) => {
+      const deferred = createDeferred();
+      queries.push(deferred);
+      if (queries.length === 1) deferred.resolve(sampleRecapView());
+      return deferred.promise;
+    } });
+    await harness.settle();
+    assert.equal(queries.length, 1);
+    harness.core.tabs.recap.applyDataChanged();
+    await harness.settle();
+    assert.equal(queries.length, 2);
+    harness.core.tabs.recap.onExit();
+    harness.core.state.activeTab = "general";
+    queries[1].resolve(sampleRecapView());
+    await harness.settle();
+    assert.equal(queries.length, 2);
+    harness.core.state.activeTab = "recap";
+    harness.content.innerHTML = "";
+    harness.core.tabs.recap.render(harness.content);
+    await harness.settle();
+    assert.equal(queries.length, 3);
+  });
+
   it("keeps Remote Approval chrome mounted while switching Channels and LAN", async () => {
     const harness = loadTelegramApprovalTabForTest();
     await Promise.resolve();
@@ -9601,6 +9626,39 @@ describe("settings renderer browser environment", () => {
     core.ops.clearMountedControls();
     assert.equal(buttons[0].eventListeners.click.length, 0);
     assert.equal(buttons[0].eventListeners.keydown.length, 0);
+  });
+
+  it("lets segmented radio and tab clicks reach document listeners unless a row opts out", () => {
+    const body = new FakeElement("body");
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const options = [{ value: "a", label: "A" }, { value: "b", label: "B" }];
+    const clickWithProbe = (button) => {
+      let stopped = false;
+      button.eventListeners.click[0]({ currentTarget: button, stopPropagation: () => { stopped = true; } });
+      return stopped;
+    };
+    const plain = core.helpers.buildSegmentedRadio({ value: "a", ariaLabel: "Plain", options, onChange: () => true });
+    const isolated = core.helpers.buildSegmentedRadio({
+      value: "a", ariaLabel: "Isolated", options, stopPropagation: true, onChange: () => true,
+    });
+    const tabs = core.helpers.buildTabs({
+      id: "probe-tabs",
+      ariaLabel: "Pages",
+      value: "a",
+      options,
+      onChange: () => true,
+    });
+    body.appendChild(plain.element);
+    body.appendChild(isolated.element);
+    body.appendChild(tabs.element);
+    assert.equal(clickWithProbe(plain.element.querySelectorAll("button")[1]), false);
+    assert.equal(clickWithProbe(isolated.element.querySelectorAll("button")[1]), true);
+    assert.equal(clickWithProbe(tabs.element.querySelectorAll("button")[1]), false);
   });
 
   it("restores segmented-control focus after a warning dialog closes", async () => {

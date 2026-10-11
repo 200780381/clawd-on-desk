@@ -963,7 +963,7 @@
       }
     }
     function onClick(event) {
-      event.stopPropagation();
+      if (config.stopPropagation === true) event.stopPropagation();
       if (disposed || event.currentTarget.disabled) return;
       focus(event.currentTarget.dataset.value);
       activate(event.currentTarget);
@@ -1127,7 +1127,9 @@
     }
 
     function onClick(event) {
-      event.stopPropagation();
+      // Opt-in only: a document-level click listener (e.g. the dropdown
+      // picker's outside-click close) must still see ordinary choice clicks.
+      if (config.stopPropagation === true) event.stopPropagation();
       const button = event && event.currentTarget;
       if (button) void selectValue(button.dataset.value);
     }

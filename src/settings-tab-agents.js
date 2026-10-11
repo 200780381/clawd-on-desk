@@ -2087,6 +2087,7 @@
       id: "codex-permission-mode",
       ariaLabel: t("rowCodexPermissionMode"),
       className: "codex-permission-mode-segmented",
+      stopPropagation: true,
       value: readers.readAgentPermissionMode(agent.id),
       disabled: !!disabled,
       pending: permissionModePending.has(agent.id),
@@ -2375,7 +2376,8 @@
       });
       if (!result || result.status !== "ok") {
         const msg = (result && result.message) || "unknown error";
-        helpers.setTextInputState(input, { invalid: true });
+        // A pending field is disabled and cannot take focus; clear it first.
+        helpers.setTextInputState(input, { pending: false, invalid: true });
         input.focus();
         ops.showToast(t("toastSaveFailed") + msg, { error: true });
         return result || { status: "error", message: msg };
@@ -2387,7 +2389,7 @@
       }
       return result;
     } catch (err) {
-      helpers.setTextInputState(input, { invalid: true });
+      helpers.setTextInputState(input, { pending: false, invalid: true });
       input.focus();
       ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
       return { status: "error", message: err && err.message };
