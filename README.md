@@ -237,7 +237,7 @@ Some things we'd like to explore in the future:
 
 ## Contributing
 
-Clawd on Desk is a community-driven project. Bug reports, feature ideas, and pull requests are all welcome — open an [issue](https://github.com/rullerzhou-afk/clawd-on-desk/issues) to discuss or submit a PR directly.
+Clawd on Desk is a community-driven project. Bug reports, feature ideas, and pull requests are all welcome — open an [issue](https://github.com/rullerzhou-afk/clawd-on-desk/issues) to discuss or submit a PR directly. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run from source, add a translation, or integrate a new agent.
 
 ### Maintainers
 
