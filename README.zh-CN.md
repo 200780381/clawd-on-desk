@@ -231,7 +231,7 @@ node scripts/validate-theme.js path/to/your-theme
 
 ## 参与贡献
 
-Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 PR —— 在 [Issues](https://github.com/rullerzhou-afk/clawd-on-desk/issues) 里聊或直接提交 PR。
+Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 PR —— 在 [Issues](https://github.com/rullerzhou-afk/clawd-on-desk/issues) 里聊或直接提交 PR。从源码运行、加翻译、接入新 agent 的做法见 [参与贡献指南](CONTRIBUTING.zh-CN.md)。
 
 ### 维护者
 
