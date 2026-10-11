@@ -138,6 +138,8 @@ function normalizeApprovalPayload(payload) {
     summary: String((payload && payload.summary) || "").trim(),
     suggestions,
     canOfferSessionTrust: payload && payload.canOfferSessionTrust === true,
+    // Absent means the agent has a native terminal surface to fall back to.
+    canOfferTerminal: !payload || payload.canOfferTerminal !== false,
   };
 }
 
@@ -422,7 +424,9 @@ function buildApprovalCard(payload, options = {}, context = {}) {
   ];
   // DSH web has no originating terminal surface. Its no-decision path returns
   // to the browser answerer, so a remote "Go to terminal" action is misleading.
-  if (normalized.agentId !== "deepseek-harness") {
+  // The canOfferTerminal flag carries that over the real (non-structured)
+  // payload; the agentId check still covers callers that send a structured one.
+  if (normalized.canOfferTerminal !== false && normalized.agentId !== "deepseek-harness") {
     actions.push(button(ctx.t("feishuCardButtonTerminal"), { requestId, decision: "terminal" }, "default"));
   }
   actions.push(...normalized.suggestions.map((entry) => (
@@ -1681,6 +1685,7 @@ class FeishuApprovalClient {
     if (!this.isEnabled()) return Promise.resolve(null);
     const requestId = `fs_${crypto.randomBytes(12).toString("hex")}`;
     const signal = options.signal;
+    const onDelivered = typeof options.onDelivered === "function" ? options.onDelivered : null;
     if (signal && signal.aborted) return Promise.resolve(null);
 
     return new Promise((resolve, reject) => {
@@ -1732,7 +1737,18 @@ class FeishuApprovalClient {
         .then((messageId) => {
           entry.messageId = messageId || "";
           const current = this.pending.get(requestId);
-          if (current) current.messageId = messageId || "";
+          if (current) {
+            current.messageId = messageId || "";
+            if (messageId && !(signal && signal.aborted) && onDelivered) {
+              try { onDelivered({ messageId }); } catch (err) {
+                try {
+                  this.log("warn", "delivery callback failed", {
+                    error: err && err.message ? err.message : String(err),
+                  });
+                } catch {}
+              }
+            }
+          }
           return current || entry;
         })
         .catch((err) => {
@@ -1754,6 +1770,7 @@ class FeishuApprovalClient {
     if (!this.isEnabled()) return Promise.resolve(null);
     const requestId = `fsq_${crypto.randomBytes(12).toString("hex")}`;
     const signal = options.signal;
+    const onDelivered = typeof options.onDelivered === "function" ? options.onDelivered : null;
     if (signal && signal.aborted) return Promise.resolve(null);
 
     return new Promise((resolve) => {
@@ -1783,7 +1800,18 @@ class FeishuApprovalClient {
         .then((messageId) => {
           entry.messageId = messageId || "";
           const current = this.pending.get(requestId);
-          if (current) current.messageId = messageId || "";
+          if (current) {
+            current.messageId = messageId || "";
+            if (messageId && !(signal && signal.aborted) && onDelivered) {
+              try { onDelivered({ messageId }); } catch (err) {
+                try {
+                  this.log("warn", "elicitation delivery callback failed", {
+                    error: err && err.message ? err.message : String(err),
+                  });
+                } catch {}
+              }
+            }
+          }
           return current || entry;
         })
         .catch((err) => {

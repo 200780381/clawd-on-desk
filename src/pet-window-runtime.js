@@ -113,6 +113,7 @@ function createPetWindowRuntime(options = {}) {
   const isWin = !!options.isWin;
   const isMac = !!options.isMac;
   const isLinux = !!options.isLinux;
+  const windowsHitWindowFocusable = isWin && options.windowsHitWindowFocusable === true;
   const linuxWindowType = options.linuxWindowType;
   const topmostLevel = options.topmostLevel;
   const getRenderWindow = options.getRenderWindow || (() => null);
@@ -124,6 +125,10 @@ function createPetWindowRuntime(options = {}) {
   const getCurrentState = options.getCurrentState || (() => null);
   const getCurrentSvg = options.getCurrentSvg || (() => null);
   const getCurrentHitBox = options.getCurrentHitBox || (() => null);
+  const getDisplayedVisual = options.getDisplayedVisual || (() => null);
+  const getCurrentAccessoryPayloads = options.getCurrentAccessoryPayloads
+    || (() => ({ head: options.getCurrentAccessoryPayload ? options.getCurrentAccessoryPayload() : null }));
+  const getAccessoryMirrored = options.getAccessoryMirrored || (() => false);
   const getMiniMode = options.getMiniMode || (() => false);
   const getMiniTransitioning = options.getMiniTransitioning || (() => false);
   const getMiniContainedSeam = options.getMiniContainedSeam || (() => null);
@@ -138,6 +143,12 @@ function createPetWindowRuntime(options = {}) {
   const repositionFloatingBubbles = options.repositionFloatingBubbles || noop;
   const showFloatingSurfacesForPet = options.showFloatingSurfacesForPet || noop;
   const hideFloatingSurfacesForPet = options.hideFloatingSurfacesForPet || noop;
+  const setFloatingSurfacesFullscreenSuppressed = options.setFloatingSurfacesFullscreenSuppressed || noop;
+  // #935: every manual show (setPetHidden(false)) reports user intent here so
+  // topmost-runtime's fullscreen auto-hide sync can latch its override — even
+  // when the show lands as a visible no-op (a stale menu item clicked after
+  // the sync already auto-restored the pet).
+  const noteManualPetShow = options.noteManualPetShow || noop;
   const syncSessionHudVisibilityAndBubbles = options.syncSessionHudVisibilityAndBubbles || noop;
   const syncPermissionShortcuts = options.syncPermissionShortcuts || noop;
   const buildTrayMenu = options.buildTrayMenu || noop;
@@ -189,6 +200,11 @@ function createPetWindowRuntime(options = {}) {
   // it (see the call site below).
   const notifyMiniTopologyChangedDuringTransition =
     options.notifyMiniTopologyChangedDuringTransition || noop;
+  // Invoked by releaseStrandedDragLock() on every actual release, so main can
+  // run the full cross-process cleanup (renderer force-drag-release push,
+  // idle / mouse-over resets) from each recovery entry instead of every
+  // caller clearing main-side state on its own.
+  const onStrandedDragLockReleased = options.onStrandedDragLockReleased || null;
   const exitMiniMode = options.exitMiniMode || noop;
   const shouldReloadAfterRenderProcessGone = createRenderProcessGoneReloadGuard(options);
 
@@ -205,9 +221,12 @@ function createPetWindowRuntime(options = {}) {
 
   const petGeometryMain = createPetGeometryMain({
     getActiveTheme,
+    getDisplayedVisual,
     getCurrentState,
     getCurrentSvg,
     getCurrentHitBox,
+    getCurrentAccessoryPayloads,
+    getAccessoryMirrored,
     getMiniMode,
     getMiniPeekOffset,
   });
@@ -327,6 +346,11 @@ function createPetWindowRuntime(options = {}) {
   let hitInputIgnoreApplied = null; // null = never explicitly applied yet
 
   let petHidden = false;
+  // #935: second visibility layer under topmost-runtime's fullscreen auto-hide
+  // sync. Runtime-only (never persisted — a crash while auto-hidden must not
+  // strand the pet invisible on relaunch). Effective visibility is
+  // petHidden || fullscreenAutoHidden; the manual flag stays the user's.
+  let fullscreenAutoHidden = false;
   let dragLocked = false;
   let dragSnapshot = null;
   let hitShapeWidth = 0;
@@ -1340,40 +1364,122 @@ function createPetWindowRuntime(options = {}) {
     if (isLiveWindow(hitWin)) hitWin.hide();
   }
 
-  // Idempotent visibility setter. Returns { applied, deferred, changed }:
-  //  - no render window  -> { applied:false, deferred:false, changed:false }
-  //  - mini transitioning -> { applied:false, deferred:true,  changed:false } (petHidden untouched)
-  //  - already in target  -> { applied:true,  deferred:false, changed:false }
-  //  - state flipped      -> { applied:true,  deferred:false, changed:true  }
-  function setPetHidden(hidden) {
-    const target = !!hidden;
-    const win = getRenderWindow();
-    if (!isLiveWindow(win)) return { applied: false, deferred: false, changed: false };
-    if (getMiniTransitioning()) return { applied: false, deferred: true, changed: false };
-    if (target === petHidden) return { applied: true, deferred: false, changed: false };
-    if (petHidden) {
-      // becoming visible
-      showPetWindows();
-      showFloatingSurfacesForPet();
-      reapplyMacVisibility();
-      petHidden = false;
-    } else {
-      // becoming hidden
-      hidePetWindows();
-      hideFloatingSurfacesForPet();
-      petHidden = true;
+  function isPetEffectivelyHidden() {
+    return petHidden || fullscreenAutoHidden;
+  }
+
+  function isFullscreenAutoHidden() {
+    return fullscreenAutoHidden;
+  }
+
+  // Shared tail of both visibility setters. Window show/hide fires only when
+  // the EFFECTIVE state crossed an edge (so stacking a second hide reason on
+  // an already-hidden pet is a visible no-op, and removing one reason while
+  // the other still holds keeps the pet hidden); the downstream syncs run on
+  // any layer change — applyHitInputState and the HUD/menu rebuilds all read
+  // the effective state themselves and dedupe internally.
+  function applyVisibilityLayerChange(prevEffective, options = {}) {
+    const nextEffective = isPetEffectivelyHidden();
+    const crossedEdge = nextEffective !== prevEffective;
+    if (crossedEdge) {
+      if (nextEffective) {
+        hidePetWindows();
+        if (options.syncFloatingSurfaces !== false) hideFloatingSurfacesForPet();
+      } else {
+        showPetWindows();
+        if (options.syncFloatingSurfaces !== false) showFloatingSurfacesForPet();
+        reapplyMacVisibility();
+      }
     }
-    // I5: petHidden is one of applyHitInputState()'s four OR-ed reasons.
+    // I5: effective hidden is one of applyHitInputState()'s OR-ed reasons.
     applyHitInputState();
     syncSessionHudVisibilityAndBubbles();
     syncPermissionShortcuts();
     buildTrayMenu();
     buildContextMenu();
-    return { applied: true, deferred: false, changed: true };
+    return crossedEdge;
+  }
+
+  // Idempotent visibility setter. Returns { applied, deferred, changed }:
+  //  - no render window  -> { applied:false, deferred:false, changed:false }
+  //  - mini transitioning -> { applied:false, deferred:true,  changed:false } (petHidden untouched)
+  //  - already in target  -> { applied:true,  deferred:false, changed:false }
+  //  - state flipped      -> { applied:true,  deferred:false, changed:true  }
+  // `changed` reports whether the pet's on-screen visibility actually flipped,
+  // which with the #935 auto-hide layer stacked on top is not always the same
+  // as the manual flag flipping.
+  function setPetHidden(hidden) {
+    const target = !!hidden;
+    const win = getRenderWindow();
+    if (!isLiveWindow(win)) return { applied: false, deferred: false, changed: false };
+    // Preserve the user's explicit Show intent even if a mini transition makes
+    // the visibility write wait for a later fullscreen poll. In the common
+    // auto-hidden case the manual layer is already visible, so the retry only
+    // needs to lift the fullscreen layer once the transition completes.
+    if (!target) noteManualPetShow();
+    if (getMiniTransitioning()) return { applied: false, deferred: true, changed: false };
+    // #935: a manual show also clears the fullscreen auto-hide — "show" must
+    // mean show NOW, not "show once the fullscreen app exits". topmost-
+    // runtime's sync observes the cleared flag and holds off re-hiding for the
+    // rest of that fullscreen episode.
+    const clearAutoHide = !target && fullscreenAutoHidden;
+    if (target === petHidden && !clearAutoHide) {
+      if (!target) reassertWinTopmost();
+      return { applied: true, deferred: false, changed: false };
+    }
+    const prevEffective = isPetEffectivelyHidden();
+    petHidden = target;
+    if (clearAutoHide) {
+      fullscreenAutoHidden = false;
+      setFloatingSurfacesFullscreenSuppressed(false);
+    }
+    const changed = applyVisibilityLayerChange(prevEffective);
+    // Manual hide is a user-invoked recovery action: a lock stranded while the
+    // pet was hidden would keep syncHitWin() deferred after it is shown again.
+    // Nothing meaningful can be dragged while hidden, so release on the flip.
+    if (target && changed) releaseStrandedDragLock();
+    // showInactive restores native visibility but not necessarily the topmost
+    // band an exclusive fullscreen HWND displaced. The override is already
+    // armed above, so reassert can surface the pet immediately even when the
+    // legacy fullscreenOverlay pref is off; do not wait for the 5s watchdog.
+    if (!target && !isPetEffectivelyHidden()) reassertWinTopmost();
+    // A manual hide placed while the fullscreen layer already owns effective
+    // visibility still needs to capture its own permission cutoff and suspend
+    // ordinary floating notices. That manual state survives fullscreen exit.
+    if (target && !changed) hideFloatingSurfacesForPet();
+    return { applied: true, deferred: false, changed };
+  }
+
+  // #935: topmost-runtime's fullscreen auto-hide writer. Same contract and
+  // guards as setPetHidden, acting on the auto layer only — it never touches
+  // the manual flag, so a pet the user hid stays hidden when the auto-hide
+  // lifts, and the tray/context menus keep reflecting the user's choice.
+  function setFullscreenAutoHidden(hidden, fullscreenObservation) {
+    const target = !!hidden;
+    const win = getRenderWindow();
+    if (!isLiveWindow(win)) return { applied: false, deferred: false, changed: false };
+    if (getMiniTransitioning()) return { applied: false, deferred: true, changed: false };
+    if (target === fullscreenAutoHidden) return { applied: true, deferred: false, changed: false };
+    const prevEffective = isPetEffectivelyHidden();
+    fullscreenAutoHidden = target;
+    const changed = applyVisibilityLayerChange(prevEffective, { syncFloatingSurfaces: false });
+    setFloatingSurfacesFullscreenSuppressed(target);
+    // Exiting fullscreen can leave showInactive windows visible but displaced
+    // from the topmost band until the 5s watchdog runs. Restore the band now,
+    // using the focus poll's already-known observation so this path does not
+    // perform a second native foreground probe in the same tick.
+    if (!target && changed && !isPetEffectivelyHidden()) {
+      if (fullscreenObservation !== undefined) reassertWinTopmost(fullscreenObservation);
+      else reassertWinTopmost();
+    }
+    return { applied: true, deferred: false, changed };
   }
 
   function togglePetVisibility() {
-    return setPetHidden(!petHidden);
+    // #935: toggle what the user SEES. From an auto-hidden pet one toggle
+    // shows it (setPetHidden(false) clears the auto layer); without the auto
+    // layer this is the pre-#935 manual flip.
+    return setPetHidden(!isPetEffectivelyHidden());
   }
 
   // ── #525: self-healing for cloaked-yet-supposedly-visible windows ──
@@ -1392,7 +1498,7 @@ function createPetWindowRuntime(options = {}) {
 
   function recoverIfCloaked() {
     if (!cloakInspector || !cloakInspector.available) return "unavailable";
-    if (petHidden) return "hidden";
+    if (isPetEffectivelyHidden()) return "hidden";
     if (getMiniTransitioning() || isMiniAnimating() || dragLocked) return "busy";
     if (settingsSizePreviewSyncFrozen) return "frozen";
     if (now() < cloakCooldownUntil) return "backoff";
@@ -1463,7 +1569,7 @@ function createPetWindowRuntime(options = {}) {
     if (!isWin) return "unsupported";
     const win = getRenderWindow();
     if (!isLiveWindow(win)) return "no-window";
-    if (petHidden) return "hidden";
+    if (isPetEffectivelyHidden()) return "hidden";
     if (getMiniTransitioning() || isMiniAnimating() || dragLocked) return "busy";
     if (settingsSizePreviewSyncFrozen) return "frozen";
 
@@ -1494,6 +1600,11 @@ function createPetWindowRuntime(options = {}) {
     if (!isLiveWindow(win)) return;
     if (getMiniMode() || getMiniTransitioning()) return;
 
+    // This action is a documented escape hatch for a stranded input window;
+    // with the lock held, syncHitWin() would defer and the input window would
+    // stay behind while the pet moves. Release before moving.
+    releaseStrandedDragLock();
+
     const workArea = getPrimaryWorkAreaFallback();
     const size = getEffectiveCurrentPixelSize(workArea);
     const bounds = {
@@ -1507,7 +1618,7 @@ function createPetWindowRuntime(options = {}) {
     syncHitWin();
     repositionFloatingBubbles();
 
-    if (petHidden) {
+    if (isPetEffectivelyHidden()) {
       togglePetVisibility();
     } else {
       showPetWindows();
@@ -1758,7 +1869,7 @@ function createPetWindowRuntime(options = {}) {
   function applyHitInputState(hitWinOverride) {
     const hitWin = hitWinOverride || getHitWindow();
     if (!isLiveWindow(hitWin) || typeof hitWin.setIgnoreMouseEvents !== "function") return;
-    const ignore = hitGeometrySuppressed || petHidden
+    const ignore = hitGeometrySuppressed || isPetEffectivelyHidden()
       || settingsSizePreviewIgnoringHit || imeEditingPetDodge;
     if (ignore === hitInputIgnoreApplied) return;
     hitWin.setIgnoreMouseEvents(ignore);
@@ -1781,6 +1892,17 @@ function createPetWindowRuntime(options = {}) {
     if (hitConfirmTimer) { clearTimeoutFn(hitConfirmTimer); hitConfirmTimer = null; }
   }
 
+  // What syncHitWin() reports back. "deferred" is a normal outcome — a drag is
+  // holding the pointer, the windows are not up yet, or the rect is a
+  // transient sliver — and callers that care about the new geometry should
+  // retry rather than warn. "failed" means the rect could not be resolved at
+  // all; with today's guards that is unreachable (every clip step returns a
+  // rect, and bounds are non-null once the windows are live), so it is defence
+  // in depth for callers that inject their own sync, not a live path.
+  const APPLIED_HIT_SYNC = Object.freeze({ applied: true, deferred: false });
+  const DEFERRED_HIT_SYNC = Object.freeze({ applied: false, deferred: true });
+  const FAILED_HIT_SYNC = Object.freeze({ applied: false, deferred: false });
+
   // syncHitWin() is the ONLY caller that needs the full I5 pipeline in this
   // exact order (§4.3 point 7: outward clip, THEN internal-seam clip) — it
   // calls petGeometryMain.getHitRectScreen() directly (bypassing the exposed
@@ -1790,13 +1912,13 @@ function createPetWindowRuntime(options = {}) {
   function syncHitWin() {
     const hitWin = getHitWindow();
     const win = getRenderWindow();
-    if (!isLiveWindow(hitWin) || !isLiveWindow(win)) return;
+    if (!isLiveWindow(hitWin) || !isLiveWindow(win)) return DEFERRED_HIT_SYNC;
     // Keep the captured pointer stable while dragging. Repositioning the input
     // window mid-drag can break pointer capture on Windows.
-    if (dragLocked) return;
+    if (dragLocked) return DEFERRED_HIT_SYNC;
     const bounds = getPetWindowBounds();
     let hit = petGeometryMain.getHitRectScreen(bounds);
-    if (!hit) return;
+    if (!hit) return FAILED_HIT_SYNC;
 
     const physical = getPhysicalRenderBounds();
     hit = applyOutwardClip(hit, physical);
@@ -1812,7 +1934,7 @@ function createPetWindowRuntime(options = {}) {
       hit = intersectHitWithWorkArea(hit, hitWa, clampBounds);
     }
     hit = clipHitRectToMiniSeam(hit);
-    if (!hit) return;
+    if (!hit) return FAILED_HIT_SYNC;
 
     const x = Math.round(hit.left);
     const y = Math.round(hit.top);
@@ -1836,7 +1958,9 @@ function createPetWindowRuntime(options = {}) {
       applyHitInputState();
       repositionSessionHud();
       syncImeEditingPetDodge();
-      return;
+      // Nothing was written: this rect is a transient sliver. Callers that
+      // need the new geometry should retry, not warn.
+      return DEFERRED_HIT_SYNC;
     }
 
     const target = { x, y, width: w, height: h };
@@ -1887,6 +2011,7 @@ function createPetWindowRuntime(options = {}) {
     // change hitboxes without moving the window, so the overlap answer can
     // flip right here. Cheap + edge-triggered inside.
     syncImeEditingPetDodge();
+    return APPLIED_HIT_SYNC;
   }
 
   // §4.3.11's hit-side reconcile. Debounced on its own (longer) quiet period
@@ -2166,6 +2291,7 @@ function createPetWindowRuntime(options = {}) {
     }
     const initialHitWindowBounds = getInitialHitWindowBounds();
     const hitWin = new BrowserWindow({
+      ...(isWin ? { show: false } : {}),
       width: initialHitWindowBounds.width,
       height: initialHitWindowBounds.height,
       x: initialHitWindowBounds.x,
@@ -2180,9 +2306,11 @@ function createPetWindowRuntime(options = {}) {
       enableLargerThanScreen: true,
       ...(isLinux ? { type: linuxWindowType } : {}),
       ...(isMac ? { type: "panel", roundedCorners: false } : {}),
-      // KEY EXPERIMENT: allow activation to avoid WS_EX_NOACTIVATE input
-      // routing bugs. Linux keeps the old non-focusable behavior.
-      focusable: !isLinux,
+      // Windows normally starts with Electron activation disabled. The native
+      // controller installs the click-delivery guard and toggles only
+      // WS_EX_NOACTIVATE. If setup is unavailable, retain the legacy focusable
+      // path so desktop click/drag still works.
+      focusable: isWin ? windowsHitWindowFocusable : !isLinux,
       webPreferences: {
         preload: optionsArg.preloadPath,
         backgroundThrottling: false,
@@ -2201,6 +2329,10 @@ function createPetWindowRuntime(options = {}) {
     // window until createHitWindow() returns and the caller assigns it.
     applyHitInputState(hitWin);
     if (isMac) hitWin.setFocusable(false);
+    if (isWin && typeof optionsArg.prepareActivation === "function") {
+      const prepared = optionsArg.prepareActivation(hitWin);
+      if (prepared === false && !windowsHitWindowFocusable) hitWin.setFocusable(true);
+    }
     hitWin.showInactive();
     keepOutOfTaskbar(hitWin);
     if (isWin) hitWin.setAlwaysOnTop(true, topmostLevel);
@@ -2232,6 +2364,22 @@ function createPetWindowRuntime(options = {}) {
     const wasLocked = dragLocked;
     dragLocked = next;
     if (wasLocked && !next) releaseReconcileProtection();
+  }
+
+  // A drag lock whose closing mouse-up was swallowed (UAC secure desktop, RDP
+  // reconnect, fullscreen transition) strands dragLocked=true. While it is
+  // stranded, syncHitWin() defers forever — the input window freezes at its
+  // old rect while the render window moves — and recoverIfCloaked() reports
+  // "busy". User-invoked recovery actions therefore release through here
+  // before moving or resyncing. Collateral for a genuinely live drag is
+  // bounded: dragMove() no-ops until the gesture's own pointerup completes the
+  // handshake (drag-lock(false) is idempotent).
+  function releaseStrandedDragLock() {
+    if (!dragLocked) return false;
+    setDragLocked(false);
+    clearDragSnapshot();
+    if (typeof onStrandedDragLockReleased === "function") onStrandedDragLockReleased();
+    return true;
   }
 
   function isDragLocked() {
@@ -2359,6 +2507,10 @@ function createPetWindowRuntime(options = {}) {
     // hitWin.setIgnoreMouseEvents() directly.
     settingsSizePreviewIgnoringHit = true;
     applyHitInputState();
+  }
+
+  function isSettingsSizePreviewActive() {
+    return settingsSizePreviewSyncFrozen;
   }
 
   function endSettingsSizePreviewProtection() {
@@ -2530,7 +2682,10 @@ function createPetWindowRuntime(options = {}) {
     applyPetWindowBounds,
     applyPetWindowPosition,
     isPetHidden,
+    isPetEffectivelyHidden,
     setPetHidden,
+    setFullscreenAutoHidden,
+    isFullscreenAutoHidden,
     togglePetVisibility,
     recoverIfCloaked,
     recoverVisiblePetAfterRendererLoad,
@@ -2554,11 +2709,13 @@ function createPetWindowRuntime(options = {}) {
     reloadWindowWebContents: reloadRuntimeWindowWebContents,
     setDragLocked,
     isDragLocked,
+    releaseStrandedDragLock,
     beginDragSnapshot,
     clearDragSnapshot,
     moveWindowForDrag,
     resolveStartupPlacement,
     beginSettingsSizePreviewProtection,
+    isSettingsSizePreviewActive,
     endSettingsSizePreviewProtection,
     syncFloatingWindowsAfterPetBoundsChange,
     handleDisplayMetricsChanged,

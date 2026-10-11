@@ -7,6 +7,15 @@ function requiredDependency(value, name) {
   return value;
 }
 
+function isTrustedMainFrameEvent(event, webContents) {
+  if (!event || !webContents || event.sender !== webContents) return false;
+  try {
+    return !!event.senderFrame && event.senderFrame === webContents.mainFrame;
+  } catch {
+    return false;
+  }
+}
+
 function registerPetInteractionIpc(options = {}) {
   const ipcMain = requiredDependency(options.ipcMain, "ipcMain");
   const showContextMenu = requiredDependency(options.showContextMenu, "showContextMenu");
@@ -16,6 +25,9 @@ function registerPetInteractionIpc(options = {}) {
   const getCurrentState = requiredDependency(options.getCurrentState, "getCurrentState");
   const getCurrentSvg = requiredDependency(options.getCurrentSvg, "getCurrentSvg");
   const sendToRenderer = requiredDependency(options.sendToRenderer, "sendToRenderer");
+  const requestDragReaction = options.requestDragReaction || null;
+  const requestClickReaction = options.requestClickReaction || null;
+  const refreshIdleVisualAfterDrag = options.refreshIdleVisualAfterDrag || (() => {});
   const recoverVisiblePetAfterRendererLoad = requiredDependency(
     options.recoverVisiblePetAfterRendererLoad,
     "recoverVisiblePetAfterRendererLoad"
@@ -60,6 +72,9 @@ function registerPetInteractionIpc(options = {}) {
     options.setLowPowerIdlePaused,
     "setLowPowerIdlePaused"
   );
+  const setAccessoryMirror = options.setAccessoryMirror || (() => {});
+  const settleVisual = options.settleVisual || (() => false);
+  const syncDisplayedVisualGeometry = options.syncDisplayedVisualGeometry || (() => {});
   // #640: the editing-overlap dodge defers its hit-window click-through write
   // while a drag is in flight; drag-lock release must re-run the sync so the
   // state the drag ended in (overlapping or not) gets applied.
@@ -80,6 +95,7 @@ function registerPetInteractionIpc(options = {}) {
   on("show-context-menu", showContextMenu);
   on("drag-move", () => moveWindowForDrag());
   on("pet-visual-ready", (event) => recoverVisiblePetAfterRendererLoad(event));
+  on("pet-visual-settled", (event, payload) => settleVisual(event, payload));
 
   on("pause-cursor-polling", () => {
     setIdlePaused(true);
@@ -92,6 +108,12 @@ function registerPetInteractionIpc(options = {}) {
   on("low-power-idle-paused", (_event, paused) => {
     setLowPowerIdlePaused(!!paused);
   });
+  // The renderer is the only side that knows whether the accessory ended up
+  // mirrored (mini edge flip composed with the asset-direction flip). Hit
+  // geometry consumes this instead of predicting it.
+  on("accessory-mirror", (_event, mirrored) => {
+    setAccessoryMirror(!!mirrored);
+  });
 
   on("drag-lock", (_event, locked) => {
     setDragLocked(!!locked);
@@ -102,16 +124,20 @@ function registerPetInteractionIpc(options = {}) {
     } else {
       clearDragSnapshot();
       syncHitWin();
+      syncDisplayedVisualGeometry();
       syncImeEditingPetDodge();
     }
   });
 
   on("start-drag-reaction", (_event, direction) => {
-    sendToRenderer("start-drag-reaction", direction === "left" || direction === "right" ? direction : null);
+    const normalized = direction === "left" || direction === "right" ? direction : null;
+    if (requestDragReaction) requestDragReaction(normalized);
+    else sendToRenderer("start-drag-reaction", normalized);
   });
   on("end-drag-reaction", () => sendToRenderer("end-drag-reaction"));
   on("play-click-reaction", (_event, svg, duration) => {
-    sendToRenderer("play-click-reaction", svg, duration);
+    if (requestClickReaction) requestClickReaction(svg, duration);
+    else sendToRenderer("play-click-reaction", svg, duration);
   });
 
   on("drag-end", () => {
@@ -130,7 +156,9 @@ function registerPetInteractionIpc(options = {}) {
           reassertWinTopmost();
           scheduleHwndRecovery();
           syncHitWin();
+          syncDisplayedVisualGeometry();
           repositionFloatingBubbles();
+          refreshIdleVisualAfterDrag();
         }
       }
     } finally {
@@ -218,5 +246,6 @@ function registerPetInteractionIpc(options = {}) {
 }
 
 module.exports = {
+  isTrustedMainFrameEvent,
   registerPetInteractionIpc,
 };

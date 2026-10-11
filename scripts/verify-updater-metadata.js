@@ -4,6 +4,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const zlib = require("node:zlib");
 
 function parseScalar(value) {
   const trimmed = String(value || "").trim();
@@ -75,6 +76,8 @@ function validateContractShape(metadata, contract, expectedVersion) {
     ]);
   } else if (contract === "mac") {
     expectedUrls = new Set([
+      `Clawd-on-Desk-${expectedVersion}-x64.zip`,
+      `Clawd-on-Desk-${expectedVersion}-arm64.zip`,
       `Clawd-on-Desk-${expectedVersion}-x64.dmg`,
       `Clawd-on-Desk-${expectedVersion}-arm64.dmg`,
     ]);
@@ -99,12 +102,14 @@ function validateContractShape(metadata, contract, expectedVersion) {
       errors.push("latest.yml top-level path must point at the x64 installer");
     }
   } else if (contract === "mac") {
-    if (urls.length !== 2 || !urls.some((url) => /-x64\.dmg$/i.test(url)) ||
-        !urls.some((url) => /-arm64\.dmg$/i.test(url)) || urls.some((url) => /\.zip$/i.test(url))) {
-      errors.push("latest-mac.yml must list exactly the x64 and arm64 DMGs without a zip entry");
+    if (urls.length !== 4 || !urls.some((url) => /-x64\.zip$/i.test(url)) ||
+        !urls.some((url) => /-arm64\.zip$/i.test(url)) ||
+        !urls.some((url) => /-x64\.dmg$/i.test(url)) ||
+        !urls.some((url) => /-arm64\.dmg$/i.test(url))) {
+      errors.push("latest-mac.yml must list exactly the x64 and arm64 ZIPs and DMGs");
     }
-    if (!/-x64\.dmg$/i.test(String(metadata.path || ""))) {
-      errors.push("latest-mac.yml top-level path must point at the x64 DMG");
+    if (String(metadata.path || "") !== `Clawd-on-Desk-${expectedVersion}-x64.zip`) {
+      errors.push("latest-mac.yml top-level path must point at the exact-version x64 ZIP");
     }
   } else if (contract === "linux") {
     const appImage = metadata.files.find((entry) => /-x86_64\.AppImage$/.test(String(entry.url || "")));
@@ -133,6 +138,7 @@ function verifyUpdaterMetadata({ metadataPath, artifactRoot, contract, expectedV
   const metadata = parseUpdaterYaml(fs.readFileSync(resolvedMetadata, "utf8"));
   const errors = validateContractShape(metadata, contract, expectedVersion);
   const files = [];
+  const auxiliaryFiles = [];
 
   for (const entry of metadata.files) {
     const url = String(entry.url || "");
@@ -152,6 +158,34 @@ function verifyUpdaterMetadata({ metadataPath, artifactRoot, contract, expectedV
     files.push({ url, path: filename, size: actualSize, sha512: actualSha512 });
   }
 
+  if (contract === "mac") {
+    for (const arch of ["x64", "arm64"]) {
+      const url = `Clawd-on-Desk-${expectedVersion}-${arch}.zip.blockmap`;
+      const filename = path.join(resolvedArtifacts, url);
+      if (!fs.existsSync(filename) || !fs.statSync(filename).isFile()) {
+        errors.push(`Updater blockmap does not exist: ${url}`);
+        continue;
+      }
+      const size = fs.statSync(filename).size;
+      if (size <= 0) {
+        errors.push(`Updater blockmap is empty: ${url}`);
+        continue;
+      }
+      let blockmap;
+      try {
+        blockmap = JSON.parse(zlib.gunzipSync(fs.readFileSync(filename)).toString("utf8"));
+      } catch (err) {
+        errors.push(`Updater blockmap is not valid gzip JSON: ${url}`);
+        continue;
+      }
+      if (!blockmap || typeof blockmap.version !== "string" || !Array.isArray(blockmap.files)) {
+        errors.push(`Updater blockmap has an invalid structure: ${url}`);
+        continue;
+      }
+      auxiliaryFiles.push({ url, path: filename, size });
+    }
+  }
+
   const topLevel = metadata.files.find((entry) => entry.url === metadata.path);
   if (!topLevel) errors.push(`Top-level updater path is absent from files[]: ${metadata.path || "<empty>"}`);
   else {
@@ -165,8 +199,9 @@ function verifyUpdaterMetadata({ metadataPath, artifactRoot, contract, expectedV
     metadataPath: resolvedMetadata,
     artifactRoot: resolvedArtifacts,
     files,
+    auxiliaryFiles,
     errors,
-    summary: { files: files.length, errors: errors.length },
+    summary: { files: files.length, auxiliaryFiles: auxiliaryFiles.length, errors: errors.length },
   };
 }
 

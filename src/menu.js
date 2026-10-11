@@ -5,10 +5,12 @@ const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon } = require("./tray-flash-icon");
 const { createMacDockVisibilityCoordinator } = require("./mac-dock-visibility");
+const { resolveRuntimeDockIconPolicy } = require("./mac-dock-icon-runtime");
 
-const isMac = process.platform === "darwin";
-const isWin = process.platform === "win32";
-const isLinux = process.platform === "linux";
+const platform = process.platform;
+const isMac = platform === "darwin";
+const isWin = platform === "win32";
+const isLinux = platform === "linux";
 
 // Login-item / autostart helpers and the openAtLogin write path live in
 // src/login-item.js + main.js's settings-actions effect. menu.js used to
@@ -51,6 +53,15 @@ module.exports = function initMenu(ctx) {
     app,
     dock: app.dock,
     dockIconPath: path.join(__dirname, "../assets/dock-icon.png"),
+    shouldInstallDockIcon: () => resolveRuntimeDockIconPolicy({
+      platform,
+      isPackaged: app.isPackaged === true,
+      getSystemVersion: () => {
+        if (typeof ctx.getSystemVersion === "function") return ctx.getSystemVersion();
+        if (typeof process.getSystemVersion === "function") return process.getSystemVersion();
+        return "";
+      },
+    }),
     getSettingsWindow: ctx.getSettingsWindow,
     reapplyMacVisibility: ctx.reapplyMacVisibility,
   }) : null;
@@ -319,9 +330,17 @@ module.exports = function initMenu(ctx) {
       const updateItem = ctx.getUpdateMenuItem();
       if (updateItem) appGroup.push(updateItem);
     }
+    // Intent is captured at build time: the fullscreen auto-hide sync can
+    // restore or hide the pet from its background poll while this menu is
+    // still on screen (the tray is the easy case — right-clicking the tray
+    // icon takes the foreground off the fullscreen app, so the auto-restore
+    // fires under the open menu). A live toggle would invert the labeled
+    // action then; applying the captured intent makes the worst case an
+    // idempotent no-op that matches what the user read.
+    const petHiddenAtBuild = ctx.petHidden;
     appGroup.push({
-      label: ctx.petHidden ? t("showPet") : t("hidePet"),
-      click: () => ctx.togglePetVisibility(),
+      label: petHiddenAtBuild ? t("showPet") : t("hidePet"),
+      click: () => ctx.setPetVisibility(petHiddenAtBuild),
     });
 
     const quitGroup = [
@@ -450,6 +469,10 @@ module.exports = function initMenu(ctx) {
   function sendToDisplay(display) {
     if (!ctx.win || ctx.win.isDestroyed()) return;
     if (ctx.getMiniMode()) return;
+    // With a stranded drag lock, syncHitWin() defers and the input window
+    // would stay behind while the pet jumps displays. Release before moving;
+    // a live drag only loses its follow until its own pointerup completes.
+    if (typeof ctx.releaseStrandedDragLock === "function") ctx.releaseStrandedDragLock();
     const wa = display.workArea;
     const size = typeof ctx.getEffectiveCurrentPixelSize === "function"
       ? ctx.getEffectiveCurrentPixelSize(wa)
@@ -482,6 +505,10 @@ module.exports = function initMenu(ctx) {
         click: () => {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
         },
+      },
+      {
+        label: t("openRecap"),
+        click: () => ctx.openSettingsWindow({ tab: "recap" }),
       },
       {
         label: t("newSession"),
@@ -531,9 +558,17 @@ module.exports = function initMenu(ctx) {
       const updateItem = ctx.getUpdateMenuItem();
       if (updateItem) appGroup.push(updateItem);
     }
+    // Intent is captured at build time: the fullscreen auto-hide sync can
+    // restore or hide the pet from its background poll while this menu is
+    // still on screen (the tray is the easy case — right-clicking the tray
+    // icon takes the foreground off the fullscreen app, so the auto-restore
+    // fires under the open menu). A live toggle would invert the labeled
+    // action then; applying the captured intent makes the worst case an
+    // idempotent no-op that matches what the user read.
+    const petHiddenAtBuild = ctx.petHidden;
     appGroup.push({
-      label: ctx.petHidden ? t("showPet") : t("hidePet"),
-      click: () => ctx.togglePetVisibility(),
+      label: petHiddenAtBuild ? t("showPet") : t("hidePet"),
+      click: () => ctx.setPetVisibility(petHiddenAtBuild),
     });
 
     // Quit stands alone as the final group so it is always set off by a
@@ -554,12 +589,20 @@ module.exports = function initMenu(ctx) {
   }
 
   function resizeWindow(sizeKey, options = {}) {
+    // Some size commits have no preview protection (for example the displayed
+    // percentage reset), so stop any walk before it can restore its old size.
+    if (typeof ctx.cancelRoam === "function") ctx.cancelRoam();
     const mode = options.mode || (options.persist === false ? "preview" : "commit");
     const persist = mode !== "preview";
     // Setter routes through controller.applyUpdate("size", ...) — subscriber
     // rebuilds menus on commit. We still need to physically resize the
     // window and capture the new bounds at the end.
-    if (persist) ctx.currentSize = sizeKey;
+    if (persist) {
+      ctx.currentSize = sizeKey;
+      // A same-value update is a controller noop, but the preview may already
+      // have resized the window on a different display.
+      if (typeof ctx.resetKeepSizeFrozen === "function") ctx.resetKeepSizeFrozen();
+    }
     const size = (typeof ctx.getPixelSizeFor === "function")
       ? ctx.getPixelSizeFor(sizeKey)
       : (SIZES[sizeKey] || ctx.getCurrentPixelSize());

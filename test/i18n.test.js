@@ -88,12 +88,77 @@ describe("i18n locales", () => {
     assertLocaleObjectParity(i18n, "runtime");
   });
 
+  it("localizes optional Codex hook review notices in every runtime locale", () => {
+    for (const lang of SUPPORTED_LANGS) {
+      for (const key of ["codexHookHealthOptionalNudgeTitle", "codexHookHealthOptionalNudgeBody"]) {
+        assert.strictEqual(typeof i18n[lang][key], "string", `${lang}.${key}`);
+        assert.ok(i18n[lang][key].length > 0, `${lang}.${key}`);
+      }
+      assert.match(i18n[lang].codexHookHealthOptionalNudgeBody, /\/hooks/);
+    }
+  });
+
+  it("localizes the DSH desktop open action in every supported language", () => {
+    assert.deepStrictEqual(
+      Object.fromEntries(SUPPORTED_LANGS.map((lang) => [lang, i18n[lang].dashboardOpenDshDesktop])),
+      {
+        en: "Open DeepSeek Harness",
+        zh: "打开 DeepSeek Harness",
+        "zh-TW": "開啟 DeepSeek Harness",
+        ko: "DeepSeek Harness 열기",
+        ja: "DeepSeek Harness を開く",
+        "pt-BR": "Abrir o DeepSeek Harness",
+        es: "Abrir DeepSeek Harness",
+      }
+    );
+  });
+
+  it("keeps native startup health notices in the runtime dictionary", () => {
+    const keys = [
+      "feishuApprovalMigrationNudgeTitle",
+      "feishuApprovalMigrationNudgeBody",
+      "prefsReadFailureNudgeTitle",
+      "prefsReadFailureNudgeBody",
+      "prefsRecoveredNudgeTitle",
+      "prefsRecoveredNudgeBody",
+    ];
+    for (const lang of SUPPORTED_LANGS) {
+      for (const key of keys) {
+        assert.strictEqual(typeof i18n[lang][key], "string", `${lang}.${key} should exist`);
+        assert.notStrictEqual(i18n[lang][key], key, `${lang}.${key} must not render as its key`);
+      }
+    }
+  });
+
   it("uses the requested Simplified Chinese desktop-pet recovery wording", () => {
     assert.strictEqual(i18n.zh.bringPetToPrimaryDisplay, "将桌宠拉回主屏");
   });
 
   it("keeps Settings locale keysets aligned with English", () => {
     assertLocaleObjectParity(loadSettingsI18nStrings(), "settings");
+  });
+
+  it("localizes DSH generation changes using the visible integration action names", () => {
+    const strings = loadSettingsI18nStrings();
+    for (const lang of SUPPORTED_LANGS) {
+      const locale = strings[lang];
+      assert.strictEqual(typeof locale.dshNoticeGenerationConflict, "string", lang);
+      assert.ok(locale.dshNoticeGenerationConflict.includes(locale.agentIntegrationUninstall), lang);
+      assert.ok(locale.dshNoticeGenerationConflict.includes(locale.agentIntegrationInstall), lang);
+      assert.match(locale.dshNoticeGenerationConflict, /dsh web/, lang);
+      assert.doesNotMatch(locale.dshNoticeGenerationConflict, /Doctor|\{message\}/, lang);
+    }
+  });
+
+  it("describes Codex CLI queue delivery in every Settings locale", () => {
+    const strings = loadSettingsI18nStrings();
+    for (const lang of SUPPORTED_LANGS) {
+      assert.match(
+        strings[lang].telegramApprovalDirectSendDesc,
+        /Codex Desktop.*Codex CLI/,
+        `settings.${lang}.telegramApprovalDirectSendDesc should name both queue routes`,
+      );
+    }
   });
 
   it("localizes every Feishu provenance, lookup lifecycle, and persistence outcome", () => {
@@ -123,6 +188,36 @@ describe("i18n locales", () => {
         assert.equal(typeof strings[lang][key], "string", `${lang}.${key} must exist`);
         assert.notEqual(strings[lang][key].trim(), "", `${lang}.${key} must not be empty`);
       }
+    }
+  });
+
+  // #895: the Agents-tab catalog also holds agents the detector never examined —
+  // claude-code and codex are skipped outright — so a title that asserts "not
+  // detected" is a claim Clawd cannot make. A user with Codex genuinely
+  // installed saw it filed under 未检测到 and concluded detection was broken.
+  // Asserted against the real bundle: the renderer suite stubs its own inline
+  // ClawdSettingsI18n, so a regression here would otherwise stay invisible.
+  it("keeps the Agents catalog title free of detection claims in every locale", () => {
+    const strings = loadSettingsI18nStrings();
+    assert.deepStrictEqual(
+      Object.fromEntries(SUPPORTED_LANGS.map((lang) => [lang, strings[lang].agentSectionUnavailable])),
+      {
+        en: "More supported tools",
+        zh: "其他支持的工具",
+        "zh-TW": "其他支援的工具",
+        ko: "지원되는 기타 도구",
+        ja: "その他の対応ツール",
+        "pt-BR": "Outras ferramentas compatíveis",
+        es: "Otras herramientas compatibles",
+      }
+    );
+    // The sibling section IS a detection claim and must keep saying so.
+    for (const lang of SUPPORTED_LANGS) {
+      assert.notStrictEqual(
+        strings[lang].agentSectionUnavailable,
+        strings[lang].agentSectionRecommended,
+        `${lang}: catalog and detected-locally titles must stay distinct`
+      );
     }
   });
 
@@ -447,7 +542,7 @@ describe("i18n locales", () => {
       sidebarRemoteSsh: "Hosts SSH",
       remoteApprovalSubtitle: "Redirige las solicitudes de permiso locales a un canal remoto. Los secretos se mantienen fuera de las preferencias y el globo de escritorio sigue siendo la alternativa local.",
       telegramApprovalCardStarting: "Conectando con la aprobación nativa de Telegram…",
-      telegramApprovalCardFailed: "La aprobación nativa de Telegram informó de un error. Revisa el mensaje a continuación o vuelve a intentarlo.",
+      telegramApprovalCardFailed: "La verificación nativa de Telegram falló. Corrige la configuración o vuelve a intentarlo.",
       telegramApprovalCompletionOutput: "Contenido de la notificación de finalización",
       telegramApprovalCompletionOutputDesc: "Elige si las notificaciones de finalización de Telegram incluyen la respuesta final del asistente.",
       telegramApprovalCompletionOutput_off: "Solo aviso de finalización",

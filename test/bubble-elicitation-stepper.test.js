@@ -28,18 +28,18 @@ describe("AskUserQuestion bubble stepper", () => {
     assert.doesNotMatch(body, /forEach\(\(question, questionIndex\)/);
   });
 
-  it("does not auto-select the first option on initial focus (form-like elicitation)", () => {
+  it("focuses an option only from the explicit restore event, never from visual expansion", () => {
     const body = functionBody("renderElicitationStep");
-
-    // B route: form-like elicitation for both single-choice and multi-select.
-    // Initial focus puts the cursor on the first preset so arrow keys / Tab work
-    // immediately, but it must not call .click() and must not pre-select.
-    //
-    // Source guard only. If first.click() appears in any rewritten form
-    // (first.click({preventScroll:true}), first?.click(), inputs[0].click(), …)
-    // update the guard or replace it with a renderer behavior test.
-    assert.doesNotMatch(body, /first\.click\(/);
-    assert.match(body, /if \(first\) first\.focus\(\);/);
+    const focusBody = functionBody("focusActiveElicitationControl");
+    const presentationBody = functionBody("applyPresentationView");
+    assert.doesNotMatch(body, /\.focus\(/);
+    assert.doesNotMatch(focusBody, /\.click\(/);
+    assert.match(focusBody, /if \(first\) first\.focus\(\);/);
+    assert.doesNotMatch(presentationBody, /requestAnimationFrame\(focusActiveElicitationControl\)/);
+    assert.match(
+      bubbleRenderer,
+      /onRestoreActiveControl[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*focusActiveElicitationControl\(\)/
+    );
   });
 
   it("lets answered summary rows reopen their question", () => {

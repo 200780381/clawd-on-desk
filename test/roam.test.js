@@ -120,6 +120,67 @@ describe("roam module", () => {
     assert.equal(roam.enabled, false);
   });
 
+  it("holds for visible permission bubbles and restarts with the full 8s delay", () => {
+    let bubbleVisible = true;
+    const ctx = makeCtx({
+      hasVisiblePermissionBubbles: () => bubbleVisible,
+    });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+
+    roam.tick();
+    mock.timers.tick(12000);
+    assert.strictEqual(ctx._stateLog.length, 0);
+
+    bubbleVisible = false;
+    roam.tick();
+    mock.timers.tick(7999);
+    assert.strictEqual(ctx._stateLog.length, 0);
+    mock.timers.tick(1);
+    assert.ok(ctx._stateLog.some((event) => event.type === "applyState" && event.state === "roam"));
+  });
+
+  it("cancels an active walk on the next frame when a permission bubble appears", () => {
+    let bubbleVisible = false;
+    const ctx = makeCtx({
+      hasVisiblePermissionBubbles: () => bubbleVisible,
+    });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    roam.tick();
+    mock.timers.tick(8000);
+    assert.strictEqual(ctx.getCurrentState(), "roam");
+
+    bubbleVisible = true;
+    mock.timers.tick(16);
+    assert.strictEqual(ctx.getCurrentState(), "idle");
+  });
+
+  it("permission hold overrides drag's consumed 4s phase and restores 8s", () => {
+    let bubbleVisible = false;
+    const ctx = makeCtx({
+      hasVisiblePermissionBubbles: () => bubbleVisible,
+    });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    roam.tick(); // consume the first phase by arming it
+
+    ctx.dragLocked = true;
+    bubbleVisible = true;
+    roam.tick();
+    bubbleVisible = false;
+    roam.tick();
+    ctx.dragLocked = false;
+    roam.tick();
+
+    mock.timers.tick(4000);
+    assert.strictEqual(ctx._stateLog.length, 0, "must not preserve the 4s phase");
+    mock.timers.tick(3999);
+    assert.strictEqual(ctx._stateLog.length, 0);
+    mock.timers.tick(1);
+    assert.ok(ctx._stateLog.some((event) => event.type === "applyState" && event.state === "roam"));
+  });
+
   it("does not schedule the first roam while drag is already locked and preserves the 8s phase", () => {
     const ctx = makeCtx({ dragLocked: true });
     const roam = roamModule(ctx);
@@ -1018,6 +1079,85 @@ describe("roam pauses during IME editing (#640)", () => {
       stopped,
       "no further movement after the editing gate cancels the walk",
     );
+  });
+});
+
+describe("roam pauses during settings size preview", () => {
+  beforeEach(() => {
+    mock.method(Math, "random", () => 0.9);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    mock.reset();
+  });
+
+  it("does not start a pending walk when preview becomes active before its timer fires", () => {
+    let preview = false;
+    const ctx = makeCtx({ isSizePreviewActive: () => preview });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    roam.tick();
+    preview = true;
+    mock.timers.tick(8000);
+
+    assert.deepEqual(ctx._stateLog, []);
+    assert.deepEqual(ctx._appliedBounds, []);
+  });
+
+  it("cancels an active walk on the next frame and restores idle", () => {
+    let preview = false;
+    const ctx = makeCtx({ isSizePreviewActive: () => preview });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    roam.tick();
+    mock.timers.tick(8000);
+    assert.equal(ctx.getCurrentState(), "roam");
+    const writes = ctx._appliedBounds.length;
+
+    preview = true;
+    mock.timers.tick(16);
+    assert.equal(ctx.getCurrentState(), "idle");
+    assert.equal(roam.isRoamAnimating(), false);
+    mock.timers.tick(100);
+    assert.equal(ctx._appliedBounds.length, writes);
+  });
+
+  it("waits the full first delay after a held tick and reads the then-current size", () => {
+    let preview = false;
+    let currentSize = 120;
+    const ctx = makeCtx({
+      isSizePreviewActive: () => preview,
+      getEffectiveCurrentPixelSize: () => ({ width: currentSize, height: currentSize }),
+    });
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    roam.tick();
+    mock.timers.tick(8000);
+    roam.cancelRoam();
+    roam.tick(); // consumed phase would ordinarily restart after 4 seconds
+    preview = true;
+    roam.tick();
+    mock.timers.tick(4000);
+    preview = false;
+    currentSize = 180;
+    roam.tick();
+    mock.timers.tick(7999);
+    assert.equal(ctx.getCurrentState(), "idle");
+    mock.timers.tick(1);
+    assert.equal(ctx.getCurrentState(), "roam");
+    assert.equal(ctx._appliedBounds.at(-1).width, 180);
+  });
+
+  it("keeps the existing timer behavior when no preview predicate is wired", () => {
+    const ctx = makeCtx();
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    roam.tick();
+    mock.timers.tick(8000);
+    assert.equal(ctx.getCurrentState(), "roam");
+    assert.ok(ctx._appliedBounds.length > 0);
   });
 });
 

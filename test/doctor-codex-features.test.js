@@ -78,6 +78,17 @@ describe("Codex hooks feature check", () => {
     assert.ok(ids.has("C:\\Users\\Alice\\#codex\\hooks.json:permission_request:0:0"));
   });
 
+  it("matches a frozen Codex canonical hook fingerprint without using the implementation as its oracle", () => {
+    const hook = {
+      command: '\"/node\" \"/app/hooks/codex-hook.js\"',
+      timeout: 30,
+    };
+    assert.strictEqual(
+      computeCodexHookTrustedHash("Stop", {}, hook, "linux"),
+      "sha256:11d03071911204b5991a3f23a18c78ff9f8f3db6c55885872a2e0dc15be8584c"
+    );
+  });
+
   it("reports missing Codex hook trust entries by event", () => {
     const settings = {
       hooks: {

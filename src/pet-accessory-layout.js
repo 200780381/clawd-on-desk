@@ -184,11 +184,27 @@
     if (!finiteWithin(mediaOffset.x, MAX_COORD) || !finiteWithin(mediaOffset.y, MAX_COORD)) return null;
     const rect = buildAccessoryRect(frame, accessory);
     if (!rect) return null;
-    const projected = multiplyTranslate({
+    let projected = multiplyTranslate({
       ...matrix,
       e: matrix.e + mediaOffset.x,
       f: matrix.f + mediaOffset.y,
     }, rect.x, rect.y);
+    if (
+      input.normalizeReflection === "x"
+      && projected.a * projected.d - projected.b * projected.c < 0
+    ) {
+      // Preserve the full-CTM projected rectangle and its screen position,
+      // then counter-reflect only the accessory pixels around their local
+      // center. Taking abs(a) would move the image to the opposite side.
+      projected = {
+        a: -projected.a,
+        b: -projected.b,
+        c: projected.c,
+        d: projected.d,
+        e: projected.e + projected.a * rect.width,
+        f: projected.f + projected.b * rect.width,
+      };
+    }
     return finalizeLayout(projected, rect, input.stageSize);
   }
 

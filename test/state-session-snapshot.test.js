@@ -2,18 +2,27 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   INTERNAL_WORKSPACE_AGENTS,
   deriveSessionBadge,
   deriveSourceInfo,
+  isDoneEvent,
   isSessionInProgress,
+  buildDisplaySessionTag,
+  buildSessionSnapshotEntry,
   buildSessionSnapshot,
   getActiveSessionAliasKeys,
   sessionSnapshotSignature,
+  shouldAutoClearDetachedSession,
+  sessionDisplayFolder,
   sessionDisplayTitle,
   normalizeTitle,
 } = require("../src/state-session-snapshot");
+const { getFocusableLocalHudSessionIds } = require("../src/session-focus");
 const { makeSessionKey } = require("../src/session-key");
 const { sessionAliasKey } = require("../src/session-alias");
 
@@ -50,6 +59,14 @@ describe("deriveSourceInfo", () => {
         displayLabel: "",
       });
     }
+  });
+});
+
+describe("isDoneEvent", () => {
+  it("is the shared completion boundary for state arbitration and snapshots", () => {
+    assert.strictEqual(isDoneEvent("Stop"), true);
+    assert.strictEqual(isDoneEvent("event_msg:task_complete"), true);
+    assert.strictEqual(isDoneEvent("PostCompact"), false);
   });
 });
 
@@ -109,6 +126,18 @@ describe("startup-recovered session snapshots", () => {
     assert.strictEqual(live.sessions[0].startupRecovered, false);
     assert.notStrictEqual(sessionSnapshotSignature(recovered), sessionSnapshotSignature(live));
   });
+
+  it("does not expose the internal prompt-derived title flag (#1125)", () => {
+    const snapshot = buildSessionSnapshot(new Map([
+      ["real-session", session("working", {
+        sessionTitle: "Prompt line",
+        sessionTitleFromPrompt: true,
+      })],
+    ]), { statePriority: STATE_PRIORITY });
+
+    assert.strictEqual(snapshot.sessions[0].sessionTitle, "Prompt line");
+    assert.ok(!("sessionTitleFromPrompt" in snapshot.sessions[0]));
+  });
 });
 
 describe("remote profile action ids", () => {
@@ -156,6 +185,72 @@ describe("remote profile action ids", () => {
   });
 });
 
+describe("display session tags", () => {
+  it("hashes legal canonical ids into stable 10-hex display tags", () => {
+    const canonical = makeSessionKey({
+      profileId: "local",
+      rawSessionId: "token-1234567890-abcdef",
+    });
+
+    assert.strictEqual(canonical, "s1.bG9jYWw.dG9rZW4tMTIzNDU2Nzg5MC1hYmNkZWY");
+    assert.strictEqual(buildDisplaySessionTag(canonical), "83aacb6af9");
+    assert.match(buildDisplaySessionTag(canonical), /^[0-9a-f]{10}$/);
+  });
+
+  it("returns an empty tag for missing, non-string, or blank ids", () => {
+    for (const value of [null, undefined, "", "   ", 42, true, {}, []]) {
+      assert.strictEqual(buildDisplaySessionTag(value), "", String(value));
+    }
+  });
+
+  it("distinguishes real Codex UUIDv7-shaped raw ids after canonicalization", () => {
+    const first = makeSessionKey({
+      profileId: "local",
+      rawSessionId: "codex:019e115a-4df2-7ed0-b90e-8e6345aca777",
+    });
+    const second = makeSessionKey({
+      profileId: "local",
+      rawSessionId: "codex:019e115b-4df2-7ed0-b90e-8e6345aca777",
+    });
+
+    assert.strictEqual(buildDisplaySessionTag(first), "732d7659d7");
+    assert.strictEqual(buildDisplaySessionTag(second), "b8a6f6f6ac");
+    assert.notStrictEqual(buildDisplaySessionTag(first), buildDisplaySessionTag(second));
+  });
+
+  it("distinguishes the same raw id in different remote profiles", () => {
+    const rawSessionId = "same-visible-id";
+    const a = makeSessionKey({ profileId: "profile-a", rawSessionId });
+    const b = makeSessionKey({ profileId: "profile-b", rawSessionId });
+
+    assert.notStrictEqual(buildDisplaySessionTag(a), buildDisplaySessionTag(b));
+  });
+
+  it("snapshot entries expose a tag derived only from the canonical id", () => {
+    const id = makeSessionKey({ profileId: "local", rawSessionId: "codex:019e115a-4df2-7ed0-b90e-8e6345aca777" });
+    const withRaw = buildSessionSnapshotEntry(id, session("working", {
+      rawSessionId: "codex:019e115a-4df2-7ed0-b90e-8e6345aca777",
+    }));
+    const withoutRaw = buildSessionSnapshotEntry(id, session("working"));
+
+    assert.strictEqual(withRaw.displaySessionTag, "732d7659d7");
+    assert.strictEqual(withoutRaw.displaySessionTag, withRaw.displaySessionTag);
+    for (const forbidden of ["s1.", "bG9", "codex:", "019e11"]) {
+      assert.strictEqual(withRaw.displaySessionTag.includes(forbidden), false, forbidden);
+    }
+  });
+
+  it("snapshot signature tracks the visible display session tag field", () => {
+    const snapshot = buildSessionSnapshot(new Map([
+      ["tagged", session("working")],
+    ]), { statePriority: STATE_PRIORITY });
+    const changed = JSON.parse(JSON.stringify(snapshot));
+    changed.sessions[0].displaySessionTag = "deadbeef00";
+
+    assert.notStrictEqual(sessionSnapshotSignature(snapshot), sessionSnapshotSignature(changed));
+  });
+});
+
 describe("isSessionInProgress state mapping", () => {
   it("treats persisted running states as in-progress and idle/sleeping/headless as not", () => {
     assert.strictEqual(isSessionInProgress(session("working")), true);
@@ -183,6 +278,24 @@ describe("isSessionInProgress state mapping", () => {
 });
 
 describe("sessionDisplayTitle cwd fallback", () => {
+  it("publishes a cross-platform display folder without changing the raw cwd", () => {
+    assert.strictEqual(
+      sessionDisplayFolder("claude:abc123", session("working", { cwd: "C:\\work\\project\\" })),
+      "project"
+    );
+    assert.strictEqual(
+      sessionDisplayFolder("claude:abc123", session("working", { cwd: "/work/project/" })),
+      "project"
+    );
+
+    const cwd = "/work/project";
+    const snapshot = buildSessionSnapshot(new Map([
+      ["claude:abc123", session("working", { cwd })],
+    ]), { statePriority: STATE_PRIORITY });
+    assert.strictEqual(snapshot.sessions[0].displayFolder, "project");
+    assert.strictEqual(snapshot.sessions[0].cwd, cwd, "focus/open-folder keeps the full cwd");
+  });
+
   it("derives normal project basenames independent of the host platform", () => {
     assert.strictEqual(
       sessionDisplayTitle("qoderwork:abc123", session("working", { cwd: "/home/me/projects/myapp" })),
@@ -239,6 +352,10 @@ describe("sessionDisplayTitle cwd fallback", () => {
       sessionDisplayTitle("qoderwork:abc123", session("working", { agentId: "qoderwork", cwd: "C:\\Users\\me\\.qoderwork\\workspace\\abc123" })),
       "abc123"
     );
+    assert.strictEqual(
+      sessionDisplayFolder("qoderwork:abc123", session("working", { agentId: "qoderwork", cwd: "/Users/me/.qoderwork/workspace/mqgw60jiigjsjcid" })),
+      ""
+    );
   });
 
   it("skips QoderWork internal workspace cwds with trailing separators", () => {
@@ -271,6 +388,10 @@ describe("sessionDisplayTitle cwd fallback", () => {
       assert.strictEqual(
         sessionDisplayTitle("qwenwork:abc123", qwen({ cwd: "/Users/me/.QwenWorkCN/workspace/mqgw60jiigjsjcid" })),
         "abc123"
+      );
+      assert.strictEqual(
+        sessionDisplayFolder("qwenwork:abc123", qwen({ cwd: "/Users/me/.QwenWorkCN/workspace/mqgw60jiigjsjcid" })),
+        ""
       );
     });
 
@@ -627,7 +748,22 @@ describe("state-session-snapshot builder", () => {
     });
   });
 
+  it("gives prompt expansion the translated user-prompt label", () => {
+    const entry = buildSessionSnapshotEntry("design", session("thinking", {
+      agentId: "claude-code",
+      recentEvents: [{ event: "UserPromptExpansion", state: "thinking", at: 1234 }],
+    }), { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
+    assert.deepStrictEqual(entry.lastEvent, {
+      labelKey: "eventLabelUserPromptSubmit", rawEvent: "UserPromptExpansion", at: 1234,
+    });
+  });
+
   it("exposes focus target metadata for terminal and Codex Desktop sessions", () => {
+    const rawCodexSessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca777";
+    const scopedCodexSessionId = makeSessionKey({
+      profileId: "local",
+      rawSessionId: rawCodexSessionId,
+    });
     const snapshot = buildSessionSnapshot(new Map([
       ["terminal", session("working", { sourcePid: 123 })],
       ["webui", session("working", { sourcePid: 456, platform: "webui" })],
@@ -635,8 +771,9 @@ describe("state-session-snapshot builder", () => {
         host: "remote-box",
         orcaPaneKey: "tab-remote:leaf-remote",
       })],
-      ["codex:019e115a-4df2-7ed0-b90e-8e6345aca777", session("working", {
+      [scopedCodexSessionId, session("working", {
         agentId: "codex",
+        rawSessionId: rawCodexSessionId,
         codexOriginator: "codex_work_desktop",
         codexSource: "vscode",
       })],
@@ -649,15 +786,52 @@ describe("state-session-snapshot builder", () => {
     assert.strictEqual(byId.get("webui").focusTarget, null);
     assert.strictEqual(byId.get("remote-orca").canFocus, true);
     assert.deepStrictEqual(byId.get("remote-orca").focusTarget, { type: "terminal", url: null });
-    assert.strictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").canFocus, true);
-    assert.deepStrictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").focusTarget, {
+    assert.strictEqual(byId.get(scopedCodexSessionId).canFocus, true);
+    assert.deepStrictEqual(byId.get(scopedCodexSessionId).focusTarget, {
       type: "codex-thread",
       url: "codex://threads/019e115a-4df2-7ed0-b90e-8e6345aca777",
     });
-    assert.strictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").codexSource, "vscode");
+    assert.strictEqual(byId.get(scopedCodexSessionId).codexSource, "vscode");
   });
 
-  it("downgrades Codex Desktop focus targets on Windows snapshots", () => {
+  it("exposes the DSH desktop carrier and moves the signature when it changes", () => {
+    const carrierSession = session("working", {
+      agentId: "deepseek-harness",
+      dshCarrier: "desktop",
+    });
+    const snapshot = buildSessionSnapshot(new Map([["dsh", carrierSession]]), {
+      focusHostPlatform: "darwin",
+    });
+    const entry = snapshot.sessions.find((item) => item.id === "dsh");
+    assert.strictEqual(entry.dshCarrier, "desktop");
+    assert.strictEqual(entry.canFocus, true);
+    assert.deepStrictEqual(entry.focusTarget, { type: "dsh-desktop", url: "dsh://open" });
+
+    const withoutCarrier = buildSessionSnapshot(new Map([[
+      "dsh",
+      session("working", { agentId: "deepseek-harness" }),
+    ]]), { focusHostPlatform: "darwin" });
+    assert.strictEqual(withoutCarrier.sessions[0].dshCarrier, null);
+    assert.strictEqual(withoutCarrier.sessions[0].canFocus, false);
+    assert.notStrictEqual(sessionSnapshotSignature(snapshot), sessionSnapshotSignature(withoutCarrier));
+  });
+
+  it("moves the snapshot signature when only the DSH carrier differs", () => {
+    // On Linux the carrier grants no focus target, so canFocus and focusTarget
+    // are identical in both snapshots; only the raw dshCarrier field differs.
+    const withCarrier = buildSessionSnapshot(new Map([
+      ["dsh", session("working", { agentId: "deepseek-harness", dshCarrier: "desktop" })],
+    ]), { focusHostPlatform: "linux" });
+    const withoutCarrier = buildSessionSnapshot(new Map([
+      ["dsh", session("working", { agentId: "deepseek-harness" })],
+    ]), { focusHostPlatform: "linux" });
+
+    assert.strictEqual(withCarrier.sessions[0].canFocus, withoutCarrier.sessions[0].canFocus);
+    assert.deepStrictEqual(withCarrier.sessions[0].focusTarget, withoutCarrier.sessions[0].focusTarget);
+    assert.notStrictEqual(sessionSnapshotSignature(withCarrier), sessionSnapshotSignature(withoutCarrier));
+  });
+
+  it("exposes Codex Desktop thread focus targets on Windows snapshots", () => {
     const snapshot = buildSessionSnapshot(new Map([
       ["codex:019e115a-4df2-7ed0-b90e-8e6345aca777", session("working", {
         agentId: "codex",
@@ -673,11 +847,14 @@ describe("state-session-snapshot builder", () => {
     const byId = new Map(snapshot.sessions.map((entry) => [entry.id, entry]));
     assert.strictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").canFocus, true);
     assert.deepStrictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").focusTarget, {
-      type: "terminal",
-      url: null,
+      type: "codex-thread",
+      url: "codex://threads/019e115a-4df2-7ed0-b90e-8e6345aca777",
     });
-    assert.strictEqual(byId.get("codex:019e115b-4df2-7ed0-b90e-8e6345aca777").canFocus, false);
-    assert.strictEqual(byId.get("codex:019e115b-4df2-7ed0-b90e-8e6345aca777").focusTarget, null);
+    assert.strictEqual(byId.get("codex:019e115b-4df2-7ed0-b90e-8e6345aca777").canFocus, true);
+    assert.deepStrictEqual(byId.get("codex:019e115b-4df2-7ed0-b90e-8e6345aca777").focusTarget, {
+      type: "codex-thread",
+      url: "codex://threads/019e115b-4df2-7ed0-b90e-8e6345aca777",
+    });
 
     const nonWindowsSnapshot = buildSessionSnapshot(new Map([
       ["codex:019e115b-4df2-7ed0-b90e-8e6345aca777", session("working", {
@@ -731,6 +908,59 @@ describe("state-session-snapshot builder", () => {
       assert.strictEqual(entry.focusTarget, null, entry.id);
     }
     assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "hidden").hiddenFromHud, true);
+  });
+
+  it("issue #1103: batches local Codex titles per snapshot", () => {
+    const codexDir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-index-"));
+    const indexFile = path.join(codexDir, "session_index.jsonl");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const originalOpenSync = fs.openSync;
+    let indexOpens = 0;
+    const localSessions = ["one", "two", "three"].map((name, i) => [
+      i === 2 ? `codex:${name}` : makeSessionKey({ profileId: "local", rawSessionId: `codex:${name}` }),
+      session("working", {
+        agentId: "codex",
+        ...(i === 2 ? {} : { rawSessionId: `codex:${name}` }),
+        sessionTitle: `Stored ${name}`,
+      }),
+    ]);
+    const otherSessions = [
+      ["remote", session("working", {
+        agentId: "codex", rawSessionId: "codex:remote", host: "devbox", sessionTitle: "Remote title",
+      })],
+      ["claude", session("working", { rawSessionId: "codex:one", sessionTitle: "Claude title" })],
+    ];
+    try {
+      process.env.CODEX_HOME = codexDir;
+      fs.writeFileSync(indexFile, ["one", "two", "three", "remote"].map((name) =>
+        JSON.stringify({ id: name, thread_name: `Index ${name}` })
+      ).join("\n") + "\n");
+      fs.openSync = function(file, ...args) {
+        if (file === indexFile) indexOpens++;
+        return originalOpenSync.call(this, file, ...args);
+      };
+      const snapshot = buildSessionSnapshot(new Map([...localSessions, ...otherSessions]));
+      assert.strictEqual(indexOpens, 1);
+      for (const [i, [id]] of localSessions.entries()) {
+        const entry = snapshot.sessions.find((entry) => entry.id === id);
+        const title = `Index ${["one", "two", "three"][i]}`;
+        assert.strictEqual(entry.sessionTitle, title);
+        assert.strictEqual(entry.displayTitle, title);
+      }
+      for (const [id, stored] of otherSessions) {
+        const entry = snapshot.sessions.find((entry) => entry.id === id);
+        assert.strictEqual(entry.sessionTitle, stored.sessionTitle);
+        assert.strictEqual(entry.displayTitle, stored.sessionTitle);
+      }
+      indexOpens = 0;
+      buildSessionSnapshot(new Map(otherSessions));
+      assert.strictEqual(indexOpens, 0);
+    } finally {
+      fs.openSync = originalOpenSync;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(codexDir, { recursive: true, force: true });
+    }
   });
 
   it("applies aliases, Codex thread names, and Kiro cwd-scoped alias keys", () => {
@@ -1160,5 +1390,91 @@ describe("state-session-snapshot builder", () => {
 
     assert.strictEqual(nova.sessions[0].agentName, "Nova AI");
     assert.notStrictEqual(sessionSnapshotSignature(nova), sessionSnapshotSignature(renamed));
+  });
+});
+
+describe("shouldAutoClearDetachedSession WSL guard", () => {
+  it("never probes a WSL session and keeps it visible even with an ended badge", () => {
+    for (const marker of [{ wslDistro: "Ubuntu" }, { host: "wsl:Ubuntu" }]) {
+      let probes = 0;
+      const hidden = shouldAutoClearDetachedSession(
+        {
+          state: "idle",
+          headless: false,
+          pidReachable: true,
+          sourcePid: 20,
+          ...marker,
+        },
+        "done",
+        {
+          sessionHudCleanupDetached: true,
+          isProcessAlive: () => { probes += 1; return false; },
+        }
+      );
+      assert.strictEqual(hidden, false);
+      assert.strictEqual(probes, 0);
+    }
+  });
+
+  it("still clears a local detached-ended session whose source is gone", () => {
+    let probes = 0;
+    const hidden = shouldAutoClearDetachedSession(
+      {
+        state: "idle",
+        headless: false,
+        pidReachable: true,
+        sourcePid: 20,
+      },
+      "done",
+      {
+        sessionHudCleanupDetached: true,
+        isProcessAlive: () => { probes += 1; return false; },
+      }
+    );
+    assert.strictEqual(hidden, true);
+    assert.strictEqual(probes, 1);
+  });
+});
+
+describe("awaiting-activity rows", () => {
+  it("counts only the conversation the user has touched as a pet-body jump target", () => {
+    const snapshot = buildSessionSnapshot(new Map([
+      ["dsh-active", session("working", {
+        agentId: "deepseek-harness",
+        dshCarrier: "desktop",
+        awaitingActivity: false,
+        sourcePid: 999,
+      })],
+      ["dsh-fresh", session("idle", {
+        agentId: "deepseek-harness",
+        dshCarrier: "desktop",
+        awaitingActivity: true,
+        sourcePid: 998,
+      })],
+      ["kimi-active", session("working", {
+        agentId: "kimi-cli",
+        awaitingActivity: false,
+        sourcePid: 997,
+      })],
+      ["kimi-fresh", session("idle", {
+        agentId: "kimi-cli",
+        awaitingActivity: true,
+        sourcePid: 996,
+      })],
+    ]), { statePriority: STATE_PRIORITY, focusHostPlatform: "darwin" });
+
+    assert.deepStrictEqual(
+      snapshot.sessions.map((entry) => entry.id).sort(),
+      ["dsh-active", "dsh-fresh", "kimi-active", "kimi-fresh"],
+      "the Dashboard still lists both conversations"
+    );
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "dsh-fresh").hiddenFromHud, true);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "dsh-fresh").canFocus, true);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "kimi-fresh").hiddenFromHud, true);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "kimi-fresh").canFocus, true);
+    assert.deepStrictEqual(
+      getFocusableLocalHudSessionIds(snapshot, { osPlatform: "darwin" }),
+      ["dsh-active", "kimi-active"]
+    );
   });
 });

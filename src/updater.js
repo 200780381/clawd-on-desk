@@ -122,7 +122,7 @@ function isUpdate404Error(err) {
   return !!(err && (
     err.code === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" ||
     String(err.message || "").includes("404") ||
-    String(err.message || "").includes("Cannot find latest.yml")
+    /Cannot find latest(?:-[^/\\\s]+)?\.yml/i.test(String(err.message || ""))
   ));
 }
 
@@ -164,6 +164,9 @@ function classifyUpdateError(err, meta = {}) {
   const phase = String(meta.phase || "").toLowerCase();
   const mode = String(meta.mode || "").toLowerCase();
 
+  if (["ERR_UPDATER_ZIP_FILE_NOT_FOUND", "ERR_UPDATER_NO_FILES_PROVIDED"].includes(code)) {
+    return "NO_COMPATIBLE_ASSET";
+  }
   if ((meta.releaseConfirmed === true) && (status === 404 || isUpdate404Error(err))) return "NO_COMPATIBLE_ASSET";
   if (["ENETDOWN", "ENETUNREACH", "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED"].includes(code)
       || text.includes("network is offline") || text.includes("network down") || text.includes("offline")) return "NETWORK_OFFLINE";
@@ -228,7 +231,6 @@ function initUpdater(ctx, deps = {}) {
   const t = makeTranslate(ctx);
   const runtimePlatform = deps.platform || process.platform;
   const runtimeArch = deps.arch || process.arch;
-  const isMac = runtimePlatform === "darwin";
 
   let updateStatus = "idle";
   let updateCheckSnapshot = Object.freeze({ state: "idle" });
@@ -241,6 +243,7 @@ function initUpdater(ctx, deps = {}) {
   let activeCheck = null;
   let repoRootCache;
   let autoUpdaterInstance = null;
+  let installRequested = false;
   let overlayKind = null;
   let nativeArm64PromptDismissed = false;
   let nativeArm64PromptToken = 0;
@@ -847,10 +850,8 @@ function initUpdater(ctx, deps = {}) {
     // pet does not get stuck masking working/thinking.
     pulseState("notification");
 
-    const primaryLabel = isMac ? t("download", "Download") : t("updateNow", "Update Now");
-    const messageKey = isMac
-      ? t("updateAvailableMacMsg", "v{version} is available. Open the download page?")
-      : t("updateAvailableMsg", "v{version} is available. Download and install now?");
+    const primaryLabel = t("download", "Download");
+    const messageKey = t("updateAvailableMsg", "v{version} is available. Download and install now?");
 
     const result = await awaitBubbleResult(showBubble({
       mode: "available",
@@ -921,9 +922,7 @@ function initUpdater(ctx, deps = {}) {
     const action = await awaitBubbleAction(showBubble({
       mode: "available",
       title: t("updateAvailable", "Update Available"),
-      message: (mode === "mac"
-        ? t("updateAvailableMacMsg", "v{version} is available. Open the download page?")
-        : t("updateAvailableMsg", "v{version} is available. Download and install now?"))
+      message: t("updateAvailableMsg", "v{version} is available. Download and install now?")
         .replace("{version}", displayVersion),
       version,
       actions: [
@@ -950,7 +949,10 @@ function initUpdater(ctx, deps = {}) {
     const action = await awaitBubbleAction(showBubble({
       mode: "ready",
       title: t("updateReady", "Update Ready"),
-      message: t("updateReadyMsg", "v{version} has been downloaded. Restart now to update?").replace("{version}", displayVersion),
+      message: t(
+        "updateReadyMsg",
+        "v{version} has been downloaded. Restart now to finish updating, or choose Later to finish after you quit and reopen Clawd."
+      ).replace("{version}", displayVersion),
       version,
       actions: [
         { id: "primary", label: t("restartNow", "Restart Now"), variant: "primary" },
@@ -967,6 +969,37 @@ function initUpdater(ctx, deps = {}) {
     publishUpdateCheckSnapshot("idle");
     rebuildMenus();
     return null;
+  }
+
+  async function requestInstall(version) {
+    if (installRequested) return null;
+    const autoUpdater = getAutoUpdater();
+    if (!autoUpdater) {
+      return showErrorBubble(buildUpdateErrorReport(new Error("AutoUpdater not available."), {
+        phase: "install",
+        mode: "packaged",
+        releaseConfirmed: true,
+      }));
+    }
+
+    installRequested = true;
+    void showInfoBubble(
+      "downloading",
+      t("updateInstalling", "Installing Update..."),
+      t("updateInstallingMsg", "Preparing the update. Clawd will restart when it is ready."),
+      { version }
+    );
+
+    try {
+      return await autoUpdater.quitAndInstall(false, true);
+    } catch (err) {
+      installRequested = false;
+      return showErrorBubble(buildUpdateErrorReport(err, {
+        phase: "install",
+        mode: "packaged",
+        releaseConfirmed: true,
+      }));
+    }
   }
 
   async function maybePromptNativeArm64Installer(release, { manual = false, currentVersion = app.getVersion() } = {}) {
@@ -1269,25 +1302,6 @@ function initUpdater(ctx, deps = {}) {
       rebuildMenus();
 
       const onPrimary = async () => {
-        if (isMac) {
-          shell.openExternal(RELEASES_LATEST_URL);
-          publishUpdateCheckSnapshot("idle");
-          clearActiveCheck();
-          rebuildMenus();
-          await showSuccessBubble({
-            title: t("updateReady", "Update Ready"),
-            message: t("macUpdateOpened", "Opened the latest download page in your browser."),
-            version: info.version,
-            actions: [
-              { id: "dismiss", label: t("dismiss", "Dismiss"), variant: "secondary" },
-            ],
-            defaultAction: "dismiss",
-            requireAction: true,
-          });
-          dismissToResolvedState();
-          return;
-        }
-
         publishUpdateCheckSnapshot("downloading", { version: info.version });
         setOverlay("downloading");
         rebuildMenus();
@@ -1309,7 +1323,7 @@ function initUpdater(ctx, deps = {}) {
       }
 
       await promptAvailableUpdate({
-        mode: isMac ? "mac" : "win",
+        mode: "packaged",
         version: info.version,
         onPrimary,
       });
@@ -1329,23 +1343,30 @@ function initUpdater(ctx, deps = {}) {
 
     autoUpdater.on("update-downloaded", async (info) => {
       clearActiveCheck();
+      installRequested = false;
       publishUpdateCheckSnapshot("ready", { version: info.version });
       rebuildMenus();
       clearOverlay();
       await promptReadyUpdate(info.version, async () => {
-        autoUpdater.quitAndInstall(false, true);
+        await requestInstall(info.version);
       });
     });
 
     autoUpdater.on("error", async (err) => {
       log(`ERROR: AutoUpdater error: ${err.message}`);
-      const shouldShowErrorBubble = isManualCheck() || updateStatus === "downloading";
       const failedWhileDownloading = updateStatus === "downloading";
-      const releaseConfirmed = !!(activeCheck && activeCheck.releaseConfirmed);
+      const failedWhileReady = updateStatus === "ready";
+      const failedAfterReleaseConfirmation = failedWhileDownloading || failedWhileReady;
+      const shouldShowErrorBubble = isManualCheck() || failedAfterReleaseConfirmation;
+      const releaseConfirmed = failedAfterReleaseConfirmation || !!(activeCheck && activeCheck.releaseConfirmed);
+      const failurePhase = failedWhileReady
+        ? "install"
+        : (failedWhileDownloading ? "download" : "availability-check");
+      installRequested = false;
       clearActiveCheck();
       if (!shouldShowErrorBubble) {
         const report = buildUpdateErrorReport(err, {
-          phase: failedWhileDownloading ? "download" : "availability-check",
+          phase: failurePhase,
           mode: "packaged",
           releaseConfirmed,
         });
@@ -1355,7 +1376,7 @@ function initUpdater(ctx, deps = {}) {
         return;
       }
 
-      if (isUpdate404Error(err) && !releaseConfirmed) {
+      if (!failedAfterReleaseConfirmation && isUpdate404Error(err) && !releaseConfirmed) {
         publishUpdateCheckSnapshot("up-to-date", { version: app.getVersion() });
         rebuildMenus();
         void showUpToDateBubble(app.getVersion());
@@ -1363,7 +1384,7 @@ function initUpdater(ctx, deps = {}) {
         rebuildMenus();
         clearOverlay();
         await showErrorBubble(buildUpdateErrorReport(err, {
-          phase: failedWhileDownloading ? "download" : "availability-check",
+          phase: failurePhase,
           mode: "packaged",
           releaseConfirmed,
         }));
@@ -1543,7 +1564,7 @@ function initUpdater(ctx, deps = {}) {
       label: getUpdateMenuLabel(),
       enabled: !["checking", "downloading"].includes(updateStatus) && !hasActiveAvailableFlow,
       click: () => updateStatus === "ready"
-        ? getAutoUpdater()?.quitAndInstall(false, true)
+        ? requestInstall(updateCheckSnapshot.version)
         : checkForUpdates(true),
     };
   }

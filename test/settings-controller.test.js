@@ -7,8 +7,12 @@ const path = require("path");
 const os = require("os");
 
 const prefs = require("../src/prefs");
+const {
+  createCodexAutoStartGateEvaluator,
+  isCodexAutoStartEnabled,
+} = require("../src/agent-gate");
 const { createSettingsController } = require("../src/settings-controller");
-const { commandRegistry } = require("../src/settings-actions");
+const { commandRegistry, updateRegistry } = require("../src/settings-actions");
 
 const tempDirs = [];
 function makeTempPath() {
@@ -127,6 +131,103 @@ describe("mobile permission preview controller boundary", () => {
     assert.strictEqual(result.rePairRequired, true);
     assert.strictEqual(ctrl.get("mobilePermissionPreviewEnabled"), false);
     assert.strictEqual(resets, 1);
+  });
+});
+
+describe("keep-size toggle rebase ordering", () => {
+  function makeSeededController(injectedDeps = {}) {
+    const prefsPath = makeTempPath();
+    prefs.save(prefsPath, {
+      ...prefs.getDefaults(),
+      keepSizeAcrossDisplays: true,
+      size: "P:10.5",
+    });
+    return {
+      ctrl: createSettingsController({ prefsPath, updates: updateRegistry, injectedDeps }),
+      prefsPath,
+    };
+  }
+
+  it("commits and broadcasts the rebased size before the disabled toggle", () => {
+    let ctrl;
+    let calls = 0;
+    const seeded = makeSeededController({
+      rebaseSizeToRealizedPixels: () => {
+        calls += 1;
+        assert.deepStrictEqual(ctrl.applyUpdate("size", "P:21"), { status: "ok" });
+      },
+    });
+    ctrl = seeded.ctrl;
+    const broadcasts = [];
+    ctrl.subscribe(({ changes, snapshot }) => {
+      broadcasts.push({ changes, size: snapshot.size, keepSizeAcrossDisplays: snapshot.keepSizeAcrossDisplays });
+    });
+
+    assert.deepStrictEqual(ctrl.applyUpdate("keepSizeAcrossDisplays", false), { status: "ok" });
+    assert.strictEqual(calls, 1);
+    assert.deepStrictEqual(broadcasts, [
+      { changes: { size: "P:21" }, size: "P:21", keepSizeAcrossDisplays: true },
+      { changes: { keepSizeAcrossDisplays: false }, size: "P:21", keepSizeAcrossDisplays: false },
+    ]);
+    assert.strictEqual(ctrl.get("size"), "P:21");
+    assert.strictEqual(ctrl.get("keepSizeAcrossDisplays"), false);
+    const saved = prefs.load(seeded.prefsPath).snapshot;
+    assert.strictEqual(saved.size, "P:21");
+    assert.strictEqual(saved.keepSizeAcrossDisplays, false);
+  });
+
+  it("leaves the toggle unchanged and unpersisted when rebasing throws", () => {
+    const { ctrl, prefsPath } = makeSeededController({
+      rebaseSizeToRealizedPixels: () => { throw new Error("rebase failed"); },
+    });
+    const originalFile = fs.readFileSync(prefsPath, "utf8");
+    const broadcasts = [];
+    ctrl.subscribe(({ changes }) => broadcasts.push(changes));
+
+    const result = ctrl.applyUpdate("keepSizeAcrossDisplays", false);
+    assert.strictEqual(result.status, "error");
+    assert.match(result.message, /rebase failed/);
+    assert.strictEqual(ctrl.get("keepSizeAcrossDisplays"), true);
+    assert.strictEqual(ctrl.get("size"), "P:10.5");
+    assert.strictEqual(fs.readFileSync(prefsPath, "utf8"), originalFile);
+    assert.deepStrictEqual(broadcasts, []);
+  });
+
+  it("skips rebasing for an unchanged or enabled toggle", () => {
+    let calls = 0;
+    const { ctrl } = makeSeededController({
+      rebaseSizeToRealizedPixels: () => { calls += 1; },
+    });
+    assert.deepStrictEqual(ctrl.applyUpdate("keepSizeAcrossDisplays", true), { status: "ok", noop: true });
+    assert.strictEqual(calls, 0);
+    assert.deepStrictEqual(ctrl.applyUpdate("keepSizeAcrossDisplays", false), { status: "ok" });
+    assert.strictEqual(calls, 1);
+    assert.deepStrictEqual(ctrl.applyUpdate("keepSizeAcrossDisplays", true), { status: "ok" });
+    assert.strictEqual(calls, 1);
+  });
+
+  it("hydrates the toggle without running the rebase effect", () => {
+    let calls = 0;
+    const { ctrl } = makeSeededController({
+      rebaseSizeToRealizedPixels: () => { calls += 1; },
+    });
+    assert.deepStrictEqual(ctrl.hydrate({ keepSizeAcrossDisplays: false }), { status: "ok" });
+    assert.strictEqual(calls, 0);
+    assert.strictEqual(ctrl.get("keepSizeAcrossDisplays"), false);
+    assert.strictEqual(ctrl.get("size"), "P:10.5");
+  });
+
+  it("rejects the effect-bearing toggle through applyBulk", () => {
+    let calls = 0;
+    const { ctrl } = makeSeededController({
+      rebaseSizeToRealizedPixels: () => { calls += 1; },
+    });
+    const result = ctrl.applyBulk({ keepSizeAcrossDisplays: false });
+    assert.strictEqual(result.status, "error");
+    assert.match(result.message, /effect-bearing keys cannot be updated via applyBulk/);
+    assert.strictEqual(calls, 0);
+    assert.strictEqual(ctrl.get("keepSizeAcrossDisplays"), true);
+    assert.strictEqual(ctrl.get("size"), "P:10.5");
   });
 });
 
@@ -286,7 +387,7 @@ describe("Codex auto-start gate commit ordering", () => {
     // Mirrors main.js: an enabled gate is published only from the agents
     // subscriber, after the controller has persisted and committed the store.
     ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
-      writeCodexAutoStartGate(nextSnapshot.agents.codex.enabled === true);
+      writeCodexAutoStartGate(isCodexAutoStartEnabled(nextSnapshot));
     });
     return ctrl;
   }
@@ -361,7 +462,7 @@ describe("Codex auto-start gate commit ordering", () => {
     });
     ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
       if (ctrl.isLocked()) return;
-      gateWrites.push(nextSnapshot.agents.codex.enabled === true);
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
     });
 
     const result = await ctrl.applyCommand("setAgentFlag", {
@@ -402,7 +503,7 @@ describe("Codex auto-start gate commit ordering", () => {
     });
     ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
       if (ctrl.isLocked()) return;
-      gateWrites.push(nextSnapshot.agents.codex.enabled === true);
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
     });
 
     const result = await ctrl.applyCommand("installAgentIntegration", {
@@ -413,6 +514,123 @@ describe("Codex auto-start gate commit ordering", () => {
     assert.strictEqual(ctrl.get("agents").codex.integrationInstalled, true);
     assert.strictEqual(ctrl.get("agents").codex.enabled, true);
     assert.deepStrictEqual(gateWrites, []);
+  });
+
+  it("publishes true only after the dedicated preference commits", async () => {
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+      },
+    });
+    ctrl.subscribeKey("autoStartWithCodex", (_enabled, nextSnapshot) => {
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
+    });
+
+    const enabled = await ctrl.applyUpdate("autoStartWithCodex", true);
+    assert.strictEqual(enabled.status, "ok");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), true);
+    assert.deepStrictEqual(gateWrites, [false, true]);
+
+    gateWrites.length = 0;
+    const disabled = await ctrl.applyUpdate("autoStartWithCodex", false);
+    assert.strictEqual(disabled.status, "ok");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+    assert.deepStrictEqual(gateWrites, [false, false]);
+  });
+
+  it("keeps the preference unchanged when the fail-closed pre-commit write fails", async () => {
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate: () => false,
+      },
+    });
+
+    const result = await ctrl.applyUpdate("autoStartWithCodex", true);
+    assert.strictEqual(result.status, "error");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+  });
+
+  it("never reopens the gate after startup authority was lost", async () => {
+    const p = makeTempPath();
+    fs.writeFileSync(p, JSON.stringify({
+      version: prefs.CURRENT_VERSION,
+      autoStartWithCodex: true,
+      agents: {
+        codex: { integrationInstalled: "yes", enabled: true },
+      },
+    }));
+    const loaded = prefs.load(p);
+    assert.strictEqual(loaded.codexAutoStartAuthoritative, false);
+
+    const evaluateGate = createCodexAutoStartGateEvaluator({
+      authorityLost: loaded.codexAutoStartAuthoritative === false,
+    });
+    const gateWrites = [evaluateGate(loaded.snapshot)];
+    const ctrl = createSettingsController({ prefsPath: p, loadResult: loaded });
+    ctrl.subscribeKey("agents", (_agents, nextSnapshot) => {
+      gateWrites.push(evaluateGate(nextSnapshot));
+    });
+
+    const result = await ctrl.applyCommand("setAgentFlag", {
+      agentId: "claude-code",
+      flag: "notificationHookEnabled",
+      value: false,
+    });
+
+    assert.strictEqual(result.status, "ok");
+    assert.deepStrictEqual(gateWrites, [false, false]);
+    assert.strictEqual(gateWrites.includes(true), false);
+  });
+
+  it("serializes the preference behind an in-flight Codex uninstall", async () => {
+    assert.strictEqual(updateRegistry.autoStartWithCodex.lockKey, "agentIntegration");
+    assert.strictEqual(
+      updateRegistry.autoStartWithCodex.lockKey,
+      commandRegistry.uninstallAgentIntegration.lockKey
+    );
+
+    const uninstallStarted = createDeferred();
+    const finishUninstall = createDeferred();
+    const gateWrites = [];
+    const ctrl = createSettingsController({
+      prefsPath: makeTempPath(),
+      injectedDeps: {
+        writeCodexAutoStartGate(enabled) {
+          gateWrites.push(enabled);
+          return true;
+        },
+        uninstallIntegrationForAgent() {
+          uninstallStarted.resolve();
+          return finishUninstall.promise;
+        },
+      },
+    });
+    const publishEffectiveGate = (_value, nextSnapshot) => {
+      gateWrites.push(isCodexAutoStartEnabled(nextSnapshot));
+    };
+    ctrl.subscribeKey("agents", publishEffectiveGate);
+    ctrl.subscribeKey("autoStartWithCodex", publishEffectiveGate);
+
+    const uninstall = ctrl.applyCommand("uninstallAgentIntegration", { agentId: "codex" });
+    await uninstallStarted.promise;
+    const enablePreference = ctrl.applyUpdate("autoStartWithCodex", true);
+
+    await Promise.resolve();
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), false);
+    assert.deepStrictEqual(gateWrites, [false]);
+
+    finishUninstall.resolve({ status: "ok" });
+    assert.strictEqual((await uninstall).status, "ok");
+    assert.strictEqual((await enablePreference).status, "ok");
+    assert.strictEqual(ctrl.get("autoStartWithCodex"), true);
+    assert.strictEqual(ctrl.get("agents").codex.integrationInstalled, false);
+    assert.strictEqual(gateWrites.includes(true), false);
   });
 });
 

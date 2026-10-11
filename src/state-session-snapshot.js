@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const path = require("path");
 const { sessionAliasKey } = require("./session-alias");
 const { getSessionFocusTarget } = require("./session-focus");
@@ -7,7 +8,8 @@ const {
   buildLatestLocalCodexProcessIds,
   isSupersededLocalCodexProcessSession,
 } = require("./state-session-dedupe");
-const { readCodexThreadName } = require("../hooks/codex-session-index");
+const { bareCodexSessionId, readCodexThreadName, readCodexThreadNames } = require("../hooks/codex-session-index");
+const { isWslSourced } = require("./remote-process-metadata");
 
 // ── Session source derivation ────────────────────────────────────────
 
@@ -37,9 +39,11 @@ function deriveSourceInfo(host) {
 }
 
 const EVENT_LABEL_KEYS = {
+  PostToolBatch: "eventLabelPostToolBatch",
   SessionStart: "eventLabelSessionStart",
   SessionEnd: "eventLabelSessionEnd",
   UserPromptSubmit: "eventLabelUserPromptSubmit",
+  UserPromptExpansion: "eventLabelUserPromptSubmit",
   PreToolUse: "eventLabelPreToolUse",
   PostToolUse: "eventLabelPostToolUse",
   PostToolUseFailure: "eventLabelPostToolUseFailure",
@@ -153,6 +157,9 @@ function isEndedSessionBadge(badge) {
 function shouldAutoClearDetachedSession(session, badge, options = {}) {
   if (options.sessionHudCleanupDetached !== true) return false;
   if (!session || session.headless || session.state !== "idle" || session.agentPid) return false;
+  // A WSL session's sourcePid is a Linux PID that can alias a live process on
+  // the Windows host. Never probe it (or hide the session) on that basis.
+  if (isWslSourced({ wslDistro: session.wslDistro, host: session.host })) return false;
   if (!session.pidReachable || !session.sourcePid) return false;
   if (!isEndedSessionBadge(badge)) return false;
   const isProcessAlive = typeof options.isProcessAlive === "function"
@@ -241,6 +248,26 @@ function isInternalWorkspaceCwd(id, sessionLike, cwd) {
   return false;
 }
 
+// Display-only folder label shared by every snapshot consumer. Keep the raw
+// cwd on the snapshot for focus/open-folder actions, but do not make each UI or
+// outbound integration rediscover which agent-owned workspace leaves are
+// opaque implementation ids.
+function sessionDisplayFolder(id, sessionLike) {
+  const cwd = sessionLike && sessionLike.cwd;
+  if (!cwd || typeof cwd !== "string" || isInternalWorkspaceCwd(id, sessionLike, cwd)) {
+    return "";
+  }
+  // Session metadata can cross operating-system boundaries (for example a
+  // Windows agent reported to a macOS/Linux Clawd). Select the path dialect
+  // from the value instead of the host, while preserving backslashes that
+  // are legal characters in a POSIX path component.
+  const windowsPath = /^[A-Za-z]:[\\/]/.test(cwd) || /^([\\/])\1/.test(cwd);
+  const cwdBasename = windowsPath
+    ? path.win32.basename(cwd)
+    : path.posix.basename(cwd);
+  return cwdBasename || "";
+}
+
 function shortenSessionIdForDisplay(value, sessionLike) {
   if (value === null || value === undefined) return value;
   let displayId = String(value);
@@ -259,23 +286,27 @@ function shortenSessionIdForDisplay(value, sessionLike) {
   return displayId.length > 6 ? `${displayId.slice(0, 6)}..` : displayId;
 }
 
+function buildDisplaySessionTag(canonicalSessionId) {
+  if (typeof canonicalSessionId !== "string") return "";
+  const trimmed = canonicalSessionId.trim();
+  if (!trimmed) return "";
+  return crypto.createHash("sha256").update(trimmed).digest("hex").slice(0, 10);
+}
+
+function getEntryDisplaySessionTag(entry) {
+  if (entry && typeof entry.displaySessionTag === "string" && entry.displaySessionTag) {
+    return entry.displaySessionTag;
+  }
+  return buildDisplaySessionTag(entry && entry.id);
+}
+
 function sessionDisplayTitle(id, sessionLike, sessionAliases = {}, options = {}) {
   const alias = getSessionAliasEntry(id, sessionLike, sessionAliases);
   if (alias && typeof alias.title === "string" && alias.title) return alias.title;
   const title = getEffectiveSessionTitle(id, sessionLike, options);
   if (title) return title;
-  const cwd = sessionLike && sessionLike.cwd;
-  if (cwd && typeof cwd === "string" && !isInternalWorkspaceCwd(id, sessionLike, cwd)) {
-    // Session metadata can cross operating-system boundaries (for example a
-    // Windows agent reported to a macOS/Linux Clawd). Select the path dialect
-    // from the value instead of the host, while preserving backslashes that
-    // are legal characters in a POSIX path component.
-    const windowsPath = /^[A-Za-z]:[\\/]/.test(cwd) || /^([\\/])\1/.test(cwd);
-    const cwdBasename = windowsPath
-      ? path.win32.basename(cwd)
-      : path.posix.basename(cwd);
-    if (cwdBasename) return cwdBasename;
-  }
+  const folder = sessionDisplayFolder(id, sessionLike);
+  if (folder) return folder;
   const rawSessionId = (sessionLike && sessionLike.rawSessionId) || id;
   return shortenSessionIdForDisplay(rawSessionId, sessionLike);
 }
@@ -291,6 +322,22 @@ function sessionUpdatedAtComparator(a, b) {
   const byTime = sessionUpdatedAt(b) - sessionUpdatedAt(a);
   if (byTime !== 0) return byTime;
   return String(a.id).localeCompare(String(b.id));
+}
+
+// Desktop apps can reopen a previous conversation on launch and report only a
+// SessionStart before the user touches it. That row is real — the Dashboard
+// still lists and opens it — but it must not reach the HUD until the first
+// action clears the marker.
+//   - DSH desktop reopens the last conversation on launch.
+//   - Kimi Code desktop restores the last viewed conversation on launch, and
+//     opening an old conversation from the sidebar does the same; both only
+//     send a SessionStart.
+const AWAITING_ACTIVITY_AGENTS = new Set(["deepseek-harness", "kimi-cli"]);
+
+function isSessionAwaitingActivity(session) {
+  return !!session
+    && AWAITING_ACTIVITY_AGENTS.has(session.agentId)
+    && session.awaitingActivity === true;
 }
 
 function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {}) {
@@ -310,10 +357,14 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     : () => "";
   const agentId = (session && session.agentId) || null;
   const state = (session && session.state) || "idle";
-  const hiddenFromHud = shouldAutoClearDetachedSession(session, badge, options)
+  // Existing hidden reasons also disable focus (there is nothing to jump to).
+  // The awaiting-activity marker is different: it only hides the HUD row, so the
+  // Dashboard can still list the conversation and open it on demand.
+  const hiddenByExistingReason = shouldAutoClearDetachedSession(session, badge, options)
     || isSupersededLocalCodexProcessSession(id, session, options.latestLocalCodexProcessIds);
+  const hiddenFromHud = hiddenByExistingReason || isSessionAwaitingActivity(session);
   const startupRecovered = !!(session && session.startupRecovered === true);
-  const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenFromHud
+  const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenByExistingReason
     ? getSessionFocusTarget({ ...(session || {}), id }, {
       osPlatform: options.focusHostPlatform || options.osPlatform,
     })
@@ -334,6 +385,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     id,
     profileId: (session && session.profileId) || "local",
     rawSessionId: (session && session.rawSessionId) || id,
+    displaySessionTag: buildDisplaySessionTag(id),
     agentId,
     agentName: resolveAgentDisplayName(agentId),
     iconUrl: getAgentIconUrl(agentId),
@@ -344,6 +396,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     hasAlias: !!(alias && typeof alias.title === "string" && alias.title),
     sessionTitle: getEffectiveSessionTitle(id, session, options),
     displayTitle: sessionDisplayTitle(id, session, sessionAliases, options),
+    displayFolder: sessionDisplayFolder(id, session),
     cwd: (session && session.cwd) || "",
     updatedAt: sessionUpdatedAt(session),
     // Quota/context freshness (statusline metadata POSTs, which do not bump
@@ -369,6 +422,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     provider: (session && session.provider) || null,
     codexOriginator: (session && session.codexOriginator) || null,
     codexSource: (session && session.codexSource) || null,
+    dshCarrier: (session && session.dshCarrier) || null,
     contextUsage: snapshotContextUsage(session),
     assistantLastOutput: (session && typeof session.assistantLastOutput === "string")
       ? session.assistantLastOutput
@@ -408,7 +462,7 @@ function snapshotContextUsage(session) {
   if (Number.isFinite(limit) && limit > 0) out.limit = limit;
   const percent = Number(usage.percent);
   if (Number.isFinite(percent)) out.percent = Math.max(0, Math.min(100, Math.round(percent)));
-  if (usage.source === "claude" || usage.source === "codex" || usage.source === "antigravity" || usage.source === "opencode") out.source = usage.source;
+  if (usage.source === "claude" || usage.source === "codex" || usage.source === "antigravity" || usage.source === "opencode" || usage.source === "workbuddy") out.source = usage.source;
   return out;
 }
 
@@ -420,6 +474,17 @@ function normalizeSessionsIterable(sessions) {
 }
 
 function buildSessionSnapshot(sessions, options = {}) {
+  let readThreadName = options.readCodexThreadName;
+  if (typeof readThreadName !== "function") {
+    const localCodexSessionIds = [];
+    for (const [id, session] of normalizeSessionsIterable(sessions)) {
+      if (session && session.agentId === "codex" && !session.host) {
+        localCodexSessionIds.push(session.rawSessionId || id);
+      }
+    }
+    const threadNames = readCodexThreadNames(localCodexSessionIds);
+    readThreadName = (id) => threadNames.get(bareCodexSessionId(id)) || null;
+  }
   const entries = [];
   const sessionAliases = options.sessionAliases && typeof options.sessionAliases === "object"
     ? options.sessionAliases
@@ -440,6 +505,7 @@ function buildSessionSnapshot(sessions, options = {}) {
     if (automationRecord) matchedAutomationGrantIds.add(automationRecord.grantId);
     entries.push(buildSessionSnapshotEntry(id, session, sessionAliases, {
       ...options,
+      readCodexThreadName: readThreadName,
       latestLocalCodexProcessIds,
       sessionAutomationRecord: automationRecord,
     }));
@@ -572,12 +638,14 @@ function sessionSnapshotSignature(snapshot) {
       id: entry.id,
       profileId: entry.profileId,
       rawSessionId: entry.rawSessionId,
+      displaySessionTag: entry.displaySessionTag,
       state: entry.state,
       startupRecovered: !!entry.startupRecovered,
       badge: entry.badge,
       hasAlias: entry.hasAlias,
       sessionTitle: entry.sessionTitle,
       displayTitle: entry.displayTitle,
+      displayFolder: entry.displayFolder,
       cwd: entry.cwd,
       agentId: entry.agentId,
       agentName: entry.agentName,
@@ -594,6 +662,7 @@ function sessionSnapshotSignature(snapshot) {
       provider: entry.provider,
       codexOriginator: entry.codexOriginator,
       codexSource: entry.codexSource,
+      dshCarrier: entry.dshCarrier,
       contextUsage: entry.contextUsage,
       assistantLastOutput: entry.assistantLastOutput,
       assistantLastOutputTruncated: !!entry.assistantLastOutputTruncated,
@@ -615,15 +684,21 @@ module.exports = {
   EVENT_LABEL_KEYS,
   INTERNAL_WORKSPACE_AGENTS,
   SESSION_TITLE_MAX,
+  isDoneEvent,
   deriveSourceInfo,
   normalizeTitle,
   sessionUpdatedAt,
   isSessionInProgress,
   deriveSessionBadge,
   shouldAutoClearDetachedSession,
+  AWAITING_ACTIVITY_AGENTS,
+  isSessionAwaitingActivity,
   getSessionAliasEntry,
   getEffectiveSessionTitle,
+  sessionDisplayFolder,
   sessionDisplayTitle,
+  buildDisplaySessionTag,
+  getEntryDisplaySessionTag,
   sessionMenuComparator,
   sessionUpdatedAtComparator,
   buildSessionSnapshotEntry,

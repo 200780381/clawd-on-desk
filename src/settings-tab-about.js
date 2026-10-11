@@ -69,38 +69,62 @@
       card.appendChild(nextStep);
     }
 
-    const details = document.createElement("details");
+    const details = document.createElement("div");
     details.className = "about-update-error-details";
-    const summary = document.createElement("summary");
-    summary.textContent = t("aboutUpdateErrorDetails");
+    const summary = document.createElement("button");
+    summary.type = "button";
+    summary.className = "about-update-error-details-trigger";
+    summary.appendChild(helpers.createDisclosureChevron("about-update-error-chevron"));
+    const summaryLabel = document.createElement("span");
+    summaryLabel.textContent = t("aboutUpdateErrorDetails");
+    summary.appendChild(summaryLabel);
+    const body = document.createElement("div");
+    body.className = "about-update-error-details-body settings-disclosure-body";
+    const bodyInner = document.createElement("div");
+    bodyInner.className = "about-update-error-details-inner settings-disclosure-body-inner";
     const technical = document.createElement("pre");
     technical.textContent = [
       report.code ? `${t("aboutUpdateErrorCode")}: ${report.code}` : "",
       report.phase ? `${t("aboutUpdateErrorPhase")}: ${report.phase}` : "",
       report.detail || "",
     ].filter(Boolean).join("\n");
+    bodyInner.appendChild(technical);
+    body.appendChild(bodyInner);
     details.appendChild(summary);
-    details.appendChild(technical);
+    details.appendChild(body);
+    state.mountedControls.aboutUpdateErrorDisclosure = helpers.registerMountedDisposable(
+      helpers.attachSettingsDisclosure({
+        root: details,
+        trigger: summary,
+        body,
+        expanded: false,
+      }),
+    );
     card.appendChild(details);
 
     const actions = document.createElement("div");
     actions.className = "about-update-error-actions";
-    const copyButton = document.createElement("button");
-    copyButton.type = "button";
-    copyButton.className = "soft-btn about-update-error-copy";
-    copyButton.textContent = t("aboutUpdateErrorCopy");
+    const copyButton = helpers.buildButton({
+      labelKey: "aboutUpdateErrorCopy",
+      size: "compact",
+      className: "about-update-error-copy",
+    });
     copyButton.addEventListener("click", async () => {
-      copyButton.disabled = true;
+      helpers.setButtonState(copyButton, { pending: true });
       try {
         const copy = window.settingsAPI && window.settingsAPI.copyUpdateError;
         if (typeof copy !== "function") throw new Error("clipboard unavailable");
         const result = await copy(String(report.copyText || report.detail || report.message || ""));
         if (!result || result.status !== "ok") throw new Error(result && result.message || "copy failed");
-        copyButton.textContent = t("aboutUpdateErrorCopied");
+        helpers.setButtonState(copyButton, {
+          pending: false,
+          labelKey: "aboutUpdateErrorCopied",
+        });
       } catch (_) {
-        copyButton.textContent = t("aboutUpdateErrorCopyFailed");
-      } finally {
-        copyButton.disabled = false;
+        helpers.setButtonState(copyButton, {
+          pending: false,
+          labelKey: "aboutUpdateErrorCopyFailed",
+        });
       }
     });
     actions.appendChild(copyButton);
@@ -407,6 +431,8 @@
         updateBtn.textContent = normalized.state === "checking"
           ? t("aboutCheckingForUpdates")
           : t("aboutCheckForUpdates");
+        helpers.disposeMountedDisposable(state.mountedControls.aboutUpdateErrorDisclosure);
+        state.mountedControls.aboutUpdateErrorDisclosure = null;
         updateStatusHost.innerHTML = "";
         if (normalized.state === "error" && normalized.error) {
           updateStatusHost.appendChild(buildUpdateErrorCard(normalized.error, () => {
@@ -445,8 +471,10 @@
       const autoUpdateLabelWrap = document.createElement("div");
       autoUpdateLabelWrap.className = "about-info-label";
       const autoUpdateLabel = document.createElement("div");
+      autoUpdateLabel.id = "settings-about-auto-update-label";
       autoUpdateLabel.textContent = t("autoUpdateCheck");
       const autoUpdateDesc = document.createElement("div");
+      autoUpdateDesc.id = "settings-about-auto-update-description";
       autoUpdateDesc.className = "about-info-description";
       autoUpdateDesc.textContent = t("autoUpdateCheckDescription");
       autoUpdateDesc.style.opacity = "0.7";
@@ -455,18 +483,18 @@
       autoUpdateLabelWrap.appendChild(autoUpdateDesc);
       const autoUpdateValue = document.createElement("div");
       autoUpdateValue.className = "about-info-value";
-      const autoUpdateSwitch = document.createElement("div");
-      autoUpdateSwitch.className = "switch about-auto-update-switch";
-      autoUpdateSwitch.setAttribute("role", "switch");
-      autoUpdateSwitch.setAttribute("tabindex", "0");
-      autoUpdateSwitch.setAttribute("aria-label", t("autoUpdateCheck"));
       let committedAutoUpdate = safe.autoUpdateCheck !== false;
       let autoUpdatePending = false;
+      const autoUpdateControl = helpers.buildSwitch({
+        checked: committedAutoUpdate,
+        ariaLabelledBy: autoUpdateLabel.id,
+        ariaDescribedBy: autoUpdateDesc.id,
+        className: "about-auto-update-switch",
+      });
+      const autoUpdateSwitch = autoUpdateControl.element;
 
       function paintAutoUpdate(value, pending = autoUpdatePending) {
-        helpers.setSwitchVisual(autoUpdateSwitch, value, { pending });
-        autoUpdateSwitch.classList.toggle("disabled", pending);
-        autoUpdateSwitch.setAttribute("aria-disabled", pending ? "true" : "false");
+        autoUpdateControl.setState({ checked: value, pending });
       }
 
       function syncAutoUpdateFromSnapshot() {
@@ -508,13 +536,9 @@
           });
       }
 
-      autoUpdateSwitch.addEventListener("click", toggleAutoUpdate);
-      autoUpdateSwitch.addEventListener("keydown", (event) => {
-        if (event.key !== " " && event.key !== "Enter") return;
-        event.preventDefault();
-        toggleAutoUpdate();
-      });
+      autoUpdateControl.setOnToggle(toggleAutoUpdate);
       state.mountedControls.aboutAutoUpdate = {
+        control: autoUpdateControl,
         element: autoUpdateSwitch,
         syncFromSnapshot: syncAutoUpdateFromSnapshot,
       };

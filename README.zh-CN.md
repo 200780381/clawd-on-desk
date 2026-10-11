@@ -23,42 +23,46 @@
 </p>
 
 <p align="center">
-  <img src="assets/hero.gif" alt="Clawd 桌宠动画演示：像素螃蟹会随 AI 编程助手状态实时切换，在睡觉、思考、工具运行时打字、单个子代理时戴耳机律动、多个子代理并行时三球杂耍、权限请求弹出时提醒、任务完成后庆祝。支持 Claude Code、Codex、Cursor、Copilot、Gemini、Antigravity、Qwen、CodeWhale、Pi、OpenClaw 等。">
+  <img src="assets/hero.gif" alt="Clawd 桌宠动画演示：像素螃蟹会随 AI 编程助手状态实时切换，在睡觉、思考、工具运行时打字、单个子代理时戴耳机律动、多个子代理并行时三球杂耍、权限请求弹出时提醒、任务完成后庆祝。支持 Claude Code、Codex、Cursor、Copilot、Gemini、Antigravity、Qwen、CodeWhale、Pi、OMP、OpenClaw 等。">
 </p>
 
 Clawd 住在你的桌面上，实时感知 AI 编程助手正在做什么。发起一个长任务，起身去做点别的，等螃蟹告诉你任务完成了再回来。
 
-你提问时它思考，工具运行时它打字，子代理工作时它会戴耳机律动或三球杂耍，审批权限时它弹卡片，任务完成时它庆祝，你离开时它睡觉。内置三套主题：**Clawd**（像素螃蟹）、**Calico**（三花猫）和 **Cloudling**（云宝），支持自定义主题，也支持导入 Codex Pet 动画包。
+你提问时它思考，工具运行时它打字，子代理工作时它会戴耳机律动或三球杂耍，审批权限时它弹卡片，任务完成时它庆祝，你离开时它睡觉。内置三套主题：**Clawd**（像素螃蟹）、**Calico**（三花猫）和 **Cloudling**（云宝），支持自定义主题，也支持导入 Codex Pet 动画包；另外可从 设置 → 主题 下载可选官方主题 **Hash Sage**（哈希仙人）和 **Whale-chan**（鲸鱼娘）。
 
-> 支持 Windows 11、macOS 和 Ubuntu/Linux。Windows 发布包提供独立的 x64 和 ARM64 安装包。源码运行需要 Node.js。支持 **Claude Code**、**Codex CLI**、**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**WorkBuddy**、**Kiro CLI**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**ZCode**、**CodeWhale**、**opencode**、**MiMo Code**、**Pi**、**OpenClaw**、**Hermes Agent**、**Qoder**、**QoderWork**、**QwenWork（千问办公）**、**Reasonix CLI** 与 **DeepSeek Harness**。
+> 支持 Windows 11、macOS 和 Ubuntu/Linux。Windows 发布包提供独立的 x64 和 ARM64 安装包。源码运行需要 Node.js。支持 **Claude Code**、**Codex CLI**、**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**WorkBuddy**、**Grok Build**、**Kiro CLI**、**KiroCrew**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**ZCode**、**CodeWhale**、**opencode**、**MiMo Code**、**Pi**、**OMP**、**OpenClaw**、**Hermes Agent**、**Qoder**、**QoderWork**、**QwenWork（千问办公）**、**Reasonix CLI**、**DeepSeek Harness**、**TraeCode (Trae CN)** 与 **MiniMax Code**。
 
 ## 功能特性
 
 ### 多 Agent 支持
 - **Claude Code** — 通过 command hook + HTTP 权限 hook 完整集成
 - **Codex CLI** — official hooks 为主、JSONL 日志轮询（`~/.codex/sessions/`）兜底，默认自动同步并支持真实权限气泡
-- **Copilot CLI** — 可选 command hook，写入 `~/.copilot/hooks/hooks.json`（从 Settings → Agents 安装；手动 JSON 备选见 Copilot 指南）
-- **Gemini CLI** — 可选 command hook，写入 `~/.gemini/settings.json`（从 Settings → Agents 安装，或执行 `npm run install:gemini-hooks`）
-- **Antigravity CLI (agy)** — 可选 command hook，写入 `~/.gemini/config/hooks.json`（从 Settings → Agents 安装，或执行 `npm run install:antigravity-hooks`）；**仅状态同步**：Clawd 不会为 agy 弹任何权限气泡，所有 Allow / Deny / Always-allow 都在 agy 自己的终端菜单里完成
-- **Cursor Agent** — 可选 [Cursor IDE hooks](https://cursor.com/docs/agent/hooks)，写入 `~/.cursor/hooks.json`（从 Settings → Agents 安装，或执行 `npm run install:cursor-hooks`）
-- **CodeBuddy** — 可选 Claude Code 兼容 command hook + HTTP 权限 hook，写入 `~/.codebuddy/settings.json`（从 Settings → Agents 安装，或执行 `node hooks/codebuddy-install.js`）
+- **Copilot CLI** — 可选 command hook，写入 `~/.copilot/hooks/hooks.json`（从 Settings → AI 编程工具 安装；手动 JSON 备选见 Copilot 指南）
+- **Gemini CLI** — 可选 command hook，写入 `~/.gemini/settings.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:gemini-hooks`）
+- **Antigravity CLI (agy)** — 可选 command hook，写入 `~/.gemini/config/hooks.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:antigravity-hooks`）；**仅状态同步**：Clawd 不会为 agy 弹任何权限气泡，所有 Allow / Deny / Always-allow 都在 agy 自己的终端菜单里完成
+- **Cursor Agent** — 可选 [Cursor IDE hooks](https://cursor.com/docs/agent/hooks)，写入 `~/.cursor/hooks.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:cursor-hooks`）
+- **CodeBuddy** — 可选 Claude Code 兼容 command hook + HTTP 权限 hook，写入 `~/.codebuddy/settings.json`（从 Settings → AI 编程工具 安装，或执行 `node hooks/codebuddy-install.js`）
 - **自定义 HTTP Agent** — 在 Settings 注册其他本机可执行文件，再由应用或 adapter 主动向 Clawd 的动态 `/state` 地址上报生命周期事件。“注册”不会安装 hook，也不会让普通应用自动上报；v1 仅支持状态，权限决定留在应用自己的界面中。详见[自定义 HTTP Agent 指南](docs/guides/custom-agent-http.md)。
-- **WorkBuddy** — 可选 Claude Code 兼容 command hook，当前写入 `~/.workbuddy-ai/settings.json`，旧版使用 `~/.workbuddy/settings.json`（从 Settings → Agents 安装，或执行 `node hooks/workbuddy-install.js`）。仅状态 + 通知：桌面应用在其原生沙箱与 GUI 中处理权限，因此 Clawd 不为它注册权限 hook
+- **WorkBuddy** — 可选 Claude Code 兼容 command hook，当前写入 `~/.workbuddy-ai/settings.json`，旧版使用 `~/.workbuddy/settings.json`（从 Settings → AI 编程工具 安装，或执行 `node hooks/workbuddy-install.js`）。仅状态 + 通知：桌面应用在其原生沙箱与 GUI 中处理权限，因此 Clawd 不为它注册权限 hook
+- **Grok Build** — 可选 Claude Code 兼容 command hook，写入 `~/.grok/hooks/clawd-on-desk.json`（从 Settings → AI 编程工具 安装，或执行 `node hooks/grok-install.js`）。仅状态 + 通知：Grok 没有阻塞式 `PermissionRequest`，允许/拒绝仍在 Grok 终端里完成
 - **Kiro CLI** — 可选 command hooks，注入到 `~/.kiro/agents/` 下的自定义 agent 配置中，并自动创建一个 `clawd` agent；安装集成后 Clawd 会继续从内置 `kiro_default` 同步它，尽量保持与默认 agent 一致。macOS 与 Windows 上状态动效已验证可用；需要时可用 `kiro-cli --agent clawd` 或在会话内执行 `/agent swap clawd` 启用 hooks
-- **Kimi Code CLI（Kimi-CLI）** — 可选 command hooks，写入 `~/.kimi/config.toml`（`[[hooks]]` 条目）（从 Settings → Agents 安装，或执行 `npm run install:kimi-hooks`）
-- **Qwen Code** — 可选 command hooks，写入 `~/.qwen/settings.json`（从 Settings → Agents 安装，或执行 `npm run install:qwen-hooks`）；支持状态追踪和 Qwen `PermissionRequest` 桌面权限气泡
-- **ZCode** — 可选 state-only hooks，写入 `~/.zcode/cli/config.json` 的 `hooks.events.*`（从 Settings → Agents 安装，或执行 `npm run install:zcode-hooks`）；Phase 1 驱动会话、提示、工具、失败和完成动效，不接管 ZCode 权限。Clawd 会保留用户显式设置的全局或单项 `enabled:false`
-- **CodeWhale** — 可选 state-only lifecycle hooks，写入 `~/.codewhale/config.toml`（`[[hooks.hooks]]` 条目）（从 Settings → Agents 安装，或执行 `npm run install:codewhale-hooks`）；Phase 1 只驱动 idle、thinking、working、sleeping、error、attention、sweeping 等状态动画，不接权限气泡和子代理追踪
-- **Reasonix CLI** — 可选 state-only command hooks，写入 `<Reasonix home>/settings.json`（macOS/Linux 为 `~/.reasonix/settings.json`，Windows 为 `%APPDATA%\reasonix\settings.json`；从 Settings → Agents 安装，或执行 `npm run install:reasonix-hooks`）；Phase 1 只驱动生命周期、工具调用、通知、压缩和子代理结束动效，权限决策仍留在 Reasonix 自己的终端流程
-- **opencode** — 可选 [plugin 集成](https://opencode.ai/docs/plugins)，写入 `~/.config/opencode/opencode.json`（从 Settings → Agents 安装，或执行 `node hooks/opencode-install.js`）；支持零延迟事件流和 Allow/Always/Deny 权限气泡。`task` 工具产生的子会话是 headless，不参与可见的多会话动画聚合
-- **MiMo Code** — 可选 [plugin 集成](https://opencode.ai/docs/plugins)，写入 `~/.config/mimocode/` 下当前生效的文件（`config.json` → `mimocode.json` → 默认 `mimocode.jsonc`，后者优先；从 Settings → Agents 安装，或执行 `npm run install:mimocode-plugin`）；与 opencode 共享 `@mimo-ai/plugin` SDK 和权限行为，`task` 子会话同样是 headless
-- **Pi** — 可选全局 extension，写入 `~/.pi/agent/extensions/clawd-on-desk`（从 Settings → Agents 安装，或执行 `npm run install:pi-extension`）；仅同步交互式 Pi 会话生命周期和工具活动状态，并保留 Pi 默认 YOLO 行为
-- **OpenClaw** — 可选 state-only plugin，写入 `~/.openclaw/openclaw.json`（从 Settings → Agents 安装，或执行 `npm run install:openclaw-plugin`；OpenClaw 还需要已有配置）；Phase 1 面向本地 `openclaw tui --local` 会话，只驱动动画，不接权限气泡和终端聚焦
-- **Hermes Agent** — 可选 [plugin 集成](https://hermes-agent.org/)，写入 Hermes 的托管 plugin 目录（从 Settings → Agents 安装，或执行 `npm run install:hermes-plugin`）；支持状态、会话、SessionEnd、终端聚焦和受支持的权限气泡
-- **Qoder** — 可选 state-only command hooks，写入 `~/.qoder/settings.json`（从 Settings → Agents 安装，或执行 `npm run install:qoder-hooks`）；Phase 1 只驱动动画，权限请求仅作为通知观察，Clawd 不弹权限气泡也不代答，所有 Allow / Deny 都在 Qoder 自己的权限流程里完成
-- **QoderWork** — 可选 state-only command hooks，写入 `~/.qoderwork/settings.json`（从 Settings → Agents 安装，或执行 `npm run install:qoderwork-hooks`）；Phase 1 驱动动画与 Session HUD，权限事件作为正常工作流静默观察（不闪通知），Clawd 不弹权限气泡也不代答，所有 Allow / Deny 都在 QoderWork 自己的权限流程里完成
-- **QwenWork（千问办公）** — 可选 hook-only / state-only command hooks，写入 `~/.QwenWorkCN/settings.json`（从 Settings → Agents 安装，或执行 `npm run install:qwenwork-hooks`，卸载用 `npm run uninstall:qwenwork-hooks`）；当前只支持 macOS / Windows 桌面端——[qwenwork.cn/download](https://qwenwork.cn/download) 没有 Linux 客户端，因此也不提供 WSL Pair。Phase 1 驱动动画与 Session HUD；`PermissionRequest` / `PermissionDenied` 仅作观察并映射为 `working`，hook stdout 恒为 `{}`，Clawd 不产生 allow/deny，权限唯一决策者是 QwenWork 原生流程。无 startup recovery：桌面主进程是长驻进程，不代表正在跑任务
-- **DeepSeek Harness** — 零侵入感知 + 可选 Clawd-managed 交互桥：Clawd 内置的 monitor 直接轮询 `$DSH_HOME/storages/`（`workspace.json` + `session_projcache.json`），本身不向 DSH 写任何东西；在 Settings → Agents 点击 **Install** 时，额外通过官方 `dsh plugin` 命令把 Clawd 的 `@dsh-external/dsh-clawd-bridge` 插件注册进 DSH web profile（幂等），桥插件把 DSH 的 `ask_user_question` 与沙箱升级审批转发到 Clawd 权限气泡，决定回传 DSH（启动同步保持只读；卸载时移除桥）。秒级延迟（采样，非事件级精确）。详见 [DeepSeek Harness 指南](docs/guides/dsh-setup.md)
+- **Kimi Code CLI（Kimi-CLI）** — 可选 command hooks，写入 `~/.kimi/config.toml`（`[[hooks]]` 条目）（从 Settings → AI 编程工具 安装，或执行 `npm run install:kimi-hooks`）
+- **Qwen Code** — 可选 command hooks，写入 `~/.qwen/settings.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:qwen-hooks`）；支持状态追踪和 Qwen `PermissionRequest` 桌面权限气泡
+- **ZCode** — 可选状态 + 阻塞式 `PermissionRequest` hooks，写入 `~/.zcode/cli/config.json` 的 `hooks.events.*`（从 Settings → AI 编程工具 安装，或执行 `npm run install:zcode-hooks`）；Clawd 提供人工 Allow/Deny 权限气泡，global 与 per-session 自动审批保持 defer。Clawd 会保留用户显式设置的全局或单项 `enabled:false`，并且不会覆盖第三方 `PermissionRequest` hook
+- **CodeWhale** — 可选 state-only lifecycle hooks，写入 `~/.codewhale/config.toml`（`[[hooks.hooks]]` 条目）（从 Settings → AI 编程工具 安装，或执行 `npm run install:codewhale-hooks`）；Phase 1 只驱动 idle、thinking、working、sleeping、error、attention、sweeping 等状态动画，不接权限气泡和子代理追踪
+- **Reasonix CLI** — 可选 state-only command hooks，写入 `<Reasonix home>/settings.json`（macOS/Linux 为 `~/.reasonix/settings.json`，Windows 为 `%APPDATA%\reasonix\settings.json`；从 Settings → AI 编程工具 安装，或执行 `npm run install:reasonix-hooks`）；Phase 1 只驱动生命周期、工具调用、通知、压缩和子代理结束动效，权限决策仍留在 Reasonix 自己的终端流程
+- **opencode** — 可选 [plugin 集成](https://opencode.ai/docs/plugins)，写入 `~/.config/opencode/` 下当前生效的文件（`config.json` → `opencode.json` → `opencode.jsonc`，后者优先）（从 Settings → AI 编程工具 安装，或执行 `node hooks/opencode-install.js`）；支持零延迟事件流和 Allow/Always/Deny 权限气泡。`task` 工具产生的子会话是 headless，不参与可见的多会话动画聚合
+- **MiMo Code** — 可选 [plugin 集成](https://opencode.ai/docs/plugins)，写入 `~/.config/mimocode/` 下当前生效的文件（`config.json` → `mimocode.json` → 默认 `mimocode.jsonc`，后者优先；从 Settings → AI 编程工具 安装，或执行 `npm run install:mimocode-plugin`）；与 opencode 共享 `@mimo-ai/plugin` SDK 和权限行为，`task` 子会话同样是 headless
+- **Pi** — 可选全局 extension，写入 `~/.pi/agent/extensions/clawd-on-desk`（从 Settings → AI 编程工具 安装，或执行 `npm run install:pi-extension`）；仅同步交互式 Pi 会话生命周期和工具活动状态，并保留 Pi 默认 YOLO 行为
+- **OMP (oh-my-pi)** — 可选全局 extension，写入 `~/.omp/agent/extensions/clawd-on-desk`（从 Settings → AI 编程工具 安装，或执行 `npm run install:omp-extension`）；仅同步交互式会话生命周期与工具活动状态。`session_stop` 只记录完成候选，随后仅在 OMP 确认没有 extension 请求续跑的终态 `agent_end` 才提交，因此完成提示音会等这一轮真正结束才响。若已存在社区桥接 `clawd-on-desk-omp.ts`，Clawd 保留它并跳过自身安装
+- **OpenClaw** — 可选 state-only plugin，写入 `~/.openclaw/openclaw.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:openclaw-plugin`；OpenClaw 还需要已有配置）；Phase 1 面向本地 `openclaw tui --local` 会话，只驱动动画，不接权限气泡和终端聚焦
+- **Hermes Agent** — 可选 [plugin 集成](https://hermes-agent.org/)，写入 Hermes 的托管 plugin 目录（从 Settings → AI 编程工具 安装，或执行 `npm run install:hermes-plugin`）；支持状态、会话、SessionEnd、终端聚焦和受支持的权限气泡；**Settings → 远程 SSH** 也可以把同一个 plugin 部署到远端主机上的 Hermes
+- **Qoder** — 可选 state-only command hooks，写入 `~/.qoder/settings.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:qoder-hooks`）；Phase 1 只驱动动画，权限请求仅作为通知观察，Clawd 不弹权限气泡也不代答，所有 Allow / Deny 都在 Qoder 自己的权限流程里完成
+- **QoderWork** — 可选 state-only command hooks，写入 `~/.qoderwork/settings.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:qoderwork-hooks`）；Phase 1 驱动动画与 Session HUD，权限事件作为正常工作流静默观察（不闪通知），Clawd 不弹权限气泡也不代答，所有 Allow / Deny 都在 QoderWork 自己的权限流程里完成
+- **QwenWork（千问办公）** — 可选 hook-only / state-only command hooks，写入 `~/.QwenWorkCN/settings.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:qwenwork-hooks`，卸载用 `npm run uninstall:qwenwork-hooks`）；当前只支持 macOS / Windows 桌面端——[qwenwork.cn/download](https://qwenwork.cn/download) 没有 Linux 客户端，因此也不提供 WSL Pair。Phase 1 驱动动画与 Session HUD；`PermissionRequest` / `PermissionDenied` 仅作观察并映射为 `working`，hook stdout 恒为 `{}`，Clawd 不产生 allow/deny，权限唯一决策者是 QwenWork 原生流程。无 startup recovery：桌面主进程是长驻进程，不代表正在跑任务
+- **DeepSeek Harness** — 实验性集成，支持 DSH 的 web profile 与 DeepSeek Harness 桌面版（macOS / Windows），通过 Clawd 管理的 DSH 进程内插件工作。公开 session 事件按 session 顺序驱动 Clawd 状态，公开的阻塞式 `approval/request` 可显示 Allow Once / Deny 气泡；无决定时始终交还给 DSH 自己的审批流程（web 的 answerer，或桌面版自己的审批框）。`ask_user_question` 完全留在 DSH 原生 provider，Clawd 从不读取 DSH projection 存储。详见 [DeepSeek Harness 指南](docs/guides/dsh-setup.md)
+- **TraeCode (Trae CN)** — 实验性、仅状态同步的 hook 集成，写入 `~/.trae-cn/hooks.json`（从 Settings → AI 编程工具 安装，或执行 `npm run install:traecode-hooks`；卸载用 `npm run uninstall:traecode-hooks`）。需在 Trae 中手动开启 hooks（**Settings → Hooks → Enable**，运行模式选 **Sandbox**；见 [Trae 官方 hooks 文档](https://docs.trae.cn/ide/automate-actions-with-hooks)）。首版仅支持 Trae 中国版；Clawd 从首条提问推导会话标题，不接管权限，也没有 `SessionEnd`，关闭的会话由桌面端空闲超时清理。
+- **MiniMax Code** — 实验性、仅状态同步的本地插件，写入 `<MINIMAX_DATA_DIR 或 MAVIS_DATA_DIR 或 ~/.minimax>/plugins/clawd-state/`（从 Settings → AI 编程工具 安装，或执行 `npm run install:minimax-hooks`；卸载用 `npm run uninstall:minimax-hooks`）。支持 mcode CLI 与桌面应用，上报 10 个状态事件（含 `SessionEnd`）；每个 handler 仅有 1–10 秒执行上限，故不注册 `PermissionRequest`，stdout 恒为 `{}`，审批留在 MiniMax 原生流程。若未加载，请运行 `mcode plugin enable clawd-state@local` 或在插件面板启用；会话标题取首条提问并保持不变
 - **多 Agent 共存** — 多个 Agent 可同时运行，Clawd 独立追踪每个会话
 
 ### 动画与交互
@@ -79,7 +83,11 @@ Clawd 住在你的桌面上，实时感知 AI 编程助手正在做什么。发�
 - **全局快捷键** — `Ctrl+Shift+Y` 允许、`Ctrl+Shift+N` 拒绝最新的权限气泡（仅在气泡可见时注册）
 - **堆叠布局** — 多个权限请求从屏幕右下角向上堆叠
 - **自动关闭** — 如果你先在终端回答了，气泡自动消失
-- **按 Agent 单独关闭** — 打开 `设置…` → `Agents`，选中对应 Agent，关闭 `显示弹窗`，权限提示就会回到该 Agent 自己的终端 / TUI 里处理
+- **按 Agent 单独关闭** — 打开 `设置…` → `AI 编程工具`，选中对应 Agent，关闭 `显示弹窗`，权限提示就会回到该 Agent 自己的终端 / TUI 里处理
+
+### 远程通知
+- **Telegram / 飞书（Lark）** — 交互式远程审批：把权限请求转发到手机，直接远程「允许 / 拒绝」，无需回到桌面
+- **Slack** — **仅通知**：通过 Slack Incoming Webhook（或可选的 `xoxb-` Bot Token + 频道 ID）以带 Emoji 的 Block Kit 富文本卡片推送**任务完成**、**错误**和**权限请求**。本版本中 Slack 无法批准或拒绝——权限消息只是播报，仍需回到桌面 App 决定。与 Telegram / 飞书并列在远程审批渠道中配置；密钥保存在配置之外的本地 env 文件中（macOS / Linux 为 `0600`；Windows 无 POSIX 权限位，依赖 AppData 的 ACL），未配置或离线时均优雅降级。消息可能包含会话标题、目录名与主机名，**建议使用私有频道**——参见 [slack-notifications.md](docs/guides/slack-notifications.md)
 
 ### 会话智能
 - **多会话追踪** — 所有已支持 Agent 的会话统一解析到最高优先级状态
@@ -101,7 +109,7 @@ Clawd 住在你的桌面上，实时感知 AI 编程助手正在做什么。发�
 - **位置记忆** — 重启后 Clawd 回到上次的位置（包括极简模式）
 - **单实例锁** — 防止重复启动
 - **自动启动** — Claude Code 的 SessionStart hook 可在 Clawd 未运行时自动拉起
-- **免打扰模式** — 右键或托盘菜单进入休眠，所有 hook 事件静默，直到手动唤醒。免打扰期间不弹权限气泡——Codex、opencode 和 MiMo Code 会回退到原生命令行确认，Claude Code 和 CodeBuddy 会回退到各自内置的权限确认流程。WorkBuddy 仅同步状态与通知；Antigravity 和 Pi 都是仅状态同步集成
+- **免打扰模式** — 右键或托盘菜单进入休眠，桌宠停止反应，直到手动唤醒。免打扰屏蔽的是「需要你处理」的事，不是状态播报：远程**完成通知**（Telegram / Slack）仍会送达，因为那正是你离开桌面的意义。免打扰期间不弹权限气泡——Codex、opencode 和 MiMo Code 会回退到原生命令行确认，Claude Code 和 CodeBuddy 会回退到各自内置的权限确认流程。WorkBuddy 仅同步状态与通知；Antigravity 和 Pi 都是仅状态同步集成
 - **提示音效** — 任务完成和权限请求时播放短音效（可从系统托盘或设置中开关；10 秒冷却，免打扰模式自动静音）
 - **系统托盘** — 免打扰、开机自启、检查更新
 - **国际化** — 支持英文、简体中文、繁体中文、韩文、日文、Português (Brasil) 和 Español 界面，可在设置 → 通用中切换
@@ -152,7 +160,13 @@ Clawd 适配多显示器场景：按启动时所在显示器做等比缩放，�
 - **macOS**：`.dmg`
 - **Linux**：`.AppImage` 或 `.deb`
 
-安装后启动 Clawd。全新安装只会自动同步 Claude Code 和 Codex；其他本机 agent 需要用到时，再到 **Settings → Agents** 安装对应集成。
+macOS 以及 Linux x86_64 也可以用 Homebrew 安装：
+
+```bash
+brew install --cask clawd-on-desk
+```
+
+安装后启动 Clawd。全新安装只会自动同步 Claude Code 和 Codex；其他本机 agent 需要用到时，再到 **Settings → AI 编程工具** 安装对应集成。
 
 只有在参与开发、测试未发布代码或调试集成时，才建议从源码运行。源码安装会下载 Electron / 打包工具，并生成较大的 `node_modules`。
 
@@ -168,9 +182,9 @@ npm install
 npm start
 ```
 
-**Claude Code**、**Codex CLI** 会自动注册 hooks，开箱即用。**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**WorkBuddy**、**Kiro CLI**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**ZCode**、**CodeWhale**、**opencode**、**MiMo Code**、**Pi**、**OpenClaw**、**Hermes Agent**、**Qoder**、**QoderWork**、**QwenWork（千问办公）**、**Reasonix CLI**、**DeepSeek Harness** 需要先在 **Settings → Agents** 安装对应集成；安装且启用后，Clawd 才会在启动时继续同步。也涵盖远程 SSH、WSL 及平台说明（macOS / Linux）：**[docs/guides/setup-guide.zh-CN.md](docs/guides/setup-guide.zh-CN.md)**
+**Claude Code**、**Codex CLI** 会自动注册 hooks，开箱即用。**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**WorkBuddy**、**Kiro CLI**、**KiroCrew**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**ZCode**、**CodeWhale**、**opencode**、**MiMo Code**、**Pi**、**OMP**、**OpenClaw**、**Hermes Agent**、**Qoder**、**QoderWork**、**QwenWork（千问办公）**、**Reasonix CLI**、**DeepSeek Harness**、**TraeCode (Trae CN)**、**MiniMax Code** 需要先在 **Settings → AI 编程工具** 安装对应集成；安装且启用后，Clawd 才会在启动时继续同步。也涵盖远程 SSH、WSL 及平台说明（macOS / Linux）：**[docs/guides/setup-guide.zh-CN.md](docs/guides/setup-guide.zh-CN.md)**
 
-想在远程服务器上跑 Claude Code / Codex CLI 并把状态和权限气泡转发到本地 Clawd？请使用应用内 **Settings → 远程 SSH → 部署 / 修复 Hook**。完整步骤、共享服务器隔离边界、Doctor 边界和 FAQ 见：**[docs/guides/guide-remote-ssh.zh-CN.md](docs/guides/guide-remote-ssh.zh-CN.md)**
+想在远程服务器上跑 Claude Code / Codex CLI / Copilot CLI / Hermes Agent 并把状态和权限气泡转发到本地 Clawd？请使用应用内 **Settings → 远程 SSH → 部署 / 修复 Hook**。完整步骤、共享服务器隔离边界、Doctor 边界和 FAQ 见：**[docs/guides/guide-remote-ssh.zh-CN.md](docs/guides/guide-remote-ssh.zh-CN.md)**
 
 关于 `Codex + WSL` 的官方现状、Clawd 当前实现边界、以及为什么容易被误解，见：**[docs/guides/codex-wsl-clarification.zh-CN.md](docs/guides/codex-wsl-clarification.zh-CN.md)**
 
@@ -217,7 +231,7 @@ node scripts/validate-theme.js path/to/your-theme
 
 ## 参与贡献
 
-Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 PR —— 在 [Issues](https://github.com/rullerzhou-afk/clawd-on-desk/issues) 里聊或直接提交 PR。
+Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 PR —— 在 [Issues](https://github.com/rullerzhou-afk/clawd-on-desk/issues) 里聊或直接提交 PR。从源码运行、加翻译、接入新 agent 的做法见 [参与贡献指南](CONTRIBUTING.zh-CN.md)。
 
 ### 维护者
 
@@ -327,8 +341,35 @@ Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 P
 <a href="https://github.com/anthonyonazure"><img src="https://github.com/anthonyonazure.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/weed33834"><img src="https://github.com/weed33834.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/arismarioneves"><img src="https://github.com/arismarioneves.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/wang4433"><img src="https://github.com/wang4433.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/shengmai-justin"><img src="https://github.com/shengmai-justin.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/aaronWool"><img src="https://github.com/aaronWool.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/Zamaniego"><img src="https://github.com/Zamaniego.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/CheeseAgent"><img src="https://github.com/CheeseAgent.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/RS-Nocsi"><img src="https://github.com/RS-Nocsi.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Cobb04"><img src="https://github.com/Cobb04.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/eugenewang5425"><img src="https://github.com/eugenewang5425.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/draintovmasyan783-creator"><img src="https://github.com/draintovmasyan783-creator.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Yueh-H"><img src="https://github.com/Yueh-H.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/TalexDreamSoul"><img src="https://github.com/TalexDreamSoul.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/FuZoe"><img src="https://github.com/FuZoe.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/undefined-moe"><img src="https://github.com/undefined-moe.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/pu-1205"><img src="https://github.com/pu-1205.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Free-LZJ"><img src="https://github.com/Free-LZJ.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/easyhak"><img src="https://github.com/easyhak.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/jlimcode"><img src="https://github.com/jlimcode.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/xfurqan0"><img src="https://github.com/xfurqan0.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/brantshin"><img src="https://github.com/brantshin.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/mantertius"><img src="https://github.com/mantertius.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/VonSdite"><img src="https://github.com/VonSdite.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/sunnyswag"><img src="https://github.com/sunnyswag.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/hanzhe-one"><img src="https://github.com/hanzhe-one.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/52mzd"><img src="https://github.com/52mzd.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/gzx19990101"><img src="https://github.com/gzx19990101.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/ypjn"><img src="https://github.com/ypjn.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/jin-codes"><img src="https://github.com/jin-codes.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/LetitiaChan"><img src="https://github.com/LetitiaChan.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/sanzanazaman"><img src="https://github.com/sanzanazaman.png" width="50" style="border-radius:50%" /></a>
 
 ## 致谢
 
@@ -344,4 +385,6 @@ Clawd on Desk 是一个社区驱动的项目。欢迎提 Bug、提需求、提 P
 - **Clawd** 角色设计归属 [Anthropic](https://www.anthropic.com)。本项目为非官方粉丝作品，与 Anthropic 无官方关联。
 - **三花猫** 素材由 鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 创作，保留所有权利。
 - **Cloudling（云宝）** 素材由 鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 创作，保留所有权利。云宝的视觉方向包含对 OpenAI Codex logo 的致敬；Codex / OpenAI 相关标识仍归 OpenAI 所有，本项目与 OpenAI 无官方关联，也未获 OpenAI 背书。
+- **Hash Sage（哈希仙人）** 以可选官方主题的形式由 [`rullerzhou-afk/clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 独立分发，素材版权归 鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 所有；许可证与完整署名见主题包内文件。它不适用本项目 AGPL-3.0 源码许可。
+- **Whale-chan（鲸鱼娘）** 以可选官方主题的形式由 [`rullerzhou-afk/clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 独立分发。原始角色形象、设定与上游素材的权利归各自原作者所有，本主题署名上游项目 [Neko3000/deepseek-whalechan](https://github.com/Neko3000/deepseek-whalechan) 所列的 ZipZipPipe 与上善无形；鹿鹿 ([@rullerzhou-afk](https://github.com/rullerzhou-afk)) 新作的动画与特效采用 CC BY-NC-SA 4.0，完整条款见主题包内文件。本主题是非官方、非商业同人作品，与 DeepSeek 无关联，也未获其授权或背书；它不适用本项目 AGPL-3.0 源码许可。
 - **第三方画师作品**：版权归各自作者所有。

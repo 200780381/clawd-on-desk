@@ -4,6 +4,10 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert");
 
 const createSettingsEffectRouter = require("../src/settings-effect-router");
+const {
+  getPetAccessorySlotsSnapshot,
+  resetPetAccessoryStateForTests,
+} = require("../src/pet-accessory-state");
 
 function createFakeSettingsController(initialSnapshot = {}) {
   let snapshot = { shortcuts: {}, ...initialSnapshot };
@@ -35,6 +39,7 @@ function createFakeSettingsController(initialSnapshot = {}) {
 }
 
 function createHarness(options = {}) {
+  resetPetAccessoryStateForTests();
   const calls = [];
   const logs = [];
   const { controller, emit } = createFakeSettingsController(options.initialSnapshot);
@@ -62,6 +67,7 @@ function createHarness(options = {}) {
     repositionFloatingBubbles: () => calls.push(["repositionFloatingBubbles"]),
     applyTextScale: () => calls.push(["applyTextScale"]),
     syncSessionHudVisibility: () => calls.push(["syncSessionHudVisibility"]),
+    refreshDisplayedVisual: () => calls.push(["refreshDisplayedVisual"]),
     handleSessionHudPinnedChanged: (next) => calls.push(["handleSessionHudPinnedChanged", next]),
     reclampPetAfterEdgePinningChange: () => calls.push(["reclampPetAfterEdgePinningChange"]),
     rebuildAllMenus: () => calls.push(["rebuildAllMenus"]),
@@ -157,6 +163,30 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  it("repositions once for any bubble placement change without hiding", () => {
+    for (const changes of [
+      { bubbleFollowPet: true },
+      { bubbleFollowPreference: "left" },
+      { bubbleFixedCorner: "top-right" },
+      {
+        bubbleFollowPet: false,
+        bubbleFollowPreference: "right",
+        bubbleFixedCorner: "bottom-left",
+      },
+    ]) {
+      const { calls, emit } = createHarness();
+      emit(changes);
+      const expected = [
+        ["updateMirrors", changes],
+        ["repositionFloatingBubbles"],
+      ];
+      // The existing quick-menu follow toggle still needs its label/checkmark
+      // rebuilt; the two new Settings-only preference keys do not.
+      if ("bubbleFollowPet" in changes) expected.push(["rebuildAllMenus"]);
+      assert.deepStrictEqual(calls, expected);
+    }
+  });
+
   it("clears the Codex user-input card on the notification-policy axis, not the permission-policy axis", () => {
     const { calls, emit } = createHarness();
 
@@ -223,6 +253,7 @@ describe("settings-effect-router", () => {
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { lowPowerIdleMode: true }],
       ["sendToRenderer", "low-power-idle-mode-change", true],
+      ["refreshDisplayedVisual"],
       ["syncSessionHudVisibility"],
     ]);
   });
@@ -524,13 +555,21 @@ describe("settings-effect-router", () => {
     emit({ petAccessory: { clawd: "wizard-hat", cloudling: "halo" } });
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { petAccessory: { clawd: "wizard-hat", cloudling: "halo" } }],
-      ["sendToRenderer", "pet-accessory-change", {
-        id: "wizard-hat",
-        assetFile: "wizard-hat.svg",
-        aspect: 15 / 16,
-        widthScale: 0.95,
-        offsetY: 0.3,
+      ["sendToRenderer", "pet-accessory-slots-change", {
+        themeId: "clawd",
+        payloads: {
+          head: {
+            id: "wizard-hat",
+            assetFile: "wizard-hat.svg",
+            aspect: 15 / 16,
+            widthScale: 0.95,
+            offsetY: 0.3,
+          },
+          mouth: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+        },
+        accessoryGeneration: 1,
       }],
+      ["repositionFloatingBubbles"],
     ]);
 
     calls.length = 0;
@@ -542,13 +581,15 @@ describe("settings-effect-router", () => {
     emit({ petAccessory: { calico: "halo" } });
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { petAccessory: { calico: "halo" } }],
-      ["sendToRenderer", "pet-accessory-change", {
-        id: "none",
-        assetFile: null,
-        aspect: 1,
-        widthScale: 1,
-        offsetY: 0,
+      ["sendToRenderer", "pet-accessory-slots-change", {
+        themeId: "calico",
+        payloads: {
+          head: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+          mouth: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+        },
+        accessoryGeneration: 2,
       }],
+      ["repositionFloatingBubbles"],
     ]);
     assert.strictEqual(calls.some((call) => call[0] === "rebuildAllMenus"), false);
   });
@@ -573,24 +614,136 @@ describe("settings-effect-router", () => {
     emit({ holidayAccessoryEnabled: { clawd: true } });
     assert.deepStrictEqual(calls[1], [
       "sendToRenderer",
-      "pet-accessory-change",
+      "pet-accessory-slots-change",
       {
-        id: "santa-hat",
-        assetFile: "santa-hat.svg",
-        aspect: 16 / 9,
-        widthScale: 1,
-        offsetY: 0.2,
+        themeId: "clawd",
+        payloads: {
+          head: {
+            id: "santa-hat",
+            assetFile: "santa-hat.svg",
+            aspect: 16 / 9,
+            widthScale: 1,
+            offsetY: 0.2,
+          },
+          mouth: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+        },
+        accessoryGeneration: 1,
       },
     ]);
 
     calls.length = 0;
     emit({ petAccessory: { clawd: "halo" } });
-    assert.strictEqual(calls[1][2].id, "santa-hat");
+    assert.strictEqual(calls[1][2].payloads.head.id, "santa-hat");
 
     calls.length = 0;
     emit({ holidayAccessoryEnabled: {} });
-    assert.strictEqual(calls[1][2].id, "halo");
+    assert.strictEqual(calls[1][2].payloads.head.id, "halo");
     assert.strictEqual(calls.some((call) => call[0] === "rebuildAllMenus"), false);
+  });
+
+  it("delivers a complete atomic snapshot when only the mouth selection changes", () => {
+    const clawd = {
+      _id: "clawd",
+      _builtin: true,
+      _capabilities: { accessories: true, mouthAccessories: true },
+    };
+    const { calls, emit } = createHarness({
+      initialSnapshot: { petAccessory: { clawd: "top-hat" } },
+      routerOptions: { getActiveTheme: () => clawd },
+    });
+
+    emit({ petMouthAccessory: { clawd: "cigarette" } });
+    assert.strictEqual(calls[1][0], "sendToRenderer");
+    assert.strictEqual(calls[1][1], "pet-accessory-slots-change");
+    assert.strictEqual(calls[1][2].payloads.head.id, "top-hat");
+    assert.strictEqual(calls[1][2].payloads.mouth.id, "cigarette");
+    assert.strictEqual(calls[1][2].accessoryGeneration, 1);
+    assert.strictEqual(getPetAccessorySlotsSnapshot(clawd), calls[1][2]);
+  });
+
+  it("does not commit or resize when renderer delivery rejects a slots candidate", () => {
+    const clawd = {
+      _id: "clawd",
+      _builtin: true,
+      _capabilities: { accessories: true, mouthAccessories: true },
+    };
+    const { calls, logs, emit } = createHarness({
+      routerOptions: {
+        getActiveTheme: () => clawd,
+        sendToRenderer: (...args) => {
+          calls.push(["sendToRenderer", ...args]);
+          return false;
+        },
+        syncHitWin: () => calls.push(["syncHitWin"]),
+      },
+    });
+
+    emit({ petMouthAccessory: { clawd: "cigarette" } });
+    assert.strictEqual(getPetAccessorySlotsSnapshot(clawd), null);
+    assert.strictEqual(calls.some((call) => call[0] === "syncHitWin"), false);
+    assert.strictEqual(logs.length, 1);
+    assert.match(String(logs[0][0]), /renderer delivery failed/);
+  });
+
+  it("resizes the input window after the effective accessory changes", () => {
+    const clawd = {
+      _id: "clawd",
+      _builtin: true,
+      _capabilities: { accessories: true },
+    };
+    const { calls, emit } = createHarness({
+      routerOptions: {
+        getActiveTheme: () => clawd,
+        syncHitWin: () => calls.push(["syncHitWin"]),
+      },
+    });
+
+    emit({ petAccessory: { clawd: "top-hat" } });
+    assert.deepStrictEqual(calls.map((call) => call[0]), [
+      "updateMirrors",
+      "sendToRenderer",
+      "syncHitWin",
+      "repositionFloatingBubbles",
+    ]);
+  });
+
+  it("stays quiet when the hit window defers, e.g. changing hats mid-drag", () => {
+    const clawd = { _id: "clawd", _builtin: true, _capabilities: { accessories: true } };
+    const { calls, logs, emit } = createHarness({
+      routerOptions: {
+        getActiveTheme: () => clawd,
+        syncHitWin: () => {
+          calls.push(["syncHitWin"]);
+          return { applied: false, deferred: true };
+        },
+      },
+    });
+
+    emit({ petAccessory: { clawd: "top-hat" } });
+
+    // The renderer still gets the new hat and the canonical payload is already
+    // committed, so the next sync applies the envelope. Nothing failed.
+    assert.deepStrictEqual(calls.map((call) => call[0]), [
+      "updateMirrors",
+      "sendToRenderer",
+      "syncHitWin",
+    ]);
+    assert.deepStrictEqual(logs, []);
+  });
+
+  it("warns only when the hit window genuinely could not be resolved", () => {
+    const clawd = { _id: "clawd", _builtin: true, _capabilities: { accessories: true } };
+    const { logs, emit } = createHarness({
+      routerOptions: {
+        getActiveTheme: () => clawd,
+        syncHitWin: () => ({ applied: false, deferred: false }),
+      },
+    });
+
+    emit({ petAccessory: { clawd: "top-hat" } });
+
+    assert.strictEqual(logs.length, 1);
+    assert.match(String(logs[0][0]), /accessory geometry apply failed/);
   });
 
   it("broadcasts settings changes only to live renderer windows", () => {
@@ -659,7 +812,7 @@ describe("settings-effect-router", () => {
   });
 
   it("triggers a cleanup sweep + forced snapshot when any stale-cleanup config key changes", () => {
-    for (const key of ["sessionStaleMs", "workingStaleMs", "detachedIdleStaleMs"]) {
+    for (const key of ["sessionStaleMs", "workingStaleMs", "codexWorkingStaleMs", "detachedIdleStaleMs"]) {
       const { calls, emit } = createHarness();
       emit({ [key]: key === "detachedIdleStaleMs" ? 60_000 : 900_000 });
       assert.deepStrictEqual(calls, [

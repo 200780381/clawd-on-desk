@@ -11,6 +11,7 @@ const {
   CLAWD_HOOK_PID_HEADER,
   CLAWD_PROCESS_INSTANCE_HEADER,
 } = require("../hooks/server-config");
+const { PREVIEW_MAX } = require("../src/server-permission-utils");
 const {
   MAX_PERMISSION_BODY_BYTES,
   handlePermissionPost,
@@ -76,6 +77,7 @@ function makeCtx(overrides = {}) {
     showPermissionBubble: [],
     sendPermissionResponse: [],
     replyOpencodeFamilyPermission: [],
+    dismissOpencodeFamilyPermissionResolvedExternally: [],
     resolved: [],
     maybeStartRemoteApproval: [],
     addPendingPermission: [],
@@ -90,6 +92,7 @@ function makeCtx(overrides = {}) {
     permLog: (message) => calls.logs.push(message),
     isAgentEnabled: () => true,
     isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     isAgentSubagentPermissionsEnabled: () => true,
     updateSession: (...args) => calls.updateSession.push(args),
     showPermissionBubble: (entry) => calls.showPermissionBubble.push(entry),
@@ -99,6 +102,10 @@ function makeCtx(overrides = {}) {
       res.end(behavior);
     },
     replyOpencodeFamilyPermission: (payload) => calls.replyOpencodeFamilyPermission.push(payload),
+    dismissOpencodeFamilyPermissionResolvedExternally: (payload) => {
+      calls.dismissOpencodeFamilyPermissionResolvedExternally.push(payload);
+      return 0;
+    },
     resolvePermissionEntry: (entry, behavior, message, options) => calls.resolved.push({ entry, behavior, message, options }),
     maybeStartRemoteApproval: (entry) => calls.maybeStartRemoteApproval.push(entry),
     addPendingPermission(entry) {
@@ -207,6 +214,59 @@ function callPermissionPostThroughAutomation(body, mode, options = {}) {
   });
 }
 
+describe("Claude ExitPlanMode updatedInput compatibility", () => {
+  it("keeps the exact request input separate from the truncated display copy", async () => {
+    const rawInput = {
+      plan: `Start of plan ${"x".repeat(700)} end-of-plan`,
+      planFilePath: "C:\\Users\\Ruller\\.claude\\plans\\exact.md",
+      metadata: { source: "permission-hook", untouched: true },
+      steps: ["first", "second"],
+    };
+    const res = await callPermissionPostThroughAutomation(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude:exact-plan-input",
+      tool_name: "ExitPlanMode",
+      tool_input: rawInput,
+    }), "off", { showPermissionBubble() {} });
+
+    assert.strictEqual(res.permission.pendingPermissions.length, 1);
+    const entry = res.permission.pendingPermissions[0];
+    assert.notStrictEqual(entry.toolInput.plan, rawInput.plan, "display copy should remain truncated");
+    assert.deepStrictEqual(entry.planReviewWireInput, rawInput, "wire input must remain unmodified");
+
+    res.permission.resolvePermissionEntry(entry, "allow");
+
+    assert.strictEqual(res.body, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: {
+          behavior: "allow",
+          updatedInput: rawInput,
+        },
+      },
+    }));
+  });
+
+  it("drops the connection instead of allowing when the request omitted tool_input", async () => {
+    const res = await callPermissionPostThroughAutomation(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude:missing-plan-input",
+      tool_name: "ExitPlanMode",
+    }), "off", { showPermissionBubble() {} });
+
+    assert.strictEqual(res.permission.pendingPermissions.length, 1);
+    const entry = res.permission.pendingPermissions[0];
+    assert.strictEqual(entry.planReviewWireInput, null);
+
+    res.permission.resolvePermissionEntry(entry, "allow");
+
+    assert.strictEqual(res.body, "", "fallback must not write a decision payload");
+    assert.strictEqual(res.writableFinished, false, "fallback must not end with a false allow");
+    assert.strictEqual(res.destroyed, true, "connection drop returns control to Claude's native prompt");
+    assert.deepStrictEqual(res.permission.pendingPermissions, []);
+  });
+});
+
 describe("server-route-permission helpers", () => {
   it("preserves bubble bypass decisions for CC, Codex, and opencode", () => {
     assert.strictEqual(shouldBypassCCBubble({ hideBubbles: true }, interaction("claude-code", "Bash"), "claude-code"), true);
@@ -225,6 +285,7 @@ describe("server-route-permission helpers", () => {
     }), true);
     assert.strictEqual(shouldBypassCopilotBubble({
       isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     }), false);
   });
 
@@ -285,6 +346,84 @@ describe("server-route-permission POST", () => {
         `${agentId} permission identity must reach the main-owned session path`
       );
     }
+  });
+
+  it("keeps a bounded compact preview and a complete local detail across permission adapters", async () => {
+    const marker = "__CLAWD_PERMISSION_DETAIL_END__";
+    const command = `${"printf x; ".repeat(260)}${marker}`;
+    const cases = [
+      { agentId: "claude-code", body: {} },
+      { agentId: "codebuddy", body: {} },
+      { agentId: "codex", body: { tool_input_description: "Run a generated command" } },
+      { agentId: "qwen-code", body: {} },
+      { agentId: "zcode", body: {} },
+      { agentId: "copilot-cli", body: {} },
+      { agentId: "hermes", body: {} },
+      {
+        agentId: "opencode",
+        body: {
+          request_id: "req-detail",
+          bridge_url: "http://127.0.0.1:9",
+          bridge_token: "detail-token",
+        },
+      },
+    ];
+
+    for (const { agentId, body } of cases) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: agentId,
+        session_id: `${agentId}:detail`,
+        tool_name: "Bash",
+        tool_input: { command },
+        ...body,
+      }));
+      assert.strictEqual(res.ctx.pendingPermissions.length, 1, agentId);
+      const entry = res.ctx.pendingPermissions[0];
+      assert.strictEqual(entry.detailText.endsWith(marker), true, agentId);
+      assert.strictEqual(entry.detailTruncated, false, agentId);
+      assert.strictEqual(JSON.stringify(entry.toolInput).includes(marker), false, agentId);
+    }
+  });
+
+  it("keeps long Ask text for the expanded view without changing the wire answer keys", async () => {
+    const marker = "__CLAWD_ASK_DETAIL_END__";
+    const question = [
+      "Compare the tradeoffs carefully.",
+      "",
+      "1. Keep the compact window.",
+      "2. Open a scrollable detail view.",
+      "",
+      `${"Include every relevant constraint. ".repeat(20)}${marker}`,
+    ].join("\n");
+    const optionDescription = [
+      "Open the detail view.",
+      "",
+      "- Preserve paragraphs.",
+      "- Preserve list structure.",
+    ].join("\n");
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude-code:ask-detail",
+      tool_name: "AskUserQuestion",
+      tool_input: {
+        questions: [{
+          question,
+          header: "Approach",
+          multiSelect: false,
+          options: [
+            { label: "Option A", description: "Keep the compact window." },
+            { label: "Option B", description: optionDescription },
+          ],
+        }],
+      },
+    }));
+
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1);
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.toolInput.questions[0].question.includes(marker), false);
+    assert.strictEqual(entry.elicitationDetailInput.questions[0].question, question);
+    assert.strictEqual(entry.elicitationDetailInput.questions[0].options[1].description, optionDescription);
+    assert.strictEqual(entry.elicitationWireInput.questions[0].question, question);
   });
 
   it("uses the raw permission session id and ignores sender eligibility claims", async () => {
@@ -511,13 +650,15 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.recorder.length, 0);
   });
 
-  it("uses the existing deny response for oversized permission bodies", async () => {
+  it("never forges a deny for oversized permission bodies (connection closed, native fallback)", async () => {
     const res = await callPermissionPost("x".repeat(MAX_PERMISSION_BODY_BYTES + 1));
 
-    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, [{
-      behavior: "deny",
-      message: "Permission request too large for Clawd bubble; answer in terminal",
-    }]);
+    // A transport-level rejection happens before the agent is identified, and
+    // qwen/zcode hooks pass hookSpecificOutput denies straight through as real
+    // decisions — so the only safe answer is no answer: destroy the socket so
+    // CC/CodeBuddy fall back to their chat prompt and qwen/zcode emit "{}".
+    assert.deepStrictEqual(res.ctx.calls.sendPermissionResponse, []);
+    assert.strictEqual(res.destroyed, true);
   });
 
   it("returns no-decision for Codex DND fallback", async () => {
@@ -602,6 +743,278 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
     assert.deepStrictEqual(res.ctx.calls.addPendingPermission, [entry]);
+  });
+
+  it("strips Codex permission process metadata on the profile-bound ingress", async () => {
+    const sessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca777";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "codex",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      source_pid: 456,
+      agent_pid: 456,
+      pid_chain: [789, 456, -1],
+      editor: "cursor",
+      tmux_socket: "/tmp/tmux-1000/work",
+      tmux_client: "/dev/pts/7",
+      orca_pane_key: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/repo",
+      host: "spoofed-by-hook",
+      platform: "webui",
+      model: "gpt-5.4",
+      codex_originator: "Codex Desktop",
+      codex_source: "vscode",
+      hook_source: "codex-official",
+    }), {
+      options: {
+        remoteProfile: { profileId: "ssh-work", displayHost: "workbox" },
+      },
+    });
+
+    const remoteSessionId = makeSessionKey({ profileId: "ssh-work", rawSessionId: sessionId });
+    assert.deepStrictEqual(res.ctx.calls.updateSession, [[
+      remoteSessionId,
+      "notification",
+      "PermissionRequest",
+      {
+        agentId: "codex",
+        hookSource: "codex-official",
+        sourcePid: null,
+        agentPid: null,
+        pidChain: null,
+        editor: null,
+        tmuxSocket: null,
+        tmuxClient: null,
+        // Survives the gate — it is the one terminal identity the secure
+        // transport is still allowed to send.
+        orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+        cwd: "/repo",
+        host: "workbox",
+        platform: "webui",
+        model: "gpt-5.4",
+        codexOriginator: "Codex Desktop",
+        codexSource: "vscode",
+        profileId: "ssh-work",
+        rawSessionId: sessionId,
+        sessionAutomationIdentity: {
+          eligible: false,
+          reason: "remote-session-lifecycle-not-authoritative",
+        },
+      },
+    ]]);
+    // The Codex permEntry never carried an `editor` key, hence the `?? null`.
+    const entry = res.ctx.pendingPermissions[0];
+    assert.deepStrictEqual({
+      sourcePid: entry.sourcePid ?? null,
+      agentPid: entry.agentPid ?? null,
+      pidChain: entry.pidChain ?? null,
+      editor: entry.editor ?? null,
+      tmuxSocket: entry.tmuxSocket ?? null,
+      tmuxClient: entry.tmuxClient ?? null,
+      orcaPaneKey: entry.orcaPaneKey ?? null,
+      cwd: entry.cwd ?? null,
+    }, {
+      sourcePid: null,
+      agentPid: null,
+      pidChain: null,
+      editor: null,
+      tmuxSocket: null,
+      tmuxClient: null,
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/repo",
+    });
+  });
+
+  it("strips WSL permission process metadata without changing Codex automation eligibility", async () => {
+    const sessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca777";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "codex",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      source_pid: 456,
+      agent_pid: 456,
+      pid_chain: [789, 456, -1],
+      editor: "cursor",
+      tmux_socket: "/tmp/tmux-1000/work",
+      tmux_client: "/dev/pts/7",
+      orca_pane_key: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/repo",
+      wsl_distro: "Ubuntu",
+      host: "wsl:Ubuntu",
+      platform: "cli",
+      model: "gpt-5.4",
+      codex_originator: "codex-tui",
+      codex_source: "cli",
+      hook_source: "codex-official",
+    }));
+
+    const opts = res.ctx.calls.updateSession[0][3];
+    assert.strictEqual(opts.sourcePid ?? null, null);
+    assert.strictEqual(opts.agentPid ?? null, null);
+    assert.strictEqual(opts.pidChain ?? null, null);
+    assert.strictEqual(opts.editor ?? null, null);
+    assert.strictEqual(opts.tmuxSocket ?? null, null);
+    assert.strictEqual(opts.tmuxClient ?? null, null);
+    assert.strictEqual(opts.orcaPaneKey, "8ce1fff7-tab:9813824b-leaf");
+    assert.strictEqual(opts.cwd, "/repo");
+    assert.strictEqual(opts.host, "wsl:Ubuntu");
+    assert.deepStrictEqual(opts.sessionAutomationIdentity, {
+      eligible: true,
+      reason: "eligible",
+    });
+
+    assert.ok(res.ctx.pendingPermissions[0], "the WSL request must produce a permission entry");
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.sourcePid ?? null, null);
+    assert.strictEqual(entry.agentPid ?? null, null);
+    assert.strictEqual(entry.pidChain ?? null, null);
+    assert.deepStrictEqual(entry.sessionAutomationIdentity, {
+      eligible: true,
+      reason: "eligible",
+    });
+  });
+
+  it("keeps a WSL Codex interactive subagent eligible for global auto-approval", async () => {
+    const sessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca778";
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "codex",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      hook_source: "codex-official",
+      codex_session_role: "subagent",
+      codex_originator: "codex-tui",
+      codex_source: "cli",
+      source_pid: 456,
+      agent_pid: 456,
+      pid_chain: [789, 456, -1],
+      wsl_distro: "Ubuntu",
+      host: "wsl:Ubuntu",
+    }));
+
+    assert.ok(res.ctx.pendingPermissions[0], "the WSL subagent request must produce a permission entry");
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.codexInteractiveSubagent, true);
+    assert.deepStrictEqual(entry.sessionAutomationIdentity, {
+      eligible: true,
+      reason: "eligible",
+    });
+    assert.strictEqual(entry.sourcePid ?? null, null);
+    assert.strictEqual(entry.agentPid ?? null, null);
+    assert.strictEqual(entry.pidChain ?? null, null);
+  });
+
+  it("strips WSL process metadata for the qwen-code permission builder", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "qwen-code",
+      session_id: "qwen-code:wsl-session",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+      source_pid: 111,
+      agent_pid: 222,
+      pid_chain: [333, 222, -1],
+      tmux_socket: "/tmp/tmux-1000/work",
+      tmux_client: "/dev/pts/7",
+      orca_pane_key: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/repo",
+      wsl_distro: "Ubuntu",
+    }));
+
+    const opts = res.ctx.calls.updateSession[0][3];
+    assert.strictEqual(opts.sourcePid ?? null, null);
+    assert.strictEqual(opts.agentPid ?? null, null);
+    assert.strictEqual(opts.pidChain ?? null, null);
+    assert.strictEqual(opts.tmuxSocket ?? null, null);
+    assert.strictEqual(opts.tmuxClient ?? null, null);
+    assert.strictEqual(opts.orcaPaneKey, "8ce1fff7-tab:9813824b-leaf");
+    assert.strictEqual(opts.cwd, "/repo");
+
+    assert.ok(res.ctx.pendingPermissions[0], "the WSL request must produce a permission entry");
+    const entry = res.ctx.pendingPermissions[0];
+    assert.strictEqual(entry.sourcePid ?? null, null);
+    assert.strictEqual(entry.agentPid ?? null, null);
+    assert.strictEqual(entry.pidChain ?? null, null);
+  });
+
+  it("strips Hermes permission process metadata on the profile-bound ingress", async () => {
+    const sessionId = "hermes:01HQABCD";
+    const body = JSON.stringify({
+      agent_id: "hermes",
+      session_id: sessionId,
+      tool_name: "execute_bash",
+      tool_input: { command: "rm -rf /tmp/test" },
+      tool_use_id: "tool-1",
+      source_pid: 1234,
+      agent_pid: 1234,
+      pid_chain: [9999, 1234, -1],
+      tmux_socket: "/tmp/tmux-1000/work",
+      tmux_client: "/dev/pts/7",
+      orca_pane_key: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+      editor: "cursor",
+    });
+    const processFields = (opts) => ({
+      sourcePid: opts.sourcePid ?? null,
+      agentPid: opts.agentPid ?? null,
+      pidChain: opts.pidChain ?? null,
+      editor: opts.editor ?? null,
+      tmuxSocket: opts.tmuxSocket ?? null,
+      tmuxClient: opts.tmuxClient ?? null,
+      orcaPaneKey: opts.orcaPaneKey ?? null,
+      cwd: opts.cwd ?? null,
+    });
+
+    const remote = await callPermissionPost(body, {
+      options: {
+        remoteProfile: { profileId: "ssh-work", displayHost: "workbox" },
+      },
+    });
+    const remoteOpts = remote.ctx.calls.updateSession[0][3];
+    assert.deepStrictEqual(remote.ctx.calls.updateSession[0].slice(0, 3), [
+      makeSessionKey({ profileId: "ssh-work", rawSessionId: sessionId }),
+      "notification",
+      "PermissionRequest",
+    ]);
+    assert.deepStrictEqual(processFields(remoteOpts), {
+      sourcePid: null,
+      agentPid: null,
+      pidChain: null,
+      editor: null,
+      tmuxSocket: null,
+      tmuxClient: null,
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+    });
+    assert.strictEqual(remoteOpts.host, "workbox");
+    assert.deepStrictEqual(processFields(remote.ctx.pendingPermissions[0]), {
+      sourcePid: null,
+      agentPid: null,
+      pidChain: null,
+      editor: null,
+      tmuxSocket: null,
+      tmuxClient: null,
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+    });
+
+    // Regression: the local path must stay exactly what it was before the gate.
+    const local = await callPermissionPost(body);
+    assert.deepStrictEqual(processFields(local.ctx.calls.updateSession[0][3]), {
+      sourcePid: 1234,
+      agentPid: 1234,
+      pidChain: [9999, 1234],
+      editor: "cursor",
+      tmuxSocket: "/tmp/tmux-1000/work",
+      tmuxClient: "/dev/pts/7",
+      orcaPaneKey: "8ce1fff7-tab:9813824b-leaf",
+      cwd: "/home/user/repo",
+    });
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(local.ctx.calls.updateSession[0][3], "host"),
+      false,
+    );
   });
 
   it("keeps every permission focus entry carrying the same terminal identity fields", () => {
@@ -729,6 +1142,29 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [entry]);
   });
 
+  it("rejects non-loopback or path-bearing opencode bridges before enqueue", async () => {
+    for (const bridgeUrl of [
+      "https://127.0.0.1:1234",
+      "http://localhost:1234",
+      "http://127.0.0.1:1234/reply",
+      "http://192.168.1.20:1234",
+      "http://example.com:1234",
+    ]) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "opencode",
+        session_id: "opencode:invalid-bridge",
+        tool_name: "Bash",
+        request_id: "req-invalid-bridge",
+        bridge_url: bridgeUrl,
+        bridge_token: "token",
+      }));
+      assert.strictEqual(res.statusCode, 200, bridgeUrl);
+      assert.deepStrictEqual(res.ctx.pendingPermissions, [], bridgeUrl);
+      assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, [], bridgeUrl);
+      assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, [], bridgeUrl);
+    }
+  });
+
   it("silently drops headless opencode sessions before auto-pilot can bridge allow", async () => {
     const sessionId = "opencode:headless";
     const res = await callPermissionPost(JSON.stringify({
@@ -805,6 +1241,140 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(reply.requestId, "req-boom");
     assert.strictEqual(reply.bridgeUrl, "http://127.0.0.1:1234");
     assert.strictEqual(reply.bridgeToken, "token");
+  });
+
+  it("routes a strict family replied lifecycle before every create/decision gate and never records a request", async () => {
+    const lifecycleCalls = [];
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      hook_source: "opencode-plugin",
+      permission_event: "replied",
+      session_id: "opencode:ses-life",
+      request_id: "per-life",
+      lifecycle_bridge_url: "http://127.0.0.1:43210",
+      lifecycle_bridge_token: "token_life",
+    }), {
+      ctx: {
+        doNotDisturb: true,
+        hideBubbles: true,
+        isAgentEnabled: () => false,
+        isAgentPermissionsEnabled: () => false,
+        dismissOpencodeFamilyPermissionResolvedExternally: (identity) => {
+          lifecycleCalls.push(identity);
+          return 1;
+        },
+      },
+    });
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+    assert.strictEqual(res.body, "ok");
+    assert.deepStrictEqual(lifecycleCalls, [{
+      agentId: "opencode",
+      requestId: "per-life",
+      sessionId: localSessionKey("opencode:ses-life"),
+      bridgeUrl: "http://127.0.0.1:43210",
+      bridgeToken: "token_life",
+    }]);
+    assert.deepStrictEqual(res.recorder, [], "lifecycle must not create a PermissionRequest recorder");
+    assert.deepStrictEqual(res.ctx.calls.updateSession, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, []);
+    assert.deepStrictEqual(res.ctx.calls.replyOpencodeFamilyPermission, []);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+  });
+
+  it("200-no-ops malformed lifecycle identity without a default session or a thrown validator error", async () => {
+    const invalidBodies = [
+      { session_id: null },
+      { session_id: 42 },
+      { lifecycle_bridge_url: "http://localhost:43210" },
+      { lifecycle_bridge_url: { href: "http://127.0.0.1:43210" } },
+      { lifecycle_bridge_token: 42 },
+      { lifecycle_bridge_token: "x".repeat(129) },
+      { request_id: "" },
+    ];
+    for (const delta of invalidBodies) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: "opencode",
+        permission_event: "replied",
+        session_id: "opencode:strict",
+        request_id: "per-strict",
+        lifecycle_bridge_url: "http://127.0.0.1:43210",
+        lifecycle_bridge_token: "token_strict",
+        ...delta,
+      }));
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(res.headers[CLAWD_SERVER_HEADER], CLAWD_SERVER_ID);
+      assert.deepStrictEqual(res.recorder, []);
+      assert.deepStrictEqual(
+        res.ctx.calls.dismissOpencodeFamilyPermissionResolvedExternally,
+        [],
+        JSON.stringify(delta)
+      );
+      assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+      assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    }
+  });
+
+  it("fails closed for unknown permission_event instead of creating an unknown family bubble", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "opencode",
+      permission_event: "resolved-someday",
+      session_id: "opencode:unknown-event",
+      request_id: "per-unknown-event",
+      lifecycle_bridge_url: "http://127.0.0.1:1234",
+      lifecycle_bridge_token: "token-unknown-event",
+    }));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.deepStrictEqual(res.recorder, []);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
+    assert.deepStrictEqual(res.ctx.calls.dismissOpencodeFamilyPermissionResolvedExternally, []);
+  });
+
+  it("keeps ACK and ordinary family enqueue in one synchronous execution segment", () => {
+    const body = JSON.stringify({
+      agent_id: "opencode",
+      session_id: "opencode:sync",
+      tool_name: "Bash",
+      request_id: "per-sync",
+      bridge_url: "http://127.0.0.1:1234",
+      bridge_token: "token",
+    });
+    const ctx = makeCtx();
+    let dataHandler = null;
+    const req = {
+      headers: {},
+      on(eventName, handler) {
+        if (eventName === "data") dataHandler = handler;
+        if (eventName === "end") {
+          dataHandler(Buffer.from(body));
+          handler();
+        }
+        return this;
+      },
+    };
+    const res = makeRes();
+    let pendingAtAck = null;
+    const originalEnd = res.end;
+    res.end = function endAndSnapshot(data) {
+      originalEnd.call(this, data);
+      pendingAtAck = ctx.pendingPermissions.length;
+    };
+
+    handlePermissionPost(req, res, {
+      ctx,
+      createRequestHookRecorder: () => ({
+        accepted() {}, droppedByDisabled() {}, droppedByDnd() {},
+        droppedInvalidAgent() {}, droppedUnsupported() {},
+      }),
+    });
+
+    assert.strictEqual(pendingAtAck, 0, "ACK is written immediately before enqueue");
+    assert.strictEqual(ctx.pendingPermissions.length, 1, "enqueue completes before the handler returns");
+    assert.strictEqual(ctx.pendingPermissions[0].familyRequestId, "per-sync");
   });
 
   it("destroys the Claude/CodeBuddy connection during DND", async () => {
@@ -1930,6 +2500,36 @@ describe("server-route-permission POST", () => {
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [entry]);
   });
 
+  it("carries the desktop marker into the DSH permission record only for bridge-local traffic", async () => {
+    const base = {
+      agent_id: "deepseek-harness",
+      hook_source: "dsh-plugin",
+      session_id: "deepseek-harness:carrier",
+      tool_name: "execute_shell",
+      tool_input: {},
+      dsh_carrier: "desktop",
+    };
+
+    const local = await callPermissionPost(JSON.stringify(base));
+    assert.strictEqual(local.ctx.calls.updateSession[0][3].dshCarrier, "desktop");
+    assert.strictEqual(local.ctx.pendingPermissions[0].dshCarrier, "desktop");
+
+    const web = await callPermissionPost(JSON.stringify({ ...base, dsh_carrier: "web" }));
+    assert.strictEqual(web.ctx.calls.updateSession[0][3].dshCarrier, undefined);
+    assert.strictEqual(web.ctx.pendingPermissions[0].dshCarrier, undefined);
+
+    const foreignSource = await callPermissionPost(JSON.stringify({ ...base, hook_source: "external" }));
+    assert.strictEqual(foreignSource.ctx.calls.updateSession[0][3].dshCarrier, undefined);
+
+    const remote = await callPermissionPost(JSON.stringify(base), {
+      options: { remoteProfile: { profileId: "remote-1", displayHost: "remote-host" } },
+    });
+    assert.strictEqual(remote.ctx.calls.updateSession[0][3].dshCarrier, undefined);
+
+    const wsl = await callPermissionPost(JSON.stringify({ ...base, wsl_distro: "Ubuntu" }));
+    assert.strictEqual(wsl.ctx.calls.updateSession[0][3].dshCarrier, undefined);
+  });
+
   it("leaves DSH ask_user_question with the native provider", async () => {
     const res = await callPermissionPost(JSON.stringify({
       agent_id: "deepseek-harness",
@@ -2020,6 +2620,25 @@ describe("server-route-permission POST", () => {
     assert.strictEqual(res.statusCode, 204);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
     assert.deepStrictEqual(res.ctx.calls.removePendingPermission.map((item) => item.reason), ["dsh-bubble-failed"]);
+    assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
+  });
+
+  it("returns DSH no-decision without enqueue when the session update fails", async () => {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "deepseek-harness",
+      session_id: "deepseek-harness:update-fail",
+      tool_name: "execute_shell",
+      tool_input: {},
+    }), {
+      ctx: { updateSession() { throw new Error("state unavailable"); } },
+    });
+    assert.strictEqual(res.statusCode, 204);
+    assert.deepStrictEqual(res.ctx.pendingPermissions, []);
+    assert.deepStrictEqual(res.ctx.calls.addPendingPermission, []);
+    assert.deepStrictEqual(res.ctx.calls.removePendingPermission.map((item) => item.reason), [
+      "dsh-update-session-failed",
+    ]);
+    assert.deepStrictEqual(res.ctx.calls.showPermissionBubble, []);
     assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, []);
   });
 });
@@ -2525,5 +3144,167 @@ describe("server-route-permission POST — CC subagent requests (#451)", () => {
     assert.strictEqual(res.destroyed, true);
     assert.deepStrictEqual(res.ctx.pendingPermissions, []);
     assert.deepStrictEqual(res.recorder.map((item) => item.outcome).filter(Boolean), ["disabled"]);
+  });
+});
+
+// The destructive-action reminder is decided in two places, and these lanes own
+// the route's half: whether the *stamp* on the pending entry is derived from the
+// accepted request. Whether a stamp then holds the request is the automation
+// chokepoint's half, in test/permission-destructive-reminder.test.js.
+describe("destructive-action reminder — the route stamps what it accepted", () => {
+  const ADAPTERS = [
+    { agentId: "claude-code", body: {} },
+    { agentId: "codebuddy", body: {} },
+    { agentId: "codex", body: { tool_input_description: "Run a generated command" } },
+    { agentId: "qwen-code", body: {} },
+    { agentId: "zcode", body: {} },
+    { agentId: "copilot-cli", body: {} },
+    { agentId: "hermes", body: {} },
+  ];
+
+  async function stampFor(agentId, extra, command) {
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: agentId,
+      session_id: `${agentId}:reminder`,
+      tool_name: "Bash",
+      tool_input: { command },
+      ...extra,
+    }));
+    assert.strictEqual(res.ctx.pendingPermissions.length, 1, agentId);
+    return res.ctx.pendingPermissions[0].permissionReminder;
+  }
+
+  it("stamps a recognized destructive command on every permission adapter", async () => {
+    for (const { agentId, body } of ADAPTERS) {
+      assert.deepStrictEqual(
+        await stampFor(agentId, body, "git push --force origin main"),
+        { hold: true, tag: "force-push" },
+        agentId
+      );
+    }
+  });
+
+  it("stamps nothing for an ordinary command", async () => {
+    for (const { agentId, body } of ADAPTERS) {
+      assert.strictEqual(await stampFor(agentId, body, "npm test"), null, agentId);
+    }
+  });
+
+  it("stamps a deliberate exception as excused rather than as a hold", async () => {
+    assert.deepStrictEqual(
+      await stampFor("claude-code", {}, "git push --force-with-lease origin main"),
+      { hold: false, tag: "force-push", exception: "force-with-lease" }
+    );
+    assert.deepStrictEqual(
+      await stampFor("claude-code", {}, "npm publish --dry-run"),
+      { hold: false, tag: "publish", exception: "dry-run" }
+    );
+  });
+
+  it("fails closed on takeover regressions before an automatic allow can use the stamp", async () => {
+    const cases = [
+      ["psql -c --dry-run -c 'DROP TABLE users'", "db-destroy"],
+      [
+        `echo "$(git push --force-with-lease origin main && printf ')' && git reset --hard HEAD^)"`,
+        "history-rewrite",
+      ],
+      [`echo "it's $(rm -rf /etc)"`, "file-delete"],
+      ["git push --force-with-lease -fu origin main", "force-push"],
+      ["rm -rf dist <&0 /etc", "file-delete"],
+      [[...new Array(300).fill("x"), "&&", "rm", "-rf", "/etc"], "file-delete"],
+      [["rm", "-rf", "/etc", 5], "scan-error"],
+      [null, "scan-error"],
+    ];
+    for (const [command, tag] of cases) {
+      assert.deepStrictEqual(
+        await stampFor("claude-code", {}, command),
+        { hold: true, tag },
+        command
+      );
+    }
+  });
+
+  it("keeps an incomplete quote caused only by the scan budget as unmatched", async () => {
+    assert.strictEqual(
+      await stampFor("claude-code", {}, `echo "${"x".repeat(5000)}"`),
+      null
+    );
+  });
+
+  it("carries a view on every accepted request", async () => {
+    // The invariant that matters is totality at runtime, not a source-text count.
+    // An earlier version of this lane compared call counts against the display-view
+    // helper; those counts stayed equal while the remote-only path spread neither,
+    // so it could not see that a bubbles-disabled install had no reminder at all.
+    const { NOT_INSPECTED_TAG } = require("../src/permission-reminder");
+    for (const { agentId, body } of ADAPTERS) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: agentId,
+        session_id: `${agentId}:reminder-total`,
+        tool_name: "Bash",
+        tool_input: { command: "git push --force origin main" },
+        ...body,
+      }));
+      const [entry] = res.ctx.pendingPermissions;
+      assert.ok(entry, agentId);
+      assert.notStrictEqual(entry.permissionReminder, undefined, agentId);
+      assert.notStrictEqual(entry.permissionReminder.tag, NOT_INSPECTED_TAG,
+        `${agentId}: the safety net must be unreachable on a real path`);
+      assert.deepStrictEqual(entry.permissionReminder, { hold: true, tag: "force-push" }, agentId);
+    }
+  });
+
+  it("carries a view on the remote-only path too, where bubbles are disabled", async () => {
+    // This is the path a reminder would otherwise miss entirely: with bubbles off
+    // the entry is built by tryRemoteOnlyApproval from its own field list, and a
+    // session grant resolves it through maybeAutoResolveSessionPermission without
+    // a card ever existing. claude-code and codebuddy reach it AND are eligible for
+    // an automatic allow, so an unstamped entry there is a silent miss.
+    const { NOT_INSPECTED_TAG } = require("../src/permission-reminder");
+    const bubblesOff = { ctx: { getBubblePolicy: () => ({ enabled: false, autoCloseMs: 0 }) } };
+    const cases = [
+      ["claude-code", {}, { hold: true, tag: "force-push" }],
+      ["codebuddy", {}, { hold: true, tag: "force-push" }],
+      ["zcode", {}, { hold: true, tag: "force-push" }],
+      // DeepSeek Harness deliberately exposes no tool arguments, so there is
+      // nothing to recognize -- but the view is still derived, which is what
+      // distinguishes "inspected, no match" from "nobody looked".
+      ["deepseek-harness", { reason: "run a generated command" }, null],
+    ];
+    for (const [agentId, extra, expected] of cases) {
+      const res = await callPermissionPost(JSON.stringify({
+        agent_id: agentId,
+        session_id: `${agentId}:reminder-remote-only`,
+        tool_name: "Bash",
+        tool_input: { command: "git push --force origin main" },
+        ...extra,
+      }), bubblesOff);
+      const [entry] = res.ctx.pendingPermissions;
+      assert.ok(entry, `${agentId}: a remote-only request must still be pending`);
+      assert.strictEqual(res.ctx.calls.showPermissionBubble.length, 0,
+        `${agentId}: this arm must exercise the remote-only branch, not the ordinary one`);
+      assert.notStrictEqual(entry.permissionReminder, undefined,
+        `${agentId}: a remote-only entry must carry a view`);
+      if (entry.permissionReminder) {
+        assert.notStrictEqual(entry.permissionReminder.tag, NOT_INSPECTED_TAG, agentId);
+      }
+      assert.deepStrictEqual(entry.permissionReminder, expected, agentId);
+    }
+  });
+
+  it("stamps from the accepted input, not from the truncated display copy", async () => {
+    const command = `echo ${"x".repeat(PREVIEW_MAX + 100)} && npm publish`;
+    const res = await callPermissionPost(JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "claude:reminder-long",
+      tool_name: "Bash",
+      tool_input: { command },
+    }));
+    const entry = res.ctx.pendingPermissions[0];
+    assert.ok(
+      !String(entry.toolInput.command).includes("npm publish"),
+      "the display copy really has lost the destructive part -- otherwise this proves nothing"
+    );
+    assert.deepStrictEqual(entry.permissionReminder, { hold: true, tag: "publish" });
   });
 });

@@ -10,6 +10,11 @@ const {
 } = require("../src/codex-monitor-callback");
 
 describe("Codex monitor callback helpers", () => {
+  it("keeps title refreshes metadata-only even when their payload is missing", () => {
+    assert.strictEqual(isCodexMonitorMetadataOnlyEvent("session_index:title", { sessionTitle: "Title" }), true);
+    assert.strictEqual(isCodexMonitorMetadataOnlyEvent("session_index:title", null), true);
+  });
+
   it("identifies token_count context updates as metadata-only events", () => {
     assert.strictEqual(
       isCodexMonitorMetadataOnlyEvent("event_msg:token_count", {
@@ -110,6 +115,7 @@ describe("Codex monitor callback helpers", () => {
       sourcePid: 11,
       agentPid: 22,
       pidChain: [22, 11],
+      transcriptPath: "C:\\Users\\tester\\.codex\\sessions\\2026\\09\\15\\rollout.jsonl",
       codexOriginator: "Codex Desktop",
       codexSource: "vscode",
     }, { includeHeadless: true }), {
@@ -119,6 +125,7 @@ describe("Codex monitor callback helpers", () => {
       sourcePid: 11,
       agentPid: 22,
       pidChain: [22, 11],
+      transcriptPath: "C:\\Users\\tester\\.codex\\sessions\\2026\\09\\15\\rollout.jsonl",
       codexOriginator: "Codex Desktop",
       codexSource: "vscode",
       headless: false,
@@ -148,6 +155,21 @@ describe("Codex monitor callback helpers", () => {
     });
   });
 
+  it("passes assistant output from terminal JSONL completions", () => {
+    assert.deepStrictEqual(buildCodexMonitorSessionOptions({
+      cwd: "/repo",
+      assistantLastOutput: "Implemented the fix.\nTests pass.",
+      assistantLastOutputTruncated: true,
+    }, { includeHeadless: true }), {
+      cwd: "/repo",
+      agentId: "codex",
+      sessionTitle: undefined,
+      assistantLastOutput: "Implemented the fix.\nTests pass.",
+      assistantLastOutputTruncated: true,
+      headless: false,
+    });
+  });
+
   it("omits invalid context usage from JSONL monitor updates", () => {
     assert.deepStrictEqual(buildCodexMonitorSessionOptions({
       cwd: "/repo",
@@ -173,5 +195,41 @@ describe("Codex monitor callback helpers", () => {
       sessionTitle: "State update",
     });
     assert.strictEqual(Object.prototype.hasOwnProperty.call(options, "headless"), false);
+  });
+
+  it("passes trusted JSONL recap time and ephemeral ids without quota fields", () => {
+    assert.deepStrictEqual(buildCodexMonitorSessionOptions({
+      cwd: "/repo",
+      recapOccurredAt: 1788013260000,
+      recapDedupeId: "turn-secret",
+      toolUseId: "call-secret",
+      syntheticBackfill: true,
+    }, { includeHeadless: true, includeRecap: true }), {
+      cwd: "/repo",
+      agentId: "codex",
+      sessionTitle: undefined,
+      recapOccurredAt: 1788013260000,
+      recapDedupeId: "turn-secret",
+      toolUseId: "call-secret",
+      recapSuppressed: true,
+      headless: false,
+    });
+  });
+
+  it("marks trusted headless JSONL lifecycle as subagent recap input", () => {
+    assert.deepStrictEqual(buildCodexMonitorSessionOptions({
+      cwd: "/repo",
+      recapOccurredAt: 1788013260000,
+      recapDedupeId: "subagent-turn-secret",
+      headless: true,
+    }, { includeHeadless: true, includeRecap: true }), {
+      cwd: "/repo",
+      agentId: "codex",
+      sessionTitle: undefined,
+      recapOccurredAt: 1788013260000,
+      recapDedupeId: "subagent-turn-secret",
+      recapIsSubagent: true,
+      headless: true,
+    });
   });
 });

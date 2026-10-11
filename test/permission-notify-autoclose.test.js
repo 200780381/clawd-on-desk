@@ -2,6 +2,7 @@
 
 const assert = require("node:assert");
 const fs = require("node:fs");
+const http = require("node:http");
 const Module = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
@@ -44,6 +45,7 @@ function createPermissionHarness({
   const createdWindows = [];
   class FakeBrowserWindow {
     constructor() {
+      if (loadBehavior === "constructor-throw") throw new Error("BrowserWindow unavailable");
       this.destroyed = false;
       this.bounds = null;
       this._closedHandler = null;
@@ -115,6 +117,7 @@ function createPermissionHarness({
   const permissionFactory = loadPermissionWithElectron(fakeElectron);
   let notificationAutoCloseMs = 10_000;
   const focused = [];
+  const slackAnnouncements = [];
   const api = permissionFactory({
     win: { isDestroyed() { return false; } },
     permDebugLog: logPath,
@@ -139,6 +142,7 @@ function createPermissionHarness({
     getHudReservedOffset: () => 0,
     repositionUpdateBubble: () => {},
     focusTerminalForSession: (...args) => focused.push(args),
+    notifySlackPermission: (payload) => slackAnnouncements.push(payload),
     guardAlwaysOnTop: () => {},
     reapplyMacVisibility: () => {},
   });
@@ -146,6 +150,7 @@ function createPermissionHarness({
   return {
     api,
     focused,
+    slackAnnouncements,
     createdWindows,
     setNotificationAutoCloseMs(value) {
       notificationAutoCloseMs = value;
@@ -290,6 +295,47 @@ describe("permission passive notify auto-close refresh", () => {
     assert.strictEqual(api.pendingPermissions.length, 0);
     assert.strictEqual(harness.focused.length, 1);
     assert.strictEqual(harness.focused[0][0], "codex-a");
+  });
+
+  it("turns a stale Codex question expansion request into native focus", () => {
+    const harness = createPermissionHarness();
+    const { api } = harness;
+    api.showCodexUserInputBubble({
+      sessionId: "codex-expand",
+      callId: "call_expand",
+      questions: [{ id: "q", question: "Pick one", options: [] }],
+      sourcePid: 42,
+      cwd: "/repo",
+    });
+    const entry = api.pendingPermissions[0];
+
+    assert.strictEqual(
+      api.handleBubbleExpanded({ sender: { __window: entry.bubble } }, true),
+      false
+    );
+    assert.strictEqual(api.pendingPermissions.length, 0);
+    assert.strictEqual(harness.focused.length, 1);
+    assert.strictEqual(harness.focused[0][0], "codex-expand");
+  });
+
+  it("dismisses a stale remote Codex expansion without focusing a local terminal", () => {
+    const harness = createPermissionHarness();
+    const { api } = harness;
+    api.showCodexUserInputBubble({
+      sessionId: "codex-remote-expand",
+      callId: "call_remote_expand",
+      questions: [{ id: "q", question: "Pick one", options: [] }],
+      host: "remote.example",
+      cwd: "/repo",
+    });
+    const entry = api.pendingPermissions[0];
+
+    assert.strictEqual(
+      api.handleBubbleExpanded({ sender: { __window: entry.bubble } }, true),
+      false
+    );
+    assert.strictEqual(api.pendingPermissions.length, 0);
+    assert.deepStrictEqual(harness.focused, []);
   });
 
   it("clears only the matching Codex user-input call", () => {
@@ -570,7 +616,7 @@ describe("Kimi passive cue rebuild after dismissal (gate-ledger joint lifecycle)
   });
 });
 
-describe("interactive permission bubble fatal fallback", () => {
+describe("interactive permission bubble lifecycle", () => {
   afterEach(() => {
     mock.timers.reset();
     delete require.cache[PERMISSION_MODULE_PATH];
@@ -580,13 +626,24 @@ describe("interactive permission bubble fatal fallback", () => {
     tempLogPaths.clear();
   });
 
-  function makeBlockingEntry() {
+  function makeBlockingEntry({ agentId = "claude-code", ...overrides } = {}) {
     const response = {
       writableEnded: false,
+      writableFinished: false,
       destroyed: false,
       destroyCalls: 0,
+      statusCode: null,
+      body: "",
+      replyCount: 0,
       on() {},
       removeListener() {},
+      writeHead(statusCode) { this.statusCode = statusCode; },
+      end(body) {
+        this.body += body || "";
+        this.replyCount += 1;
+        this.writableEnded = true;
+        this.writableFinished = true;
+      },
       destroy() {
         this.destroyCalls += 1;
         this.destroyed = true;
@@ -598,21 +655,265 @@ describe("interactive permission bubble fatal fallback", () => {
         res: response,
         abortHandler() {},
         suggestions: [],
-        sessionId: "claude-fatal-bubble",
+        sessionId: `${agentId}-lifecycle-bubble`,
         bubble: null,
         hideTimer: null,
         toolName: "Bash",
         toolInput: { command: "npm test" },
         createdAt: Date.now(),
-        agentId: "claude-code",
+        agentId,
+        isCodex: agentId === "codex",
         interaction: classifyPermissionInteraction({
-          agentId: "claude-code",
+          agentId,
           eventKind: "permission",
           toolName: "Bash",
         }),
+        ...overrides,
       },
     };
   }
+
+  // opencode-family v1 / MiMo reply through the plugin's reverse bridge, not
+  // through an HTTP response on the entry. Swap http.request so a regression
+  // that forwards a synthetic reject on user-close turns the test red instead
+  // of hitting a real socket.
+  function withBridgeRequestRecorder(run) {
+    const requests = [];
+    const originalRequest = http.request;
+    http.request = function recordBridgeRequest(...args) {
+      requests.push(args);
+      return { on() {}, write() {}, end() {}, destroy() {}, setTimeout() {} };
+    };
+    try {
+      return run(requests);
+    } finally {
+      http.request = originalRequest;
+    }
+  }
+
+  it("closing a Codex window returns no-decision once and cancels its mirrored approval", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const harness = createPermissionHarness();
+    const { entry, response } = makeBlockingEntry({ agentId: "codex" });
+    const sibling = makeBlockingEntry({ agentId: "codex" });
+    const controller = new AbortController();
+    const outcomes = [];
+    entry.remoteApprovalAbortControllers = [controller];
+    entry.remoteApprovalRequests = [{
+      name: "test-remote",
+      signal: controller.signal,
+      client: {
+        resolveApprovalExternally(signal, outcome) {
+          assert.strictEqual(signal, controller.signal);
+          outcomes.push(outcome.decision);
+          return true;
+        },
+      },
+    }];
+    harness.api.pendingPermissions.push(entry, sibling.entry);
+    harness.api.showPermissionBubble(entry);
+    harness.api.showPermissionBubble(sibling.entry);
+
+    const bubble = entry.bubble;
+    bubble.destroy();
+
+    assert.strictEqual(response.statusCode, 204);
+    assert.strictEqual(response.body, "");
+    assert.strictEqual(response.replyCount, 1);
+    assert.deepStrictEqual(harness.api.pendingPermissions, [sibling.entry]);
+    assert.strictEqual(sibling.response.writableEnded, false);
+    assert.strictEqual(sibling.entry.bubble.destroyed, false);
+    assert.strictEqual(controller.signal.aborted, true);
+    assert.deepStrictEqual(outcomes, ["no-decision"]);
+
+    bubble._closedHandler();
+    harness.api.resolvePermissionEntry(entry, "allow");
+    harness.api.resolvePermissionEntry(entry, "deny");
+    assert.strictEqual(response.replyCount, 1);
+    assert.deepStrictEqual(outcomes, ["no-decision"]);
+    harness.api.cleanup();
+  });
+
+  for (const behavior of ["allow", "deny"]) {
+    it(`closing an already ${behavior}-resolved Codex window sends no second decision`, () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const harness = createPermissionHarness();
+      const { entry, response } = makeBlockingEntry({ agentId: "codex" });
+      harness.api.pendingPermissions.push(entry);
+      harness.api.showPermissionBubble(entry);
+      const bubble = entry.bubble;
+
+      harness.api.resolvePermissionEntry(entry, behavior);
+      bubble.destroy();
+      bubble._closedHandler();
+
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(JSON.parse(response.body).hookSpecificOutput.decision.behavior, behavior);
+      assert.strictEqual(response.replyCount, 1);
+      assert.strictEqual(harness.api.pendingPermissions.length, 0);
+    });
+  }
+
+  it("application cleanup releases a Codex approval without a second decision on window close", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const harness = createPermissionHarness();
+    const { entry, response } = makeBlockingEntry({ agentId: "codex" });
+    harness.api.pendingPermissions.push(entry);
+    harness.api.showPermissionBubble(entry);
+    const bubble = entry.bubble;
+
+    harness.api.cleanup();
+    bubble._closedHandler();
+
+    assert.strictEqual(response.statusCode, 204);
+    assert.strictEqual(response.body, "");
+    assert.strictEqual(response.replyCount, 1);
+    assert.strictEqual(harness.api.pendingPermissions.length, 0);
+  });
+
+  it("closing a pending Claude window retains its explicit user-close deny", () => {
+    const harness = createPermissionHarness();
+    const { entry, response } = makeBlockingEntry();
+    harness.api.pendingPermissions.push(entry);
+    harness.api.showPermissionBubble(entry);
+
+    entry.bubble.destroy();
+
+    assert.strictEqual(response.statusCode, 200);
+    assert.strictEqual(JSON.parse(response.body).hookSpecificOutput.decision.behavior, "deny");
+    assert.strictEqual(response.replyCount, 1);
+    assert.strictEqual(harness.api.pendingPermissions.length, 0);
+  });
+
+  for (const { agentId, bridgeToken, label, article } of [
+    { agentId: "opencode", bridgeToken: "token_opencode_v1", label: "OpenCode v1", article: "an" },
+    { agentId: "mimocode", bridgeToken: "token_mimocode", label: "MiMo Code", article: "a" },
+  ]) {
+    it(`closing ${article} ${label} window falls back to the native prompt without a bridge reply`, () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const harness = createPermissionHarness();
+      withBridgeRequestRecorder((bridgeRequests) => {
+        const { entry } = makeBlockingEntry({
+          agentId,
+          res: null,
+          familyRequestId: `per-${agentId}`,
+          familyBridgeUrl: "http://127.0.0.1:43210",
+          familyBridgeToken: bridgeToken,
+        });
+        harness.api.pendingPermissions.push(entry);
+        harness.api.showPermissionBubble(entry);
+        const bubble = entry.bubble;
+
+        bubble.destroy();
+        bubble._closedHandler();
+
+        // no-decision is a silent drop: the host keeps waiting on its native
+        // prompt, so the bridge must never see a fabricated once/reject.
+        assert.strictEqual(bridgeRequests.length, 0, "user close must not send a bridge reply");
+        assert.strictEqual(harness.api.pendingPermissions.length, 0);
+
+        // A stale follow-up decision must not produce a second outcome either.
+        harness.api.resolvePermissionEntry(entry, "deny");
+        assert.strictEqual(bridgeRequests.length, 0);
+      });
+      harness.api.cleanup();
+    });
+
+    for (const behavior of ["allow", "deny"]) {
+      it(`closing an already ${behavior}-resolved ${label} window sends no second bridge reply`, () => {
+        mock.timers.enable({ apis: ["setTimeout"] });
+        const harness = createPermissionHarness();
+        withBridgeRequestRecorder((bridgeRequests) => {
+          const { entry } = makeBlockingEntry({
+            agentId,
+            res: null,
+            familyRequestId: `per-${agentId}-${behavior}`,
+            familyBridgeUrl: "http://127.0.0.1:43210",
+            familyBridgeToken: bridgeToken,
+          });
+          harness.api.pendingPermissions.push(entry);
+          harness.api.showPermissionBubble(entry);
+          const bubble = entry.bubble;
+
+          harness.api.resolvePermissionEntry(entry, behavior);
+          assert.strictEqual(bridgeRequests.length, 1, "the explicit decision reaches the bridge");
+
+          bubble.destroy();
+          bubble._closedHandler();
+
+          assert.strictEqual(bridgeRequests.length, 1, "close after resolution must not send a second reply");
+          assert.strictEqual(harness.api.pendingPermissions.length, 0);
+        });
+        harness.api.cleanup();
+      });
+    }
+  }
+
+  it("closing an OpenCode v2 window answers 204 no-decision instead of deny", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const harness = createPermissionHarness();
+    const { entry, response } = makeBlockingEntry({
+      agentId: "opencode",
+      isOpencodeV2: true,
+      familyRequestId: "per-opencode-v2",
+    });
+    harness.api.pendingPermissions.push(entry);
+    harness.api.showPermissionBubble(entry);
+    const bubble = entry.bubble;
+
+    bubble.destroy();
+
+    assert.strictEqual(response.statusCode, 204);
+    assert.strictEqual(response.body, "");
+    assert.strictEqual(response.replyCount, 1);
+    assert.strictEqual(harness.api.pendingPermissions.length, 0);
+
+    // A late deny must not replace the native fallback with an explicit reject.
+    bubble._closedHandler();
+    harness.api.resolvePermissionEntry(entry, "deny");
+    assert.strictEqual(response.statusCode, 204);
+    assert.strictEqual(response.replyCount, 1);
+    harness.api.cleanup();
+  });
+
+  for (const behavior of ["allow", "deny"]) {
+    it(`closing an already ${behavior}-resolved OpenCode v2 window sends no second decision`, () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const harness = createPermissionHarness();
+      const { entry, response } = makeBlockingEntry({
+        agentId: "opencode",
+        isOpencodeV2: true,
+        familyRequestId: `per-opencode-v2-${behavior}`,
+      });
+      harness.api.pendingPermissions.push(entry);
+      harness.api.showPermissionBubble(entry);
+      const bubble = entry.bubble;
+
+      harness.api.resolvePermissionEntry(entry, behavior);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(
+        JSON.parse(response.body).decision,
+        behavior === "deny" ? "deny" : "allow"
+      );
+      assert.strictEqual(response.replyCount, 1);
+
+      bubble.destroy();
+      bubble._closedHandler();
+
+      assert.strictEqual(response.replyCount, 1);
+      assert.strictEqual(harness.api.pendingPermissions.length, 0);
+      harness.api.cleanup();
+    });
+  }
+
+  it("does not announce when BrowserWindow construction fails", () => {
+    const harness = createPermissionHarness({ loadBehavior: "constructor-throw" });
+    const { entry } = makeBlockingEntry();
+    harness.api.pendingPermissions.push(entry);
+
+    assert.throws(() => harness.api.showPermissionBubble(entry), /BrowserWindow unavailable/);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
+  });
 
   it("returns no-decision immediately when bubble.html cannot be loaded", () => {
     const harness = createPermissionHarness({ loadBehavior: "throw" });
@@ -622,6 +923,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.doesNotThrow(() => harness.api.showPermissionBubble(entry));
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("returns no-decision when loadFile rejects asynchronously", async () => {
@@ -636,6 +938,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
     assert.strictEqual(response.destroyCalls, 1);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("returns no-decision when the main frame emits did-fail-load", () => {
@@ -648,6 +951,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
     assert.strictEqual(response.destroyCalls, 1);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("does not turn a fatal no-decision into a second deny when closed fires", () => {
@@ -694,6 +998,7 @@ describe("interactive permission bubble fatal fallback", () => {
 
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
     assert.strictEqual(response.destroyed, true);
+    assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
   it("dismisses a passive notification safely when its renderer process exits", () => {

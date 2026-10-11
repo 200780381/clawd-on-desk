@@ -382,6 +382,7 @@ test("Codex Pet removal clears every preference scoped to the removed theme", as
     idleVisual: { [themeId]: "idle.png", clawd: "clawd-idle-follow.svg" },
     petTint: { [themeId]: "matcha", clawd: "gold" },
     petAccessory: { [themeId]: "halo", clawd: "wizard-hat" },
+    petMouthAccessory: { [themeId]: "cigarette", clawd: "cigarette" },
     holidayAccessoryEnabled: { [themeId]: true, clawd: true },
   };
   const bulkPatches = [];
@@ -431,6 +432,7 @@ test("Codex Pet removal clears every preference scoped to the removed theme", as
     "idleVisual",
     "petTint",
     "petAccessory",
+    "petMouthAccessory",
     "holidayAccessoryEnabled",
   ]) {
     assert.strictEqual(

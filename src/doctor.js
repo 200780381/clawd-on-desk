@@ -4,6 +4,8 @@ const { checkLocalServer } = require("./doctor-detectors/local-server");
 const { checkAgentIntegrations } = require("./doctor-detectors/agent-integrations");
 const { checkPermissionBubblePolicy } = require("./doctor-detectors/permission-bubble-policy");
 const { checkThemeHealth } = require("./doctor-detectors/theme-health");
+const { checkPrefsReadability } = require("./doctor-detectors/prefs-readability");
+const { checkFeishuApproval } = require("./doctor-detectors/feishu-approval");
 
 function normalizeCheckLevel(check) {
   if (!check) return null;
@@ -75,6 +77,11 @@ function checkRemoteSshIsolation(prefs) {
 function runDoctorChecks(options = {}) {
   const prefs = options.prefs || {};
   const checks = [
+    (options.checkPrefsReadability || checkPrefsReadability)({
+      readFailure: options.prefsReadFailure === true,
+      recovered: options.prefsRecovered === true,
+      recoveryBackupFailed: options.prefsRecoveryBackupFailed === true,
+    }),
     (options.checkLocalServer || checkLocalServer)(options.server),
     (options.checkAgentIntegrations || checkAgentIntegrations)({
       prefs,
@@ -87,6 +94,10 @@ function runDoctorChecks(options = {}) {
     (options.checkPermissionBubblePolicy || checkPermissionBubblePolicy)({
       prefs,
       doNotDisturb: !!options.doNotDisturb,
+    }),
+    (options.checkFeishuApproval || checkFeishuApproval)({
+      config: prefs.feishuApproval,
+      secrets: options.feishuApprovalSecrets,
     }),
     (options.checkThemeHealth || checkThemeHealth)({
       prefs,

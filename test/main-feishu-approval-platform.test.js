@@ -359,6 +359,12 @@ describe("main Feishu/Lark approval platform wiring", () => {
       queueFeishuApprovalSync: (reason) => {
         events.push(`sync:${reason}:r${context.feishuApprovalSecretsRevision}`);
       },
+      feishuApprovalMigrationNudge: {
+        sync(options) {
+          assert.strictEqual(options && options.allowNotify, false);
+          events.push("migration-nudge-sync");
+        },
+      },
     };
     const prepareRouteChange = loadFn("prepareFeishuSessionAutomationRouteChange", context);
     context.prepareFeishuSessionAutomationRouteChange = (signature) => {
@@ -377,6 +383,7 @@ describe("main Feishu/Lark approval platform wiring", () => {
       "route-stale",
       "coordinator-route-change",
       "sync:secrets:r21",
+      "migration-nudge-sync",
     ]);
     assert.equal(context.feishuApprovalSecretsRevision, 21);
     assert.equal(client.routeCurrent, false);

@@ -3,11 +3,18 @@
 const {
   getPetTintIdForTheme,
   resolvePetTintPayload,
-  resolvePetAccessoryPayload,
+  getPetMouthAccessoryIdForTheme,
+  buildPetAccessorySlotsCandidate,
 } = require("./pet-customization-catalog");
 const {
   getEffectivePetAccessoryIdForTheme,
 } = require("./holiday-accessory");
+const {
+  commitPetAccessorySlotsCandidate,
+  describeGeometrySync,
+  setPetAccessoryFloatingSurfaceRepositioner,
+  repositionPetAccessoryFloatingSurfaces,
+} = require("./pet-accessory-state");
 
 const MENU_AFFECTING_KEYS = new Set([
   "lang",
@@ -28,6 +35,12 @@ const MENU_AFFECTING_KEYS = new Set([
   "size",
   "sessionAliases",
   "disableMiniMode",
+]);
+
+const BUBBLE_PLACEMENT_KEYS = new Set([
+  "bubbleFollowPet",
+  "bubbleFollowPreference",
+  "bubbleFixedCorner",
 ]);
 
 function requiredDependency(value, name) {
@@ -84,17 +97,60 @@ function createSettingsEffectRouter(options = {}) {
   const exitMiniMode = options.exitMiniMode || noop;
   const getMiniMode = options.getMiniMode || (() => false);
   const getActiveTheme = options.getActiveTheme || (() => null);
+  const syncHitWin = options.syncHitWin || noop;
   const refreshIdleVisual = options.refreshIdleVisual || noop;
+  const refreshDisplayedVisual = options.refreshDisplayedVisual || noop;
   const rebuildAllMenus = options.rebuildAllMenus || noop;
   const reconcilePowerSaveBlocker = options.reconcilePowerSaveBlocker || noop;
   const disableMobilePermissionObservation = options.disableMobilePermissionObservation || noop;
   const enqueueMobilePreviewReconcile = options.enqueueMobilePreviewReconcile || noop;
+  const setRecapEnabled = options.setRecapEnabled || noop;
   const now = options.now || (() => new Date());
+
+  setPetAccessoryFloatingSurfaceRepositioner(repositionFloatingBubbles);
 
   let started = false;
   let unsubscribeSettings = null;
   let unsubscribeShortcuts = null;
   let lastTogglePetShortcut = ((settingsController.getSnapshot().shortcuts) || {}).togglePet || null;
+
+  function applyAccessoryCandidate(activeTheme, snapshot) {
+    const themeId = activeTheme && activeTheme._id;
+    const headId = getEffectivePetAccessoryIdForTheme({
+      petAccessory: snapshot.petAccessory,
+      holidayAccessoryEnabled: snapshot.holidayAccessoryEnabled,
+      themeId,
+      date: now(),
+    });
+    const mouthId = getPetMouthAccessoryIdForTheme(snapshot.petMouthAccessory, themeId);
+    const candidate = buildPetAccessorySlotsCandidate({ headId, mouthId }, activeTheme);
+    try {
+      if (sendToRenderer("pet-accessory-slots-change", candidate) === false) {
+        throw new Error("renderer unavailable");
+      }
+    } catch (err) {
+      warn(logWarn, "Clawd: accessory renderer delivery failed:", err);
+      return false;
+    }
+
+    commitPetAccessorySlotsCandidate(candidate);
+    try {
+      const geometry = describeGeometrySync(syncHitWin());
+      if (!geometry.applied) {
+        // Deferred is not a failure: the payload is already canonical, so the
+        // next sync (drag release, window show, next move) picks up the new
+        // envelope on its own. Warning here would fire every time the user
+        // changes a hat while holding the pet.
+        if (geometry.deferred) return true;
+        throw new Error("native hit geometry was not applied");
+      }
+      repositionPetAccessoryFloatingSurfaces();
+      return true;
+    } catch (err) {
+      warn(logWarn, "Clawd: accessory geometry apply failed:", err);
+      return false;
+    }
+  }
 
   function handleSettingsChange({ changes } = {}) {
     if (!changes || typeof changes !== "object") return;
@@ -114,6 +170,10 @@ function createSettingsEffectRouter(options = {}) {
     }
     if ("lowPowerIdleMode" in changes) {
       sendToRenderer("low-power-idle-mode-change", changes.lowPowerIdleMode);
+      // The renderer owns the media-channel substitution, but main must own
+      // the request generation and settlement. Re-request only after the mode
+      // IPC so the next state-change resolves against the new low-power flag.
+      safeCall(logWarn, "Clawd: low-power visual refresh failed:", refreshDisplayedVisual);
       // If the HUD/ring were already hidden when low-power mode was enabled,
       // no visibility transition would otherwise schedule their delayed
       // destruction. Re-sync after mirrors update so hidden windows are
@@ -129,22 +189,20 @@ function createSettingsEffectRouter(options = {}) {
       const tintId = getPetTintIdForTheme(changes.petTint, activeTheme && activeTheme._id);
       sendToRenderer("pet-tint-change", resolvePetTintPayload(tintId, activeTheme));
     }
-    if ("petAccessory" in changes || "holidayAccessoryEnabled" in changes) {
+    if (
+      "petAccessory" in changes
+      || "petMouthAccessory" in changes
+      || "holidayAccessoryEnabled" in changes
+    ) {
       const activeTheme = getActiveTheme();
       const snapshot = settingsController.getSnapshot();
-      const accessoryId = getEffectivePetAccessoryIdForTheme({
-        petAccessory: snapshot.petAccessory,
-        holidayAccessoryEnabled: snapshot.holidayAccessoryEnabled,
-        themeId: activeTheme && activeTheme._id,
-        date: now(),
-      });
-      sendToRenderer(
-        "pet-accessory-change",
-        resolvePetAccessoryPayload(accessoryId, activeTheme)
-      );
+      applyAccessoryCandidate(activeTheme, snapshot);
     }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);
+    }
+    if ("recapEnabled" in changes) {
+      safeCall(logWarn, "Clawd: recap recording toggle failed:", setRecapEnabled, changes.recapEnabled);
     }
     if ("lang" in changes) {
       safeCall(logWarn, "Clawd: dashboard lang broadcast failed:", sendDashboardI18n);
@@ -247,7 +305,7 @@ function createSettingsEffectRouter(options = {}) {
         refreshPermissionAutoCloseForPolicy
       );
     }
-    if ("bubbleFollowPet" in changes) {
+    if (Object.keys(changes).some((key) => BUBBLE_PLACEMENT_KEYS.has(key))) {
       safeCall(logWarn, "Clawd: repositionFloatingBubbles failed:", repositionFloatingBubbles);
     }
     if ("textScale" in changes || "textScaleByDisplay" in changes) {
@@ -314,6 +372,7 @@ function createSettingsEffectRouter(options = {}) {
     if (
       "sessionStaleMs" in changes
       || "workingStaleMs" in changes
+      || "codexWorkingStaleMs" in changes
       || "detachedIdleStaleMs" in changes
     ) {
       try {

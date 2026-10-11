@@ -12,6 +12,7 @@ const gemini = require("../../hooks/gemini-install");
 const antigravity = require("../../hooks/antigravity-install");
 const codebuddy = require("../../hooks/codebuddy-install");
 const kiro = require("../../hooks/kiro-install");
+const kirocrew = require("../../hooks/kirocrew-install");
 const kimi = require("../../hooks/kimi-install");
 const qwen = require("../../hooks/qwen-code-install");
 const zcode = require("../../hooks/zcode-install");
@@ -19,6 +20,7 @@ const codewhale = require("../../hooks/codewhale-install");
 const opencode = require("../../hooks/opencode-install");
 const mimocode = require("../../hooks/mimocode-install");
 const pi = require("../../hooks/pi-install");
+const omp = require("../../hooks/omp-install");
 const openclaw = require("../../hooks/openclaw-install");
 const hermes = require("../../hooks/hermes-install");
 const qoder = require("../../hooks/qoder-install");
@@ -26,6 +28,9 @@ const reasonix = require("../../hooks/reasonix-install");
 const qoderwork = require("../../hooks/qoderwork-install");
 const qwenwork = require("../../hooks/qwenwork-install");
 const workbuddy = require("../../hooks/workbuddy-install");
+const grok = require("../../hooks/grok-install");
+const traecode = require("../../hooks/traecode-install");
+const minimax = require("../../hooks/minimax-install");
 const dsh = require("../../hooks/dsh-install");
 
 function agentName(agentId) {
@@ -88,6 +93,7 @@ const AGENT_DESCRIPTORS = Object.freeze([
     autoInstall: true,
     marker: "cursor-hook.js",
     nested: false,
+    scriptPath: cursor.resolveCursorHookScript(),
   }),
   Object.freeze({
     agentId: "gemini-cli",
@@ -151,6 +157,21 @@ const AGENT_DESCRIPTORS = Object.freeze([
     hookEvents: workbuddy.WORKBUDDY_HOOK_EVENTS,
   }),
   Object.freeze({
+    agentId: "grok-build",
+    agentName: agentName("grok-build"),
+    eventSource: agentEventSource("grok-build"),
+    parentDir: grok.DEFAULT_PARENT_DIR,
+    configPath: grok.DEFAULT_CONFIG_PATH,
+    // Dedicated mode: the inspected path is dynamic (GROK_HOME), and ownership
+    // is the structured handler marker, not a filename substring. Doctor and
+    // the installation detector both call inspectGrokHookFile().
+    configMode: "grok-hooks",
+    autoInstall: true,
+    marker: grok.MARKER,
+    nested: true,
+    hookEvents: grok.GROK_HOOK_EVENTS,
+  }),
+  Object.freeze({
     agentId: "kiro-cli",
     agentName: agentName("kiro-cli"),
     eventSource: agentEventSource("kiro-cli"),
@@ -160,6 +181,22 @@ const AGENT_DESCRIPTORS = Object.freeze([
     autoInstall: true,
     marker: "kiro-hook.js",
     nested: true,
+  }),
+  Object.freeze({
+    agentId: "kirocrew",
+    agentName: agentName("kirocrew"),
+    eventSource: agentEventSource("kirocrew"),
+    parentDir: kirocrew.DEFAULT_PARENT_DIR,
+    configPath: kirocrew.DEFAULT_HOOKS_PATH,
+    configMode: "file",
+    autoInstall: true,
+    marker: "kirocrew-hook.js",
+    hookEvents: ["AgentSpawn", "UserPromptSubmit", "PostToolUse", "Stop"],
+    // KiroCrew's hooks.json stores `hooks` as a FLAT array of hook objects, not
+    // the Claude-style object of per-event arrays. findHookCommands needs
+    // flatArray to read it; `nested` does not apply.
+    flatArray: true,
+    flatArrayHookEvents: true,
   }),
   Object.freeze({
     agentId: "kimi-cli",
@@ -210,7 +247,7 @@ const AGENT_DESCRIPTORS = Object.freeze([
     nested: true,
     hookEvents: zcode.ZCODE_HOOK_EVENTS,
     hookExecutorShape: "zcode-process",
-    processHookTimeoutMs: zcode.timeoutMsForZcodeEvent(),
+    processHookTimeoutMsForEvent: zcode.timeoutMsForZcodeEvent,
     // ZCode config-file hooks nest under hooks.events.* (NOT hooks.* like the
     // Claude/Qwen settings.json schema). Generic findHookCommandsForEvent reads
     // this to locate the per-event arrays; without it the doctor would scan the
@@ -240,8 +277,24 @@ const AGENT_DESCRIPTORS = Object.freeze([
     autoInstall: true,
     // opencode registers a plugin directory, not a command hook script.
     // Detection matches an absolute plugin entry by basename.
+    //
+    // #825: the global config is a MERGE of config.json → opencode.json →
+    // opencode.jsonc (later wins, "plugin" arrays REPLACED not concatenated).
+    // configJsonc routes reads through the JSONC parser so a commented config
+    // is not misreported as config-corrupt; configCandidates (highest-priority
+    // first, from the family registry) makes the doctor validate the MERGED
+    // effective plugin view instead of opencode.json alone — otherwise it
+    // reports "plugin entry verified" while opencode runs the .jsonc array.
+    configJsonc: true,
+    configCandidates: Object.freeze(
+      getFamilyConfig("opencode").configCandidates.map((name) => path.join(opencode.DEFAULT_PARENT_DIR, name))
+    ),
     marker: "opencode-plugin",
     detection: "opencode-plugin",
+    // #1026: managedOpenCode Doctor branch + target home for the managed
+    // generation inspector. Never inferred from the registry path elsewhere.
+    managedMaterialization: getFamilyConfig("opencode").managedMaterialization === true,
+    managedHomeDir: path.resolve(opencode.DEFAULT_PARENT_DIR, "..", ".."),
   }),
   Object.freeze({
     agentId: "mimocode",
@@ -266,6 +319,8 @@ const AGENT_DESCRIPTORS = Object.freeze([
     // not-connected (R8 P2).
     marker: getFamilyConfig("mimocode").pluginDirName,
     detection: "opencode-plugin",
+    managedMaterialization: getFamilyConfig("mimocode").managedMaterialization === true,
+    managedHomeDir: path.resolve(mimocode.DEFAULT_PARENT_DIR, "..", ".."),
   }),
   Object.freeze({
     agentId: "pi",
@@ -278,6 +333,22 @@ const AGENT_DESCRIPTORS = Object.freeze([
     marker: pi.EXTENSION_FILE,
     coreFile: pi.CORE_FILE,
     markerFile: pi.MARKER_FILE,
+  }),
+  Object.freeze({
+    agentId: "omp",
+    agentName: agentName("omp"),
+    eventSource: agentEventSource("omp"),
+    // Resolved once, like DeepSeek Harness above: OMP's extension directory
+    // moves with PI_CONFIG_DIR / PI_CODING_AGENT_DIR / OMP_PROFILE, and install,
+    // the installation detector and Doctor must all judge the directory OMP
+    // would actually load rather than a fixed one.
+    parentDir: omp.resolveOmpAgentDir(),
+    configPath: omp.resolveExtensionDir(),
+    configMode: "omp-extension",
+    autoInstall: true,
+    marker: omp.EXTENSION_FILE,
+    coreFile: omp.CORE_FILE,
+    markerFile: omp.MARKER_FILE,
   }),
   Object.freeze({
     agentId: "openclaw",
@@ -344,6 +415,18 @@ const AGENT_DESCRIPTORS = Object.freeze([
     hookGroupId: "clawd",
   }),
   Object.freeze({
+    agentId: "traecode",
+    agentName: agentName("traecode"),
+    eventSource: agentEventSource("traecode"),
+    parentDir: traecode.DEFAULT_PARENT_DIR,
+    configPath: traecode.DEFAULT_CONFIG_PATH,
+    configMode: "file",
+    autoInstall: true,
+    marker: traecode.MARKER,
+    nested: true,
+    hookEvents: traecode.TRAECODE_HOOK_EVENTS,
+  }),
+  Object.freeze({
     agentId: "qwenwork",
     agentName: agentName("qwenwork"),
     eventSource: agentEventSource("qwenwork"),
@@ -365,6 +448,26 @@ const AGENT_DESCRIPTORS = Object.freeze([
     configMode: "dsh-plugin",
     autoInstall: true,
     detection: "dsh",
+  }),
+  Object.freeze({
+    // MiniMax Code carries hooks inside a local plugin directory that Clawd
+    // owns end to end. Enable state lives inside the app (or `mcode plugin
+    // enable clawd-state@local`) and is not readable from disk — the
+    // dedicated "minimax-plugin" config mode only verifies our managed files
+    // and lets withMinimaxEnableNotice surface the manual enable step.
+    // parentDir/configPath resolve through the installer's shared helper
+    // (MINIMAX_DATA_DIR → MAVIS_DATA_DIR → ~/.minimax) so Doctor inspects the
+    // same directory install/uninstall use.
+    agentId: "minimax",
+    agentName: agentName("minimax"),
+    eventSource: agentEventSource("minimax"),
+    parentDir: minimax.resolveMinimaxDataDir(),
+    configPath: minimax.resolvePluginRoot(),
+    configMode: "minimax-plugin",
+    autoInstall: true,
+    marker: minimax.MARKER,
+    managedFiles: [minimax.OWNER_MARKER_FILE, ".claude-plugin/plugin.json", "hooks/hooks.json"],
+    hookEvents: minimax.MINIMAX_HOOK_EVENTS,
   }),
 ]);
 

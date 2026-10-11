@@ -79,6 +79,32 @@ describe("pet accessory layout", () => {
     );
   });
 
+  it("normalizes an internal x-reflection around the projected rect without moving it", () => {
+    const input = {
+      mediaOffset: { x: 10, y: 20 },
+      matrix: { a: -2, b: 0.5, c: 0.25, d: 3, e: 80, f: 5 },
+      frame: { cx: 8, baseY: 6, width: 4 },
+      accessory: ACCESSORY,
+      stageSize: { width: 220, height: 220 },
+    };
+    const reflected = computeDynamicAccessoryLayout(input);
+    const normalized = computeDynamicAccessoryLayout({ ...input, normalizeReflection: "x" });
+
+    assert.ok(reflected.matrix.a * reflected.matrix.d - reflected.matrix.b * reflected.matrix.c < 0);
+    assert.ok(normalized.matrix.a * normalized.matrix.d - normalized.matrix.b * normalized.matrix.c > 0);
+    assert.deepStrictEqual(normalized.bounds, reflected.bounds);
+    assert.deepStrictEqual(
+      {
+        x: normalized.bounds.x + normalized.bounds.width / 2,
+        y: normalized.bounds.y + normalized.bounds.height / 2,
+      },
+      {
+        x: reflected.bounds.x + reflected.bounds.width / 2,
+        y: reflected.bounds.y + reflected.bounds.height / 2,
+      }
+    );
+  });
+
   it("rejects invalid, unbounded, or implausibly off-stage layouts", () => {
     const base = {
       mediaBox: { x: 0, y: 0, width: 200, height: 200 },

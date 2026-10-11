@@ -63,6 +63,37 @@ test("non-authoritative startup prefs publish a fail-closed Codex gate", () => {
   );
 });
 
+test("Codex auto-start authority loss is latched for the whole process", () => {
+  const source = fs.readFileSync(MAIN_PATH, "utf8").replace(/\r\n/g, "\n");
+  const latchIndex = source.indexOf("const _codexAutoStartAuthorityLost = (");
+  const lockedIndex = source.indexOf("_initialPrefsLoad.locked === true", latchIndex);
+  const recoveredIndex = source.indexOf("|| _initialPrefsRecovered", latchIndex);
+  const backupIndex = source.indexOf("|| _initialPrefsRecoveryBackupFailed", latchIndex);
+  const fieldAuthorityIndex = source.indexOf(
+    "|| _initialPrefsLoad.codexAutoStartAuthoritative === false",
+    latchIndex
+  );
+  const evaluatorIndex = source.indexOf(
+    "const _evaluateCodexAutoStartGate = createCodexAutoStartGateEvaluator({",
+    latchIndex
+  );
+  const syncIndex = source.indexOf(
+    "_persistCodexAutoStartGate(_evaluateCodexAutoStartGate(snapshot))",
+    evaluatorIndex
+  );
+
+  assert.ok(latchIndex >= 0, "main.js should capture initial authority once");
+  assert.ok(
+    lockedIndex > latchIndex
+      && recoveredIndex > lockedIndex
+      && backupIndex > recoveredIndex
+      && fieldAuthorityIndex > backupIndex
+      && evaluatorIndex > fieldAuthorityIndex
+      && syncIndex > evaluatorIndex,
+    "startup authority loss must feed the evaluator used by every gate sync"
+  );
+});
+
 test("future-version locked settings cannot publish an ephemeral Codex gate", () => {
   const source = fs.readFileSync(MAIN_PATH, "utf8").replace(/\r\n/g, "\n");
   const subscriptionIndex = source.indexOf(
@@ -84,11 +115,23 @@ test("future-version locked settings cannot publish an ephemeral Codex gate", ()
   );
 });
 
-test("unreadable prefs fail every prefs-backed agent runtime gate closed", () => {
+test("Codex auto-start gate follows the dedicated preference as well as agent state", () => {
+  const source = fs.readFileSync(MAIN_PATH, "utf8").replace(/\r\n/g, "\n");
+  assert.ok(
+    source.includes("_persistCodexAutoStartGate(_evaluateCodexAutoStartGate(snapshot))"),
+    "the published gate should use the combined preference/install/enabled predicate"
+  );
+  assert.ok(
+    source.includes('_settingsController.subscribeKey("autoStartWithCodex", (_enabled, snapshot) => {'),
+    "preference commits should republish the durable Codex gate"
+  );
+});
+
+test("unreadable or recovered prefs fail every prefs-backed agent runtime gate closed", () => {
   const source = fs.readFileSync(MAIN_PATH, "utf8").replace(/\r\n/g, "\n");
   const gateIndex = source.indexOf("const _runtimeAgentGate = createRuntimeAgentGate({");
   const authorityIndex = source.indexOf(
-    "isAuthoritative: () => !_settingsController.hasReadFailure()",
+    "isAuthoritative: () => !_initialPrefsRecovered && !_settingsController.hasReadFailure()",
     gateIndex
   );
 

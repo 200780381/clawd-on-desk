@@ -142,6 +142,19 @@ test("buildPresencePayload publishes ONLY the folder name, never a full path, on
   assert.strictEqual(out.state.includes("/"), false);
 });
 
+test("buildPresencePayload respects an explicitly hidden snapshot displayFolder", () => {
+  const opaque = "mqgw60jiigjsjcid";
+  const session = {
+    agentId: "qwenwork",
+    state: "working",
+    cwd: `/Users/me/.QwenWorkCN/workspace/${opaque}`,
+    displayFolder: "",
+  };
+  const out = buildPresencePayload(session, { privacyShowProject: true });
+  assert.equal(out.state, "Working");
+  assert.ok(!JSON.stringify(out).includes(opaque));
+});
+
 test("buildPresencePayload truncates state to Discord's 128-char activity limit", () => {
   // Discord rejects the whole SET_ACTIVITY frame when state exceeds 128 chars,
   // so an extra-long folder name must not silently kill presence updates.
@@ -286,17 +299,19 @@ test("before-quit stops the Discord presence bridge before tearing down session 
   assert.ok(bridgeStop < stateCleanup, "presence bridge must stop before _state.cleanup()");
 });
 
-test("main caches the renderer-visible visual, carries theme identity, and keeps the GIF override dev-only", () => {
+test("main caches only ACK-committed visuals, filters reactions, and keeps the GIF override dev-only", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
-  const sendStart = source.indexOf("function sendToRenderer(channel, ...args)");
-  const sendEnd = source.indexOf("function sendToHitWin", sendStart);
-  const sendBlock = source.slice(sendStart, sendEnd);
-  const cacheWrite = sendBlock.indexOf("lastDiscordPresenceVisual = {");
-  const bridgeFeed = sendBlock.indexOf("discordPresenceBridge.onVisual(");
+  const projectionStart = source.indexOf("displayedVisualProjection = createDisplayedVisualProjection({");
+  const projectionEnd = source.indexOf("const _kimiQuotaCredentialStore", projectionStart);
+  const commitBlock = source.slice(projectionStart, projectionEnd);
+  const cacheWrite = commitBlock.indexOf("lastDiscordPresenceVisual = {");
+  const bridgeFeed = commitBlock.indexOf("discordPresenceBridge.onVisual(");
   assert.ok(cacheWrite !== -1 && bridgeFeed !== -1 && cacheWrite < bridgeFeed,
-    "state-change must be cached even before a bridge exists");
-  assert.ok(sendBlock.includes("themeId: activeTheme && activeTheme._id"),
-    "visual cache must carry the active theme identity");
+    "a committed visual must be cached even before a bridge exists");
+  assert.ok(commitBlock.includes('if (visual.source === "reaction") return;'),
+    "reaction visuals must stay out of Presence");
+  assert.ok(commitBlock.includes("themeId: visual.themeId"),
+    "visual cache must carry the committed theme identity");
 
   const start = source.indexOf("function startDiscordPresence()");
   const end = source.indexOf("function syncDiscordPresence", start);

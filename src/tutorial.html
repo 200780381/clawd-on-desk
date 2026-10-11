@@ -112,7 +112,8 @@ body { user-select: none; }
   display: flex;
   align-items: safe center;
   justify-content: center;
-  padding: 18px 26px 154px;
+  /* Keep the full seven-row menu below three-line pt-BR/es copy at the default 720x700 size. */
+  padding: 18px 26px 234px;
   scrollbar-width: none;
 }
 .body.step-welcome::-webkit-scrollbar { width: 0; height: 0; }
@@ -169,6 +170,8 @@ body { user-select: none; }
   display: flex; align-items: center; justify-content: center; gap: 10px;
   margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border);
 }
+.step-welcome .language-picker { width: 160px; }
+.step-welcome .language-picker-option { white-space: nowrap; }
 .lang-label { font-size: 13px; color: var(--muted); font-weight: 600; }
 
 /* Agent setup */

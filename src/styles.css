@@ -41,8 +41,9 @@ html, body {
 #pet-facing-stage,
 #pet-motion-stage,
 #pet-asset-direction-stage,
-#pet-media-layer,
-#pet-accessory-layer,
+  #pet-media-layer,
+  #pet-accessory-layer,
+  #pet-mouth-accessory-layer,
 #pet-effect-stage,
 #pet-particle-layer {
   position: absolute;

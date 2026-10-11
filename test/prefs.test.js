@@ -22,6 +22,23 @@ afterEach(() => {
   }
 });
 
+describe("legacy independent Codex timeout migration", () => {
+  for (const [label, old, expected] of [
+    ["long silent work", { workingStaleMs: 86400000, sessionStaleMs: 0 }, 86400000],
+    ["default", {}, 1200000],
+    ["invalid pair", { workingStaleMs: 86400000, sessionStaleMs: 600000 }, 1200000],
+    ["invalid working value", { workingStaleMs: "86400000" }, 1200000],
+    ["explicit disabled", { workingStaleMs: 86400000, codexWorkingStaleMs: 0 }, 0],
+    ["explicit shorter", { workingStaleMs: 86400000, codexWorkingStaleMs: 30000 }, 30000],
+  ]) {
+    it(label, () => {
+      const file = makeTempPath();
+      fs.writeFileSync(file, JSON.stringify({ version: 15, ...old }));
+      assert.strictEqual(prefs.load(file).snapshot.codexWorkingStaleMs, expected);
+    });
+  }
+});
+
 describe("prefs.getDefaults", () => {
   it("returns a fresh snapshot every call (no shared object refs)", () => {
     const a = prefs.getDefaults();
@@ -31,6 +48,7 @@ describe("prefs.getDefaults", () => {
     assert.notStrictEqual(a.themeOverrides, b.themeOverrides);
     assert.notStrictEqual(a.petTint, b.petTint);
     assert.notStrictEqual(a.petAccessory, b.petAccessory);
+    assert.notStrictEqual(a.petMouthAccessory, b.petMouthAccessory);
     assert.notStrictEqual(a.shortcuts, b.shortcuts);
     assert.notStrictEqual(a.sessionAliases, b.sessionAliases);
     assert.notStrictEqual(a.tgApproval, b.tgApproval);
@@ -57,12 +75,14 @@ describe("prefs.getDefaults", () => {
     );
   });
 
-  it("defaults Claude hook management on and Start with Claude off", () => {
+  it("defaults Claude hook management on and agent-triggered cold launch off", () => {
     const d = prefs.getDefaults();
     assert.strictEqual(d.manageClaudeHooksAutomatically, true);
     assert.strictEqual(d.autoStartWithClaude, false);
+    assert.strictEqual(d.autoStartWithCodex, false);
     assert.deepStrictEqual(d.petTint, {});
     assert.deepStrictEqual(d.petAccessory, {});
+    assert.deepStrictEqual(d.petMouthAccessory, {});
     assert.strictEqual(d.testReactionsEnabled, false);
     assert.strictEqual(d.lowPowerIdleMode, false);
     assert.strictEqual(d.allowEdgePinning, false);
@@ -94,6 +114,9 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.savedPixelWorkArea, null);
     assert.strictEqual(d.settingsWindowBounds, null);
     assert.strictEqual(d.dashboardWindowBounds, null);
+    assert.strictEqual(d.bubbleFollowPet, false);
+    assert.strictEqual(d.bubbleFollowPreference, "auto");
+    assert.strictEqual(d.bubbleFixedCorner, "bottom-right");
     assert.strictEqual(d.permissionBubblesEnabled, true);
     assert.strictEqual(d.notificationBubbleAutoCloseSeconds, 6);
     assert.strictEqual(d.updateBubbleAutoCloseSeconds, 9);
@@ -122,13 +145,15 @@ describe("prefs.getDefaults", () => {
 
   it("seeds only default-installed agents as enabled", () => {
     const d = prefs.getDefaults();
-    for (const id of ["claude-code", "codex"]) {
-      assert.strictEqual(d.agents[id].enabled, true, `${id} should default enabled`);
-      assert.strictEqual(d.agents[id].integrationInstalled, true, `${id} should default installed`);
-    }
-    for (const id of ["copilot-cli", "cursor-agent", "gemini-cli", "antigravity-cli", "codebuddy", "kiro-cli", "kimi-cli", "qwen-code", "codewhale", "opencode", "pi", "openclaw", "hermes", "qoder"]) {
-      assert.strictEqual(d.agents[id].enabled, false, `${id} should default disabled`);
-      assert.strictEqual(d.agents[id].integrationInstalled, false, `${id} should default not installed`);
+    const defaultInstalled = new Set(["claude-code", "codex"]);
+    for (const [id, config] of Object.entries(d.agents)) {
+      const expected = defaultInstalled.has(id);
+      assert.strictEqual(config.enabled, expected, `${id} default enabled state drifted`);
+      assert.strictEqual(
+        config.integrationInstalled,
+        expected,
+        `${id} default installed state drifted`
+      );
     }
   });
 
@@ -208,9 +233,9 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.agents.pi.notificationHookEnabled, true);
   });
 
-  it("defaults Codex permissions to intercept mode", () => {
+  it("defaults Codex permissions to Auto mode", () => {
     const d = prefs.getDefaults();
-    assert.strictEqual(d.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(d.agents.codex.permissionMode, "auto");
     assert.strictEqual(d.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
@@ -286,6 +311,7 @@ describe("prefs.validate", () => {
       soundVolume: 2,        // out of range → default 1
       petTint: "custom-css",
       petAccessory: "wizard-hat",
+      petMouthAccessory: "cigarette",
       lowPowerIdleMode: "yes",
       x: NaN,                // not finite
       bubbleFollowPet: true, // ok
@@ -313,6 +339,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.soundVolume, 1);
     assert.deepStrictEqual(v.petTint, {});
     assert.deepStrictEqual(v.petAccessory, {});
+    assert.deepStrictEqual(v.petMouthAccessory, {});
     assert.strictEqual(v.lowPowerIdleMode, false);
     assert.strictEqual(v.x, 0);
     assert.strictEqual(v.bubbleFollowPet, true);
@@ -338,6 +365,26 @@ describe("prefs.validate", () => {
   it("preserves both supported quota ring display modes", () => {
     assert.strictEqual(prefs.validate({ quotaRingDisplayMode: "used" }).quotaRingDisplayMode, "used");
     assert.strictEqual(prefs.validate({ quotaRingDisplayMode: "remaining" }).quotaRingDisplayMode, "remaining");
+  });
+
+  it("validates bubble placement enums independently from the follow toggle", () => {
+    const valid = prefs.validate({
+      bubbleFollowPet: true,
+      bubbleFollowPreference: "left",
+      bubbleFixedCorner: "top-right",
+    });
+    assert.strictEqual(valid.bubbleFollowPet, true);
+    assert.strictEqual(valid.bubbleFollowPreference, "left");
+    assert.strictEqual(valid.bubbleFixedCorner, "top-right");
+
+    const invalid = prefs.validate({
+      bubbleFollowPet: false,
+      bubbleFollowPreference: "strict-left",
+      bubbleFixedCorner: "center",
+    });
+    assert.strictEqual(invalid.bubbleFollowPet, false);
+    assert.strictEqual(invalid.bubbleFollowPreference, "auto");
+    assert.strictEqual(invalid.bubbleFixedCorner, "bottom-right");
   });
 
   it("backfills split bubble prefs from legacy hideBubbles=true", () => {
@@ -461,6 +508,7 @@ describe("prefs.validate", () => {
       theme: "calico",
       petTint: { clawd: "gold", cloudling: "matcha" },
       petAccessory: { clawd: "wizard-hat", cloudling: "halo" },
+      petMouthAccessory: { clawd: "cigarette" },
     });
     assert.strictEqual(v.lang, "ko");
     assert.strictEqual(v.soundMuted, true);
@@ -487,6 +535,7 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.theme, "calico");
     assert.deepStrictEqual(v.petTint, { clawd: "gold", cloudling: "matcha" });
     assert.deepStrictEqual(v.petAccessory, { clawd: "wizard-hat", cloudling: "halo" });
+    assert.deepStrictEqual(v.petMouthAccessory, { clawd: "cigarette" });
   });
 
   it("accepts soundVolume 0 (silent playback is valid)", () => {
@@ -747,13 +796,22 @@ describe("prefs.validate", () => {
     assert.strictEqual(v.agents.codex.nativeNotificationSoundEnabled, false);
   });
 
-  it("normalizes agents: drops invalid Codex permissionMode to intercept", () => {
+  it("migrates legacy Native to Auto while preserving the agent switches", () => {
+    const v = prefs.validate({ agents: { codex: { enabled: false, permissionsEnabled: false,
+      nativeNotificationSoundEnabled: true, permissionMode: "native" } } });
+    assert.strictEqual(v.agents.codex.permissionMode, "auto");
+    assert.strictEqual(v.agents.codex.enabled, false);
+    assert.strictEqual(v.agents.codex.permissionsEnabled, false);
+    assert.strictEqual(v.agents.codex.nativeNotificationSoundEnabled, true);
+  });
+
+  it("normalizes agents: drops invalid Codex permissionMode to Auto", () => {
     const v = prefs.validate({
       agents: {
-        codex: { enabled: true, permissionMode: "auto" },
+        codex: { enabled: true, permissionMode: "invalid" },
       },
     });
-    assert.strictEqual(v.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(v.agents.codex.permissionMode, "auto");
   });
 
   it("normalizes agents: fills missing notificationHookEnabled from defaults", () => {
@@ -946,6 +1004,7 @@ describe("prefs.validate", () => {
     const d = prefs.getDefaults();
     assert.deepStrictEqual(d.shortcuts, {
       togglePet: "CommandOrControl+Shift+Alt+C",
+      quickSelectSession: null,
       permissionAllow: "CommandOrControl+Shift+Y",
       permissionDeny: "CommandOrControl+Shift+N",
     });
@@ -959,6 +1018,7 @@ describe("prefs.validate", () => {
     });
     assert.deepStrictEqual(v.shortcuts, {
       togglePet: "CommandOrControl+K",
+      quickSelectSession: null,
       permissionAllow: "CommandOrControl+Shift+Y",
       permissionDeny: "CommandOrControl+Shift+N",
     });
@@ -974,6 +1034,7 @@ describe("prefs.validate", () => {
     });
     assert.deepStrictEqual(v.shortcuts, {
       togglePet: "CommandOrControl+Shift+Alt+C",
+      quickSelectSession: null,
       permissionAllow: "CommandOrControl+Shift+Y",
       permissionDeny: "CommandOrControl+Shift+N",
     });
@@ -989,15 +1050,17 @@ describe("prefs.validate", () => {
     });
     assert.deepStrictEqual(v.shortcuts, {
       togglePet: "CommandOrControl+K",
+      quickSelectSession: null,
       permissionAllow: "CommandOrControl+Shift+Y",
       permissionDeny: "CommandOrControl+Shift+N",
     });
   });
 
-  it("defaults the three stale-cleanup intervals to the historical constants", () => {
+  it("defaults session cleanup while preserving the historical Codex 20-minute guard", () => {
     const d = prefs.getDefaults();
     assert.strictEqual(d.sessionStaleMs, 600000);
     assert.strictEqual(d.workingStaleMs, 300000);
+    assert.strictEqual(d.codexWorkingStaleMs, 1200000);
     assert.strictEqual(d.detachedIdleStaleMs, 30000);
   });
 
@@ -1016,6 +1079,12 @@ describe("prefs.validate", () => {
   it("drops workingStaleMs=0 back to default (0 not allowed)", () => {
     const v = prefs.validate({ workingStaleMs: 0 });
     assert.strictEqual(v.workingStaleMs, 300_000);
+  });
+
+  it("accepts codexWorkingStaleMs=0 and rejects malformed non-zero values", () => {
+    assert.strictEqual(prefs.validate({ codexWorkingStaleMs: 0 }).codexWorkingStaleMs, 0);
+    assert.strictEqual(prefs.validate({ codexWorkingStaleMs: 30_000 }).codexWorkingStaleMs, 30_000);
+    assert.strictEqual(prefs.validate({ codexWorkingStaleMs: 10_000 }).codexWorkingStaleMs, 1_200_000);
   });
 
   it("drops detachedIdleStaleMs=0 back to default (0 not allowed)", () => {
@@ -1395,6 +1464,244 @@ describe("prefs.migrate v13 → v14 (Dashboard window bounds)", () => {
   });
 });
 
+describe("prefs.migrate v14 → v15 (ZCode permission bubbles default on)", () => {
+  it("flips a Phase 1 persisted zcode permissionsEnabled:false to true", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 14,
+      agents: {
+        zcode: { integrationInstalled: true, enabled: true, permissionsEnabled: false, notificationHookEnabled: true },
+      },
+    }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.agents.zcode.permissionsEnabled, true);
+    // Other agent flags pass through untouched.
+    assert.strictEqual(upgraded.agents.zcode.enabled, true);
+    assert.strictEqual(upgraded.agents.zcode.integrationInstalled, true);
+  });
+
+  it("keeps other agents' explicit permissionsEnabled:false (real user choices)", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 14,
+      agents: {
+        qoder: { integrationInstalled: true, enabled: true, permissionsEnabled: false, notificationHookEnabled: true },
+      },
+    }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.agents.qoder.permissionsEnabled, false);
+  });
+
+  it("never touches a v15 file where the user disabled zcode bubbles after upgrade", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 15,
+      agents: {
+        zcode: { integrationInstalled: true, enabled: true, permissionsEnabled: false, notificationHookEnabled: true },
+      },
+    }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.agents.zcode.permissionsEnabled, false);
+  });
+
+  it("leaves a v14 file without a zcode entry to the schema default (on)", () => {
+    const upgraded = prefs.validate(prefs.migrate({ version: 14, lang: "zh" }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.agents.zcode.permissionsEnabled, true);
+  });
+});
+
+describe("prefs.migrate v15 → v16 (native macOS Control shortcuts)", () => {
+  it("preserves the legacy meaning of literal Control shortcut tokens", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 15,
+      shortcuts: {
+        togglePet: "Control+Shift+K",
+        permissionAllow: "shift+CONTROL+Y",
+        permissionDeny: "Ctrl+Shift+N",
+      },
+    }));
+
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.deepStrictEqual(upgraded.shortcuts, {
+      togglePet: "CommandOrControl+Shift+K",
+      quickSelectSession: null,
+      permissionAllow: "CommandOrControl+Shift+Y",
+      permissionDeny: "CommandOrControl+Shift+N",
+    });
+  });
+
+  it("keeps an explicit native Control shortcut in a v16 file", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 16,
+      shortcuts: {
+        togglePet: "Control+Shift+1",
+      },
+    }));
+
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.shortcuts.togglePet, "Control+Shift+1");
+  });
+});
+
+describe("prefs.migrate v16 → v17 (mouth accessory slot)", () => {
+  it("adds an empty map without inferring a cigarette from the head slot", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 16,
+      petAccessory: { clawd: "cowboy-hat" },
+    }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.deepStrictEqual(upgraded.petAccessory, { clawd: "cowboy-hat" });
+    assert.deepStrictEqual(upgraded.petMouthAccessory, {});
+  });
+
+  it("preserves a valid mouth selection from an unreleased v16 development snapshot", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 16,
+      petMouthAccessory: { clawd: "cigarette" },
+    }));
+    assert.deepStrictEqual(upgraded.petMouthAccessory, { clawd: "cigarette" });
+  });
+
+  it("does not share the new default map between snapshots", () => {
+    const first = prefs.validate(prefs.migrate({ version: 16 }));
+    const second = prefs.validate(prefs.migrate({ version: 16 }));
+    assert.notStrictEqual(first.petMouthAccessory, second.petMouthAccessory);
+  });
+});
+
+describe("prefs.migrate v17 → v18 (Codex cold-launch opt-in)", () => {
+  it("preserves the previous auto-start behavior for existing users", () => {
+    const upgraded = prefs.validate(prefs.migrate({ version: 17, lang: "zh" }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.autoStartWithCodex, true);
+  });
+
+  it("preserves an explicit boolean from an early or hand-edited v17 file", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 17,
+      autoStartWithCodex: false,
+    }));
+    assert.strictEqual(upgraded.autoStartWithCodex, false);
+  });
+
+  it("repairs an explicitly malformed v17 opt-in to false and keeps it false after reload", () => {
+    const p = makeTempPath();
+    fs.writeFileSync(p, JSON.stringify({
+      version: 17,
+      autoStartWithCodex: "yes",
+    }));
+
+    const loaded = prefs.load(p);
+    assert.strictEqual(loaded.locked, false);
+    assert.strictEqual(loaded.codexAutoStartAuthoritative, false);
+    assert.strictEqual(loaded.snapshot.autoStartWithCodex, false);
+
+    prefs.save(p, loaded.snapshot);
+    assert.strictEqual(JSON.parse(fs.readFileSync(p, "utf8")).autoStartWithCodex, false);
+
+    const relaunched = prefs.load(p);
+    assert.strictEqual(relaunched.codexAutoStartAuthoritative, undefined);
+    assert.strictEqual(relaunched.snapshot.autoStartWithCodex, false);
+  });
+});
+
+describe("prefs.migrate v19 → v20 (Telegram reply submission opt-in)", () => {
+  it("turns off the legacy paste-only gate before it gains Enter submission", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 19,
+      tgApproval: {
+        enabled: true,
+        allowedTgUserId: "123456789",
+        targetSessionKey: "telegram:123456789",
+        notifyOnComplete: true,
+        completionOutputMode: "full",
+        r3DirectSendEnabled: true,
+      },
+    }));
+
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.deepStrictEqual(upgraded.tgApproval, {
+      enabled: true,
+      allowedTgUserId: "123456789",
+      targetSessionKey: "telegram:123456789",
+      notifyOnComplete: true,
+      completionOutputMode: "full",
+      r3DirectSendEnabled: false,
+    });
+  });
+
+  it("preserves an explicit opt-in written by the v20 behavior", () => {
+    const current = prefs.validate(prefs.migrate({
+      version: 20,
+      tgApproval: {
+        enabled: true,
+        allowedTgUserId: "123456789",
+        targetSessionKey: "telegram:123456789",
+        r3DirectSendEnabled: true,
+      },
+    }));
+
+    assert.strictEqual(current.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(current.tgApproval.r3DirectSendEnabled, true);
+  });
+});
+
+describe("prefs.migrate v20 → v21 (Codex Auto approval routing)", () => {
+  it("moves the persisted Intercept default to Auto", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 20,
+      agents: { codex: { enabled: true, permissionsEnabled: false, permissionMode: "intercept" } },
+    }));
+    assert.strictEqual(upgraded.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(upgraded.agents.codex.permissionMode, "auto");
+    assert.strictEqual(upgraded.agents.codex.enabled, true);
+    assert.strictEqual(upgraded.agents.codex.permissionsEnabled, false);
+  });
+
+  it("moves legacy Native to Auto", () => {
+    const upgraded = prefs.validate(prefs.migrate({
+      version: 20,
+      agents: { codex: { permissionMode: "native" } },
+    }));
+    assert.strictEqual(upgraded.agents.codex.permissionMode, "auto");
+  });
+
+  it("does not mutate the raw input or touch other agents", () => {
+    const raw = {
+      version: 20,
+      agents: { codex: { permissionMode: "intercept" }, "claude-code": { enabled: false } },
+    };
+    const upgraded = prefs.validate(prefs.migrate(raw));
+    assert.strictEqual(raw.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(upgraded.agents["claude-code"].enabled, false);
+  });
+
+  it("tolerates a missing or malformed agents map", () => {
+    assert.strictEqual(prefs.migrate({ version: 20 }).version, 21);
+    assert.strictEqual(prefs.migrate({ version: 20, agents: [] }).version, 21);
+    assert.strictEqual(prefs.migrate({ version: 20, agents: { codex: null } }).version, 21);
+  });
+
+  it("keeps an Intercept choice made after the migration", () => {
+    const current = prefs.validate(prefs.migrate({
+      version: 21,
+      agents: { codex: { permissionMode: "intercept" } },
+    }));
+    assert.strictEqual(current.agents.codex.permissionMode, "intercept");
+  });
+
+  it("migrates an upgraded prefs file once and persists the new version", () => {
+    const p = makeTempPath("codex-auto.json");
+    fs.writeFileSync(p, JSON.stringify({
+      version: 20,
+      agents: { codex: { permissionMode: "intercept" } },
+    }), "utf8");
+    const { snapshot } = prefs.load(p);
+    assert.strictEqual(snapshot.agents.codex.permissionMode, "auto");
+    prefs.save(p, { ...snapshot, agents: { ...snapshot.agents,
+      codex: { ...snapshot.agents.codex, permissionMode: "intercept" } } });
+    assert.strictEqual(prefs.load(p).snapshot.agents.codex.permissionMode, "intercept");
+  });
+});
+
 describe("prefs.migrate v12 → v13 (Settings window bounds)", () => {
   it("advances the schema without inventing geometry for existing users", () => {
     const upgraded = prefs.validate(prefs.migrate({ version: 12, lang: "zh" }));
@@ -1524,6 +1831,22 @@ describe("prefs.load", () => {
     );
   });
 
+  it("locks an invalid prefs file when its recovery backup cannot be created", () => {
+    const p = makeTempPath();
+    const original = "{ invalid json";
+    fs.writeFileSync(p, original, "utf8");
+    fs.mkdirSync(p + ".bak");
+
+    const loaded = prefs.load(p);
+    assert.strictEqual(loaded.locked, true);
+    assert.strictEqual(loaded.recovered, true);
+    assert.strictEqual(loaded.recoveryBackupFailed, true);
+    assert.deepStrictEqual(loaded.snapshot, prefs.getDefaults());
+
+    if (!loaded.locked) prefs.save(p, loaded.snapshot);
+    assert.strictEqual(fs.readFileSync(p, "utf8"), original);
+  });
+
   // POSIX-only: on Windows `chmod` only toggles the read-only bit and does not deny
   // reads, so the EACCES branch is unreachable there and these assertions would fail
   // for a reason that has nothing to do with prefs. `npm test` does run on
@@ -1590,6 +1913,7 @@ describe("prefs.load", () => {
     assert.strictEqual(fresh, undefined);
     assert.strictEqual(recovered, true);
     assert.deepStrictEqual(snapshot, prefs.getDefaults());
+    assert.strictEqual(fs.readFileSync(p + ".bak", "utf8"), "null");
   });
 
   it("marks an array prefs root as a recovered defaults snapshot", () => {
@@ -1600,6 +1924,7 @@ describe("prefs.load", () => {
     assert.strictEqual(fresh, undefined);
     assert.strictEqual(recovered, true);
     assert.deepStrictEqual(snapshot, prefs.getDefaults());
+    assert.strictEqual(fs.readFileSync(p + ".bak", "utf8"), "[]");
   });
 
   it("marks explicitly malformed Codex gate fields as non-authoritative", () => {
@@ -1609,6 +1934,8 @@ describe("prefs.load", () => {
       { version: prefs.CURRENT_VERSION, agents: { codex: null } },
       { version: prefs.CURRENT_VERSION, agents: { codex: [] } },
       { version: prefs.CURRENT_VERSION, agents: { codex: { enabled: "yes" } } },
+      { version: prefs.CURRENT_VERSION, autoStartWithCodex: "yes" },
+      { version: prefs.CURRENT_VERSION, agents: { codex: { integrationInstalled: "yes" } } },
     ]) {
       const p = makeTempPath();
       fs.writeFileSync(p, JSON.stringify(raw), "utf8");
@@ -1695,22 +2022,22 @@ describe("prefs.load", () => {
     }
   });
 
-  it("accepts the restored v14 schema and locks an explicit v15 file", () => {
-    const currentPath = makeTempPath("v14.json");
-    fs.writeFileSync(currentPath, JSON.stringify({ version: 14, lang: "zh" }), "utf8");
+  it("accepts the current v21 schema and locks an explicit v22 file", () => {
+    const currentPath = makeTempPath("v21.json");
+    fs.writeFileSync(currentPath, JSON.stringify({ version: 21, lang: "zh" }), "utf8");
     const current = prefs.load(currentPath);
     assert.strictEqual(current.locked, false);
-    assert.strictEqual(current.snapshot.version, 14);
+    assert.strictEqual(current.snapshot.version, 21);
     assert.strictEqual(current.snapshot.lang, "zh");
 
-    const futurePath = makeTempPath("v15.json");
-    fs.writeFileSync(futurePath, JSON.stringify({ version: 15, lang: "ja" }), "utf8");
+    const futurePath = makeTempPath("v22.json");
+    fs.writeFileSync(futurePath, JSON.stringify({ version: 22, lang: "ja" }), "utf8");
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
       const future = prefs.load(futurePath);
       assert.strictEqual(future.locked, true);
-      assert.strictEqual(future.snapshot.version, 15);
+      assert.strictEqual(future.snapshot.version, 22);
       assert.strictEqual(future.snapshot.lang, "ja");
     } finally {
       console.warn = originalWarn;
@@ -1745,6 +2072,19 @@ describe("prefs.save", () => {
       height: 620,
     });
     assert.strictEqual(snapshot.version, prefs.CURRENT_VERSION);
+  });
+
+  it("round-trips an explicit native macOS Control shortcut", () => {
+    const p = makeTempPath();
+    const snap = prefs.getDefaults();
+    snap.shortcuts.togglePet = "Control+Shift+1";
+
+    prefs.save(p, snap);
+    const { snapshot, locked } = prefs.load(p);
+
+    assert.strictEqual(locked, false);
+    assert.strictEqual(snapshot.version, prefs.CURRENT_VERSION);
+    assert.strictEqual(snapshot.shortcuts.togglePet, "Control+Shift+1");
   });
 
   it("normalizes Settings window bounds and drops invalid geometry", () => {
@@ -1846,6 +2186,29 @@ describe("prefs.save", () => {
     });
     assert.deepStrictEqual(JSON.parse(fs.readFileSync(p, "utf8")).petAccessory, {});
     assert.deepStrictEqual(prefs.validate({ petAccessory: "wizard-hat" }).petAccessory, {});
+  });
+
+  it("round-trips per-theme mouth accessories and stores only catalog ids", () => {
+    const p = makeTempPath();
+    prefs.save(p, {
+      ...prefs.getDefaults(),
+      petMouthAccessory: { clawd: "cigarette" },
+    });
+    assert.deepStrictEqual(
+      prefs.load(p).snapshot.petMouthAccessory,
+      { clawd: "cigarette" }
+    );
+
+    prefs.save(p, {
+      ...prefs.getDefaults(),
+      petMouthAccessory: {
+        clawd: "pipe",
+        "../unsafe": "cigarette",
+        calico: "none",
+      },
+    });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(p, "utf8")).petMouthAccessory, {});
+    assert.deepStrictEqual(prefs.validate({ petMouthAccessory: "cigarette" }).petMouthAccessory, {});
   });
 
   it("round-trips per-theme holiday accessory opt-ins and stores only true entries", () => {

@@ -5,32 +5,44 @@ const os = require("os");
 const path = require("path");
 
 const { getAgentDescriptors } = require("./doctor-detectors/agent-descriptors");
-const { DEFAULT_INTEGRATION_INSTALLED_IDS, normalizePathList } = require("./prefs");
+const { normalizePathList } = require("./prefs");
 const copilot = require("../hooks/copilot-install");
 const hermes = require("../hooks/hermes-install");
 const reasonix = require("../hooks/reasonix-install");
 const dsh = require("../hooks/dsh-install");
+const zcode = require("../hooks/zcode-install");
+const codebuddy = require("../hooks/codebuddy-install");
+const openclaw = require("../hooks/openclaw-install");
+const grok = require("../hooks/grok-install");
 const { commandMatchesMarker } = require("../hooks/json-utils");
-const { identifyCustomApplication } = require("./custom-applications");
+const { identifyCustomApplication, isLaunchable } = require("./custom-applications");
 
-const DEFAULT_SKIPPED_AGENT_IDS = new Set(DEFAULT_INTEGRATION_INSTALLED_IDS);
+// Agents whose detector parent dir the DEFAULT startup sync creates on its own,
+// before the agent has left any evidence of its own. For those, "the directory
+// exists" only proves Clawd ran, so they are excluded from local detection.
+//
+// #895: this used to be the whole default-integration list, on the assumption
+// that Clawd creates both ~/.claude and ~/.codex. Only the first is true —
+// hooks/install.js writes ~/.claude/settings.json into a missing directory,
+// while hooks/codex-install-utils.js bails out when ~/.codex is absent and
+// writes nothing. Codex was therefore excluded on a false premise, and Settings
+// could never report a genuinely installed Codex.
+//
+// The test is specifically the default auto-sync, not "any install path can
+// create it": an explicit Pi install does create ~/.pi from scratch, but Pi
+// ships integrationInstalled=false so nothing syncs it unattended, and its
+// directory remains real evidence.
+const DEFAULT_AUTO_SYNC_CREATED_PARENT_DIR_AGENT_IDS = new Set(["claude-code"]);
 const LOW_CONFIDENCE = "low";
-const GEMINI_PARENT_DIR_NOISE_FILES = new Set([
-  ".DS_Store",
-  ".localized",
-  "Thumbs.db",
-  "desktop.ini",
+// Gemini CLI v0.55.1, commit 41327e407da58aa01c409ef6685b7b5d379f295e,
+// packages/core/src/config/storage.ts. Keep this closed: ~/.gemini is shared
+// with Antigravity and settings.json is a shared hook registry, so neither an
+// arbitrary child nor a settings key is product proof. Credential/token files
+// and read-only extension directories are deliberately excluded.
+const GEMINI_PRODUCT_ARTIFACT_FILES = Object.freeze([
+  "installation_id",
+  "projects.json",
 ]);
-const GEMINI_PARENT_DIR_NOISE_SUFFIXES = [
-  ".bak",
-  ".backup",
-  ".old",
-  ".orig",
-  ".swp",
-  ".swo",
-  ".tmp",
-  "~",
-];
 
 function dirExists(fsImpl, dirPath) {
   if (!dirPath) return false;
@@ -59,6 +71,22 @@ function statPath(fsImpl, filePath) {
     return "other";
   } catch {
     return null;
+  }
+}
+
+function lstatPath(fsImpl, filePath) {
+  if (!filePath) return { kind: "missing", size: 0 };
+  try {
+    const stat = fsImpl.lstatSync(filePath);
+    if (stat.isSymbolicLink()) return { kind: "symlink", size: stat.size };
+    if (stat.isDirectory()) return { kind: "dir", size: stat.size };
+    if (stat.isFile()) return { kind: "file", size: stat.size };
+    return { kind: "other", size: stat.size };
+  } catch (err) {
+    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+      return { kind: "missing", size: 0 };
+    }
+    return { kind: "unreadable", size: 0 };
   }
 }
 
@@ -182,6 +210,16 @@ function resolveAgentPaths(descriptor, options) {
     }, options);
   }
 
+  if (descriptor.agentId === "grok-build") {
+    // Dynamic GROK_HOME path + structured ownership both come from the shared
+    // inspector so Doctor, the installation detector, and the installer agree.
+    const inspected = grok.inspectGrokHookFile({ fs: options.fs, env, homeDir });
+    return finalizeAgentPaths(descriptor, {
+      parentDir: inspected.grokHome,
+      configPath: inspected.configPath,
+    }, options);
+  }
+
   if (descriptor.agentId === "reasonix") {
     const configTargets = reasonix.resolveReasonixConfigTargets({
       env,
@@ -233,6 +271,10 @@ function notFound(detail = "No local installation signal found") {
   return installationResult(false, LOW_CONFIDENCE, "not-found", detail);
 }
 
+function insufficient(detail = "Local files exist, but no accepted product installation signal was found") {
+  return installationResult(null, LOW_CONFIDENCE, "insufficient-evidence", detail);
+}
+
 function hasClawdMarkerText(text, marker) {
   if (typeof text !== "string" || typeof marker !== "string" || !marker) return false;
   if (commandMatchesMarker(text, marker)) return true;
@@ -256,84 +298,148 @@ function hasClawdMarkerText(text, marker) {
   return containsCommandMarker(parsed);
 }
 
-function hasNonClawdHookCommand(value, marker) {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some((entry) => hasNonClawdHookCommand(entry, marker));
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === "command" && typeof entry === "string" && !hasClawdMarkerText(entry, marker)) return true;
-    if (hasNonClawdHookCommand(entry, marker)) return true;
-  }
-  return false;
+function isObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function classifyGeminiSettings(fsImpl, settingsPath, marker) {
-  const raw = readText(fsImpl, settingsPath);
-  if (raw === null) return { exists: false, userContent: false, clawdOnly: false, unreadable: false };
-  let parsed;
+function parseExactJsonObject(fsImpl, configPath) {
+  const pathInfo = lstatPath(fsImpl, configPath);
+  if (pathInfo.kind !== "file") return { pathInfo, raw: null, parsed: null, status: pathInfo.kind };
+  if (pathInfo.size === 0) return { pathInfo, raw: "", parsed: null, status: "empty" };
+  const raw = readText(fsImpl, configPath);
+  if (raw === null) return { pathInfo, raw: null, parsed: null, status: "unreadable" };
   try {
-    parsed = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+    const parsed = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+    if (!isObject(parsed)) return { pathInfo, raw, parsed: null, status: "invalid-shape" };
+    return { pathInfo, raw, parsed, status: "parsed" };
   } catch {
-    return { exists: true, userContent: true, clawdOnly: false, unreadable: true };
+    return { pathInfo, raw, parsed: null, status: "parse-failed" };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { exists: true, userContent: true, clawdOnly: false, unreadable: false };
-  }
-
-  const keys = Object.keys(parsed);
-  const nonClawdKeys = keys.filter((key) => key !== "hooks" && key !== "hooksConfig");
-  if (nonClawdKeys.length > 0) {
-    return { exists: true, userContent: true, clawdOnly: false, unreadable: false };
-  }
-  if (hasNonClawdHookCommand(parsed.hooks, marker)) {
-    return { exists: true, userContent: true, clawdOnly: false, unreadable: false };
-  }
-  if (parsed.hooksConfig && typeof parsed.hooksConfig === "object" && !Array.isArray(parsed.hooksConfig)) {
-    const hookConfigKeys = Object.keys(parsed.hooksConfig);
-    if (hookConfigKeys.some((key) => key !== "disabled")) {
-      return { exists: true, userContent: true, clawdOnly: false, unreadable: false };
-    }
-  }
-  return { exists: true, userContent: false, clawdOnly: keys.length > 0, unreadable: false };
 }
 
-function geminiDirHasNonClawdSignals(fsImpl, parentDir, settingsPath, marker) {
-  if (!dirExists(fsImpl, parentDir)) return false;
-  const entries = listDir(fsImpl, parentDir);
-  for (const entry of entries) {
-    if (!entry || typeof entry.name !== "string") continue;
-    if (GEMINI_PARENT_DIR_NOISE_FILES.has(entry.name)) continue;
-    if (GEMINI_PARENT_DIR_NOISE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))) continue;
-    if (entry.name === "config") continue;
-    if (entry.name === path.basename(settingsPath)) {
-      const classified = classifyGeminiSettings(fsImpl, settingsPath, marker);
-      if (classified.userContent) return true;
-      continue;
-    }
+function hookTreeHasForeignEntry(value, isOwnedHook) {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((entry) => hookTreeHasForeignEntry(entry, isOwnedHook));
+  const owned = isOwnedHook(value);
+  if (!owned
+    && (typeof value.command === "string" || typeof value.url === "string" || typeof value.type === "string")) {
     return true;
   }
+  // Ownership subtracts this hook leaf, not the whole object. Keep traversing
+  // in case a malformed/shared wrapper also carries a foreign nested hook.
+  return Object.values(value).some((entry) => hookTreeHasForeignEntry(entry, isOwnedHook));
+}
+
+function isOwnedZcodeHook(entry) {
+  if (zcode.isClawdZcodeHook(entry)) return true;
+  if (zcode.isClaudeHookCommand(entry && entry.command)) return true;
+  // ZCode can import Claude process hooks with the marker in args rather than
+  // command. Those are still Clawd residue and must not become product proof.
+  try {
+    return hasClawdMarkerText(JSON.stringify(entry), zcode.CLAUDE_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+function isOwnedQoderHook(entry, marker) {
+  return !!(entry && commandMatchesMarker(entry.command, marker));
+}
+
+function isOwnedCodeBuddyHook(entry, marker) {
+  if (entry && commandMatchesMarker(entry.command, marker)) return true;
+  return !!(entry && codebuddy.isManagedPermissionHook(entry));
+}
+
+function hookConfigHasProductContent(agentId, parsed, marker) {
+  if (Object.keys(parsed).some((key) => key !== "hooks")) return true;
+  if (!isObject(parsed.hooks)) return false;
+
+  if (agentId === "zcode") {
+    if (Object.keys(parsed.hooks).some((key) => key !== "enabled" && key !== "events")) return true;
+    return hookTreeHasForeignEntry(parsed.hooks.events, isOwnedZcodeHook);
+  }
+  if (agentId === "qoder") {
+    return hookTreeHasForeignEntry(parsed.hooks, (entry) => isOwnedQoderHook(entry, marker));
+  }
+  return hookTreeHasForeignEntry(parsed.hooks, (entry) => isOwnedCodeBuddyHook(entry, marker));
+}
+
+function detectOwnedHookConfigInstallation(descriptor, paths, options) {
+  const fsImpl = options.fs;
+  const parentInfo = lstatPath(fsImpl, paths.parentDir);
+  if (parentInfo.kind === "missing") return notFound();
+  if (parentInfo.kind !== "dir") {
+    return insufficient(`${paths.parentDir} exists but is not a regular directory`);
+  }
+
+  const classified = parseExactJsonObject(fsImpl, paths.configPath);
+  if (classified.status === "parsed"
+    && hookConfigHasProductContent(descriptor.agentId, classified.parsed, descriptor.marker)) {
+    return installationResult(true, "high", "config-file", `${paths.configPath} contains product configuration`);
+  }
+  return insufficient(`${paths.parentDir} exists without accepted ${descriptor.agentName} product evidence`);
+}
+
+function openClawConfigHasProductContent(parsed) {
+  if (Object.keys(parsed).some((key) => key !== "plugins")) return true;
+  if (!isObject(parsed.plugins)) return false;
+  if (Object.keys(parsed.plugins).some((key) => key !== "entries" && key !== "load")) return true;
+
+  const entries = parsed.plugins.entries;
+  if (isObject(entries) && Object.keys(entries).some((key) => key !== openclaw.PLUGIN_ID)) return true;
+
+  const load = parsed.plugins.load;
+  if (isObject(load) && Object.keys(load).some((key) => key !== "paths")) return true;
+  if (isObject(load) && Array.isArray(load.paths)) {
+    const pluginDir = openclaw.resolvePluginDir();
+    if (load.paths.some((entry) => !openclaw.isManagedPluginPath(entry, pluginDir))) return true;
+  }
   return false;
 }
 
-function detectGeminiInstallation(descriptor, paths, options) {
+function detectOpenClawInstallation(paths, options) {
   const fsImpl = options.fs;
-  const classified = classifyGeminiSettings(fsImpl, paths.configPath, descriptor.marker);
-  if (classified.exists && classified.userContent) {
-    return installationResult(
-      true,
-      classified.unreadable ? "medium" : "high",
-      "config-file",
-      classified.unreadable
-        ? `${paths.configPath} exists but could not be classified`
-        : `${paths.configPath} contains non-Clawd Gemini settings`
-    );
+  const env = options.env || {};
+  const hasExplicitConfig = typeof env.OPENCLAW_CONFIG_PATH === "string" && !!env.OPENCLAW_CONFIG_PATH.trim();
+  const stateInfo = lstatPath(fsImpl, paths.stateDir);
+
+  // A default config below a symlinked state root is not exact local evidence.
+  // An explicit config is terminal and is classified independently.
+  if (!hasExplicitConfig && stateInfo.kind === "symlink") {
+    return insufficient(`${paths.stateDir} is a symbolic link and was not followed for product detection`);
   }
-  if (geminiDirHasNonClawdSignals(fsImpl, paths.parentDir, paths.configPath, descriptor.marker)) {
-    return installationResult(true, "medium", "parent-dir", `${paths.parentDir} contains Gemini CLI files`);
+
+  const classified = parseExactJsonObject(fsImpl, paths.configPath);
+  if (classified.status === "parsed" && openClawConfigHasProductContent(classified.parsed)) {
+    return installationResult(true, "high", "config-file", `${paths.configPath} contains OpenClaw configuration`);
   }
-  if (classified.exists && classified.clawdOnly) {
-    return notFound(`${paths.configPath} contains only Clawd-managed Gemini hook signals`);
+
+  if (classified.status === "missing" && stateInfo.kind === "missing") return notFound();
+  return insufficient(`${paths.stateDir} or ${paths.configPath} exists without accepted OpenClaw product evidence`);
+}
+
+function detectGeminiInstallation(_descriptor, paths, options) {
+  const fsImpl = options.fs;
+  const parentInfo = lstatPath(fsImpl, paths.parentDir);
+  if (parentInfo.kind === "missing") return notFound();
+  if (parentInfo.kind !== "dir") {
+    return insufficient(`${paths.parentDir} exists but is not a regular directory`);
   }
-  return notFound();
+
+  for (const artifact of GEMINI_PRODUCT_ARTIFACT_FILES) {
+    const artifactPath = path.join(paths.parentDir, artifact);
+    const artifactInfo = lstatPath(fsImpl, artifactPath);
+    if (artifactInfo.kind === "file" && artifactInfo.size > 0) {
+      return installationResult(
+        true,
+        "high",
+        "product-artifact",
+        `${artifactPath} is a non-empty Gemini CLI product artifact`
+      );
+    }
+  }
+  return insufficient(`${paths.parentDir} exists without an accepted Gemini CLI product artifact`);
 }
 
 function detectHermesInstallation(paths, options) {
@@ -348,6 +454,19 @@ function detectHermesInstallation(paths, options) {
     return installationResult(true, "low", "parent-dir", `${paths.hermesHome} exists`);
   }
   return notFound();
+}
+
+function dshDesktopDiscoveryForAgent(options = {}) {
+  // Static on purpose: detectors must never spawn PowerShell. Windows reads the
+  // registry cache that the startup / Doctor preheat fills.
+  return dsh.discoverDshDesktopSync({
+    fs: options.fs || fs,
+    platform: options.platform,
+    env: options.env,
+    homeDir: options.homeDir,
+    desktopDiscovery: options.dshDesktopDiscovery,
+    windowsRegistrySnapshot: options.windowsRegistrySnapshot,
+  });
 }
 
 function detectInstallation(descriptor, paths, options) {
@@ -381,19 +500,25 @@ function detectInstallation(descriptor, paths, options) {
       }
       if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
       return notFound();
+    case "grok-build":
+      if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
+      return notFound();
     case "copilot-cli":
     case "cursor-agent":
-    case "codebuddy":
     case "qwen-code":
-    case "zcode":
     case "codewhale":
     case "opencode":
     case "mimocode":
-    case "qoder":
     case "qoderwork":
+    case "traecode":
     case "qwenwork":
+    case "minimax":
       if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
       return notFound();
+    case "zcode":
+    case "qoder":
+    case "codebuddy":
+      return detectOwnedHookConfigInstallation(descriptor, paths, options);
     case "reasonix":
       for (const target of paths.configTargets || []) {
         if (dirExists(fsImpl, target.parentDir)) {
@@ -406,12 +531,11 @@ function detectInstallation(descriptor, paths, options) {
       if (dirExists(fsImpl, paths.configPath)) return installationResult(true, "medium", "config-dir", `${paths.configPath} exists`);
       return notFound();
     case "pi":
+    case "omp":
       if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
       return notFound();
     case "openclaw":
-      if (dirExists(fsImpl, paths.stateDir)) return installationResult(true, "high", "parent-dir", `${paths.stateDir} exists`);
-      if (fileExists(fsImpl, paths.configPath)) return installationResult(true, "high", "config-file", `${paths.configPath} exists`);
-      return notFound();
+      return detectOpenClawInstallation(paths, options);
     case "hermes":
       return detectHermesInstallation(paths, options);
     case "deepseek-harness":
@@ -419,6 +543,11 @@ function detectInstallation(descriptor, paths, options) {
         if (fileExists(fsImpl, commandPath)) {
           return installationResult(true, "high", "command-path", `${commandPath} exists`);
         }
+      }
+      // A desktop-only user has no ~/.dsh and no global CLI; the app bundle is
+      // the only signal. Static discovery reads the cache on Windows.
+      if (dshDesktopDiscoveryForAgent(options).status === "found") {
+        return installationResult(true, "high", "desktop-app", "DeepSeek Harness desktop app found");
       }
       if (dirExists(fsImpl, paths.parentDir)) {
         const home = paths.parentDir;
@@ -470,6 +599,7 @@ function detectCustomTools(options = {}) {
 
 function detectCustomAgents(options = {}) {
   const fsImpl = options.fs || fs;
+  const platform = options.platform || process.platform;
   const applications = Array.isArray(options.snapshot && options.snapshot.customApplications)
     ? options.snapshot.customApplications
     : [];
@@ -479,15 +609,27 @@ function detectCustomAgents(options = {}) {
       ? application.executablePath
       : "";
     const kind = executablePath ? statPath(fsImpl, executablePath) : null;
+    let launchable = false;
+    if (kind === "file") {
+      try { launchable = isLaunchable(executablePath, fsImpl.statSync(executablePath), platform, path, fsImpl); } catch {}
+    }
+    const reason = launchable
+      ? "registered-executable"
+      : (kind === "file" ? "not-executable" : (kind ? "not-file" : "not-found"));
+    const detail = launchable
+      ? `Registered executable exists: ${executablePath} (${kind})`
+      : reason === "not-executable"
+        ? `Registered executable is not launchable: ${executablePath}`
+        : reason === "not-file"
+          ? `Registered executable path is not a regular file: ${executablePath} (${kind})`
+          : `Registered executable was not found: ${executablePath}`;
     return {
       agentId,
       executablePath,
-      detectedInstalled: !!kind,
-      confidence: kind ? "high" : LOW_CONFIDENCE,
-      reason: kind ? "registered-executable" : "not-found",
-      detail: kind
-        ? `Registered executable exists: ${executablePath} (${kind})`
-        : `Registered executable was not found: ${executablePath}`,
+      detectedInstalled: launchable,
+      confidence: launchable ? "high" : LOW_CONFIDENCE,
+      reason,
+      detail,
     };
   }).filter((entry) => entry.agentId && entry.executablePath);
 }
@@ -509,34 +651,64 @@ function markerInDirectoryFiles(fsImpl, dirPath, marker, options = {}) {
 function detectClawdIntegration(descriptor, paths, options) {
   const fsImpl = options.fs;
   if (descriptor.agentId === "deepseek-harness") {
-    const health = dsh.inspectDeepSeekHarnessDiskSync({
+    const base = {
       fs: fsImpl,
       dshHome: paths.parentDir,
-      dshInstallRoot: options.dshInstallRoot,
       managedRoot: options.dshManagedRoot,
       homeDir: options.homeDir,
       env: options.env,
       platform: options.platform,
+    };
+    const webHealth = dsh.inspectDeepSeekHarnessDiskSync({
+      ...base,
+      profile: "web",
+      dshInstallRoot: options.dshInstallRoot,
     });
-    return health.status === "healthy"
-      ? {
+    const desktopDiscovery = dshDesktopDiscoveryForAgent(options);
+    const desktopHealth = dsh.inspectDeepSeekHarnessDiskSync({
+      ...base,
+      profile: "desktop",
+      dshInstallRoot: null,
+      hostVersion: desktopDiscovery.status === "found" ? desktopDiscovery.staticVersion : null,
+    });
+    const webHealthy = webHealth.status === "healthy";
+    const desktopHealthy = desktopHealth.status === "healthy";
+    // desktopProfileDir is always present; desktopPluginDir only once verified.
+    const desktopPaths = {
+      ...(desktopHealth.profileDir ? { desktopProfileDir: desktopHealth.profileDir } : {}),
+      ...(desktopHealthy && desktopHealth.resolved ? { desktopPluginDir: desktopHealth.resolved.packageDir } : {}),
+    };
+    if (webHealthy || desktopHealthy) {
+      const pluginHealth = webHealthy ? webHealth : desktopHealth;
+      return {
         detected: true,
         reason: "managed-plugin",
-        detail: `${health.profileDir} contains the verified Clawd bridge`,
-        paths: { profileDir: health.profileDir, pluginDir: health.resolved.packageDir },
-      }
-      : {
-        detected: false,
-        reason: health.status,
-        detail: `DeepSeek Harness bridge is ${health.status}`,
-        paths: { profileDir: health.profileDir },
+        detail: `${pluginHealth.profileDir} contains the verified Clawd bridge`,
+        paths: {
+          profileDir: webHealth.profileDir,
+          pluginDir: pluginHealth.resolved && pluginHealth.resolved.packageDir,
+          ...desktopPaths,
+        },
       };
+    }
+    // Neither side is healthy: report web's status, unless web has no Clawd
+    // state at all while desktop still does (then desktop's status says more).
+    const webHasState = webHealth.status !== "absent" && webHealth.status !== "profile-missing";
+    const desktopHasState = desktopHealth.status !== "absent" && desktopHealth.status !== "profile-missing";
+    const chosen = !webHasState && desktopHasState ? desktopHealth : webHealth;
+    return {
+      detected: false,
+      reason: chosen.status,
+      detail: `DeepSeek Harness bridge is ${chosen.status}`,
+      paths: { profileDir: webHealth.profileDir, ...desktopPaths },
+    };
   }
-  if (descriptor.agentId === "pi") {
+  if (descriptor.agentId === "pi" || descriptor.agentId === "omp") {
+    const label = descriptor.agentId === "omp" ? "OMP" : "Pi";
     const markerPath = path.join(paths.configPath, descriptor.markerFile || ".clawd-managed.json");
     return fileExists(fsImpl, markerPath)
       ? { detected: true, reason: "marker-file", detail: `${markerPath} exists`, paths: { markerPath } }
-      : { detected: false, reason: "not-found", detail: "No Clawd-managed Pi extension marker found" };
+      : { detected: false, reason: "not-found", detail: `No Clawd-managed ${label} extension marker found` };
   }
   if (descriptor.agentId === "hermes") {
     const files = Array.isArray(descriptor.managedFiles) ? descriptor.managedFiles : [];
@@ -544,6 +716,33 @@ function detectClawdIntegration(descriptor, paths, options) {
     return found
       ? { detected: true, reason: "managed-files", detail: `${paths.configPath} contains Clawd plugin files`, paths: { pluginDir: paths.configPath } }
       : { detected: false, reason: "not-found", detail: "No Clawd-managed Hermes plugin files found" };
+  }
+  if (descriptor.configMode === "grok-hooks") {
+    const inspected = grok.inspectGrokHookFile({
+      fs: fsImpl,
+      env: options.env,
+      homeDir: options.homeDir,
+      grokHome: paths.parentDir,
+      configPath: paths.configPath,
+    });
+    if (inspected.health === "healthy") {
+      return {
+        detected: true,
+        reason: "structured-marker",
+        detail: `${inspected.configPath} contains the verified Clawd handler marker`,
+        paths: { configPath: inspected.configPath },
+        stalePreview: inspected.stalePreview,
+        warnings: inspected.warnings,
+      };
+    }
+    return {
+      detected: false,
+      reason: inspected.health,
+      detail: inspected.detail || `Grok Build hook file is ${inspected.health}`,
+      paths: { configPath: inspected.configPath },
+      stalePreview: inspected.stalePreview,
+      warnings: inspected.warnings,
+    };
   }
   if (descriptor.configMode === "dir") {
     return markerInDirectoryFiles(fsImpl, paths.configPath, descriptor.marker)
@@ -623,7 +822,7 @@ function detectAgentInstallations(options = {}) {
   const skipDefaultIntegrations = options.skipDefaultIntegrations !== false;
   for (const descriptor of descriptors) {
     if (!descriptor || typeof descriptor.agentId !== "string") continue;
-    if (skipDefaultIntegrations && DEFAULT_SKIPPED_AGENT_IDS.has(descriptor.agentId)) {
+    if (skipDefaultIntegrations && DEFAULT_AUTO_SYNC_CREATED_PARENT_DIR_AGENT_IDS.has(descriptor.agentId)) {
       skippedAgentIds.push(descriptor.agentId);
       continue;
     }
@@ -735,7 +934,7 @@ async function refreshWslDetection(options = {}) {
       const supportsHermes = descriptors.some((descriptor) =>
         descriptor
         && descriptor.agentId === "hermes"
-        && (!skipDefaultIntegrations || !DEFAULT_SKIPPED_AGENT_IDS.has("hermes"))
+        && (!skipDefaultIntegrations || !DEFAULT_AUTO_SYNC_CREATED_PARENT_DIR_AGENT_IDS.has("hermes"))
         && getAgentInstallScriptName("hermes")
       );
       const hermesWslHome = supportsHermes
@@ -748,7 +947,7 @@ async function refreshWslDetection(options = {}) {
       const checks = [];
       for (const descriptor of descriptors) {
         if (!descriptor || typeof descriptor.agentId !== "string") continue;
-        if (skipDefaultIntegrations && DEFAULT_SKIPPED_AGENT_IDS.has(descriptor.agentId)) continue;
+        if (skipDefaultIntegrations && DEFAULT_AUTO_SYNC_CREATED_PARENT_DIR_AGENT_IDS.has(descriptor.agentId)) continue;
         if (!getAgentInstallScriptName(descriptor.agentId)) continue;
         // Hermes' descriptor was resolved in the Windows process and can point
         // at LOCALAPPDATA or a host-only HERMES_HOME. Never rebase that value

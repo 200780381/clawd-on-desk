@@ -192,7 +192,13 @@ describe("theme accessory animation overrides", () => {
     assert.deepStrictEqual(attachments.files["custom-mini-idle.svg"], {
       visibility: "hidden",
     });
-    assert.strictEqual(attachments.files["attention.svg"], undefined);
+    assert.deepStrictEqual(attachments.files["attention.svg"], {
+      staticFrame: ROOT_FRAME,
+      followTarget: {
+        id: "accessory-anchor",
+        frame: { cx: 12, baseY: 4, width: 16 },
+      },
+    });
     assert.strictEqual(attachments.default, undefined);
     assert.strictEqual(attachments.mini, undefined);
 
@@ -260,12 +266,22 @@ describe("theme accessory animation overrides", () => {
     );
   });
 
-  it("keeps an external theme with stale descriptors fail closed", () => {
+  it("keeps an external animation-library descriptor but requires its asset", () => {
+    const validation = themeLoader.validateThemeShape("external-stale");
+    assert.strictEqual(validation.ok, false);
+    assert.ok(
+      validation.errors.some((error) => error.includes("missing asset: not-reachable.svg")),
+      `expected the optional descriptor asset to be required, got: ${validation.errors.join("; ")}`
+    );
+
     const theme = themeLoader.loadTheme("external-stale", { strict: true });
     assert.strictEqual(theme._id, "external-stale");
     assert.strictEqual(theme._builtin, false);
-    assert.strictEqual(theme._capabilities.accessories, false);
-    assert.strictEqual(theme.customization.accessories, null);
-    assert.strictEqual(resolvePetAccessoryPayload("cowboy-hat", theme).id, "none");
+    assert.strictEqual(theme._capabilities.accessories, true);
+    assert.deepStrictEqual(
+      theme.customization.accessories.files["not-reachable.svg"],
+      { staticFrame: ROOT_FRAME }
+    );
+    assert.strictEqual(resolvePetAccessoryPayload("cowboy-hat", theme).id, "cowboy-hat");
   });
 });

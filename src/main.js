@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Notification, screen, ipcMain, globalShortcut, nativeTheme, dialog, shell, nativeImage, powerSaveBlocker, powerMonitor, clipboard, safeStorage } = require("electron");
+const { app, BrowserWindow, Notification, screen, ipcMain, globalShortcut, nativeTheme, dialog, shell, nativeImage, powerSaveBlocker, powerMonitor, clipboard, safeStorage, net } = require("electron");
 const { maybeRunPackageKoffiSmoke } = require("./package-koffi-smoke");
 if (maybeRunPackageKoffiSmoke({ app, BrowserWindow })) {
   return;
@@ -89,15 +89,26 @@ const {
   createSettingsSizePreviewSession,
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
+const { registerQuotaNotificationIpc } = require("./quota-notification-ipc");
+const { createQuotaAlertsRuntime } = require("./quota-alerts-runtime");
+const { createQuotaNotificationPresenter } = require("./quota-notifications");
 const createSettingsEffectRouter = require("./settings-effect-router");
+const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
 const { createKimiQuotaCredentialStore } = require("./kimi-quota-credential-store");
 const { createKimiQuotaRuntime } = require("./kimi-quota-runtime");
 const {
   getPetTintIdForTheme,
   resolvePetTintPayload,
-  resolvePetAccessoryPayload,
+  buildPetAccessoryPayload,
+  getPetMouthAccessoryIdForTheme,
+  buildPetMouthAccessoryPayload,
 } = require("./pet-customization-catalog");
+const {
+  finalizePetAccessorySlotsDelivery,
+  getPetAccessorySlotsSnapshot,
+  preparePetAccessorySlotsDelivery,
+} = require("./pet-accessory-state");
 const {
   getEffectivePetAccessoryIdForTheme,
   createHolidayAccessoryRuntime,
@@ -109,7 +120,7 @@ const {
   selectSessionAutomationDialogParent,
 } = require("./session-automation-dialog-parent");
 const { createSessionFolderOpener } = require("./session-open-folder");
-const { registerPetInteractionIpc } = require("./pet-interaction-ipc");
+const { isTrustedMainFrameEvent, registerPetInteractionIpc } = require("./pet-interaction-ipc");
 const { createSystemWakeRecovery } = require("./system-wake-recovery");
 const { formatLocalTimestamp } = require("./log-timestamp");
 const { launchClaudeSession, openTerminalAt } = require("./launch-claude");
@@ -118,6 +129,7 @@ const initPermission = require("./permission");
 const { isPassiveNotifyEntry } = require("./passive-notify-entry");
 const { registerPermissionIpc } = initPermission;
 const telegramApprovalSettings = require("./telegram-approval-settings");
+const { sanitizeTelegramApprovalLogMeta } = require("./telegram-approval-log-meta");
 const discordPresenceSettings = require("./discord-presence-settings");
 const { createDiscordPresenceBridge } = require("./discord-presence-rpc");
 const { resolveAgentDisplayName } = require("./agent-display-name");
@@ -127,6 +139,8 @@ const {
   lookupOpenIdByEmail,
 } = require("./feishu-approval-client");
 const feishuApprovalSettings = require("./feishu-approval-settings");
+const { createSlackNotifyClient } = require("./slack-notify-client");
+const slackNotifySettings = require("./slack-notify-settings");
 const { saveFeishuApproverByEmail } = require("./settings-actions");
 const {
   buildTelegramApprovalStatus,
@@ -136,6 +150,7 @@ const {
 } = require("./telegram-approval-runtime-status");
 const { createTelegramMigrationController } = require("./telegram-migration-controller");
 const { createTelegramMigrationNudge } = require("./telegram-migration-nudge");
+const { createFeishuApprovalMigrationNudge } = require("./feishu-approval-migration-nudge");
 const { createTrayBalloonOwner } = require("./tray-balloon-owner");
 const initUpdateBubble = require("./update-bubble");
 const { registerUpdateBubbleIpc } = initUpdateBubble;
@@ -148,28 +163,47 @@ const {
   SYNTHETIC_WORK_AREA,
 } = require("./work-area");
 const {
+  isUsableWorkArea: isUsableBubbleWorkArea,
+  resolveBubbleWorkArea,
+} = require("./bubble-work-area");
+const {
   getLaunchPixelSize,
   getLaunchSizingWorkArea,
   getProportionalPixelSize,
+  resolveSizeSliderContext,
 } = require("./size-utils");
+const { formatSizeKey } = require("./settings-size-slider");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { loadTrayNormalIcon, loadTrayFlashIcon } = require("./tray-flash-icon");
+const {
+  installStartupDockIcon,
+  resolveRuntimeDockIconPolicy,
+} = require("./mac-dock-icon-runtime");
 const createTopmostRuntime = require("./topmost-runtime");
 const { WIN_TOPMOST_LEVEL } = createTopmostRuntime;
+const {
+  createHitWindowActivationRuntime,
+} = require("./win-hit-window-activation");
+const { startMobilePreviewServerSafely } = require("./network/mobile-preview-lifecycle");
 const createThemeFadeSequencer = require("./theme-fade-sequencer");
 const createThemeRuntime = require("./theme-runtime");
 const createAgentRuntimeMain = require("./agent-runtime-main");
 const createFloatingWindowRuntime = require("./floating-window-runtime");
 const createPetWindowRuntime = require("./pet-window-runtime");
+const { collectRequiredAssetFiles } = require("./theme-schema");
+const { describeGeometrySync } = require("./pet-accessory-state");
+const { createDisplayedVisualProjection } = require("./displayed-visual-projection");
+const { getRightSideMirrorFiles, isVisualMirrored, resolveMirroredFile } = require("./mirrored-files");
 const { createTestReactionHandler } = require("./test-reaction");
 const createMacHideController = require("./mac-hide");
 const {
   getFocusableLocalHudSessionIds: selectFocusableLocalHudSessionIds,
   getSessionFocusTarget,
 } = require("./session-focus");
-const { focusCodexThreadTarget } = require("./session-focus-handoff");
+const { focusCodexThreadTarget, focusDshDesktopTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
 const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader");
+const { createSessionHistoryRuntime } = require("./session-history-runtime");
 const { getAllAgents, getAgent } = require("../agents/registry");
 const { getAgentIconUrl } = require("./state-agent-icons");
 // ── Autoplay policy: allow sound playback without user gesture ──
@@ -206,6 +240,11 @@ const { createForegroundFullscreenProbe } = require("./win-fullscreen-detect");
 const _isForegroundFullscreen = createForegroundFullscreenProbe({
   isWin,
   onError: (err) => console.warn("Clawd: win-fullscreen-detect not available:", err && err.message),
+});
+const _hitWindowActivationRuntime = createHitWindowActivationRuntime({
+  isWin,
+  getHitWindow: () => hitWin,
+  onError: (err) => console.warn("Clawd: win-hit-window-activation failed:", err && err.message),
 });
 
 // ── Windows: DWM cloak inspection + un-cloak (#525 self-heal) ──
@@ -284,22 +323,43 @@ const prefsModule = require("./prefs");
 const { createSettingsController } = require("./settings-controller");
 const { loadOrCreateInstallationIdentity } = require("./remote-ssh-identity");
 const { createTranslator, i18n, SUPPORTED_LANGS } = require("./i18n");
+const { setClaudeCollectionWithConsent } = require("./claude-statusline-consent");
 const {
   getBubblePolicy,
   isAllBubblesHidden,
 } = require("./bubble-policy");
 const loginItemHelpers = require("./login-item");
 const { writeCodexAutoStartGate } = require("../hooks/server-config");
+const { createCodexAutoStartGateEvaluator } = require("./agent-gate");
 const PREFS_PATH = path.join(app.getPath("userData"), "clawd-prefs.json");
 const _initialPrefsLoad = prefsModule.load(PREFS_PATH);
+// Recovery from readable invalid contents is writable only after the original
+// bytes are safely kept in .bak. That fallback is not user intent for this
+// process, and a backup failure locks persistence as well. Runtime gates stay
+// closed until restart in either case.
+const _initialPrefsRecovered = _initialPrefsLoad.recovered === true;
+const _initialPrefsRecoveryBackupFailed = _initialPrefsLoad.recoveryBackupFailed === true;
+const _recapStartupAuthorityLost = (
+  _initialPrefsLoad.locked === true
+  || _initialPrefsRecovered
+  || _initialPrefsRecoveryBackupFailed
+);
+const _codexAutoStartAuthorityLost = (
+  _initialPrefsLoad.locked === true
+  || _initialPrefsRecovered
+  || _initialPrefsRecoveryBackupFailed
+  || _initialPrefsLoad.codexAutoStartAuthoritative === false
+);
+const _evaluateCodexAutoStartGate = createCodexAutoStartGateEvaluator({
+  authorityLost: _codexAutoStartAuthorityLost,
+});
 
 function _persistCodexAutoStartGate(enabled) {
   return writeCodexAutoStartGate(enabled === true);
 }
 
 function _syncCodexAutoStartGate(snapshot, source) {
-  const codex = snapshot && snapshot.agents && snapshot.agents.codex;
-  if (_persistCodexAutoStartGate(!!(codex && codex.enabled === true))) return true;
+  if (_persistCodexAutoStartGate(_evaluateCodexAutoStartGate(snapshot))) return true;
   console.warn(`Clawd: failed to sync Codex auto-start gate (${source})`);
   return false;
 }
@@ -397,6 +457,8 @@ function _restartClawdNow() {
 
 let shortcutRuntime = null;
 let themeRuntime = null;
+// Official downloadable theme owner (created after the settings controller).
+let officialThemeMain = null;
 let agentRuntime = null;
 let sessionAutomationCoordinator = null;
 let sessionAutomationStore = null;
@@ -404,17 +466,21 @@ let systemWakeRecovery = null;
 let floatingWindowRuntime = null;
 let codexPetMain = null;
 let telegramApprovalIdentitySignature = "";
+let telegramDirectSendGateEnabled = null;
 let _telegramMigrationController = null;
 let telegramMigrationNudge = null;
+let feishuApprovalMigrationNudge = null;
 const trayBalloonOwner = createTrayBalloonOwner();
 let telegramNativeRunner = null;
 let telegramCompanion = null;
 let telegramDirectSend = null;
 let discordPresenceBridge = null;
-// Renderer-visible state animations can diverge briefly from state.currentSvg
-// (tick.js idle rotation). Cache every state-change even while Presence is off
-// so a first enable mirrors what the pet is actually showing.
+// Renderer-visible state animations can diverge from state.currentSvg (idle
+// rotation and reactions). Presence is fed only after the renderer confirms
+// what is actually on screen.
 let lastDiscordPresenceVisual = null;
+let displayedVisualProjection = null;
+let lastAppliedVisualGeneration = 0;
 let suppressTelegramMigrationReconcile = 0;
 let _remoteSshTransportCoordinator = null;
 let feishuApprovalClient = null;
@@ -423,8 +489,15 @@ let feishuApprovalSyncPromise = Promise.resolve();
 let feishuApprovalConfigSignature = "";
 let feishuSessionAutomationRouteSignature = "";
 let feishuApprovalSecretsRevision = 0;
+// One-way Slack notifier. Unlike Feishu there is no connection to restart.
+// Queued automatic sends re-read the destination and the per-event gates before
+// each attempt, so a preference or secret change is picked up without a
+// revision counter that would also discard real backlogs on every settings
+// click.
+let slackNotifyClient = null;
 const shortcutHandlers = {
   togglePet: () => togglePetVisibility(),
+  quickSelectSession: () => showQuickSelect(),
 };
 const _settingsController = createSettingsController({
   prefsPath: PREFS_PATH,
@@ -434,9 +507,23 @@ const _settingsController = createSettingsController({
     uninstallAutoStart: _uninstallAutoStartHook,
     resolveTextScaleDisplayKey: () => getSettingsDisplayKey(),
     syncClaudeHooksNow: () => _server.syncClawdHooks({ source: "settings", automatic: false }),
-    setClaudeQuotaCollectionEnabled: (enabled) => _server.setClaudeQuotaCollectionEnabled({
-      enabled,
-      source: "settings-quota-collection",
+    setClaudeQuotaCollectionEnabled: (enabled) => setClaudeCollectionWithConsent(enabled, {
+      setEnabled: (options) => _server.setClaudeQuotaCollectionEnabled({
+        ...options, source: "settings-quota-collection",
+      }),
+      confirm: async () => {
+        const parent = settingsWindowRuntime.getWindow();
+        const options = {
+          type: "question", noLink: true, defaultId: 1, cancelId: 1,
+          buttons: [translate("confirm"), translate("cancel")],
+          message: translate("claudeStatuslineCoexistTitle"),
+          detail: translate("claudeStatuslineCoexistDetail"),
+        };
+        const { response } = parent && !parent.isDestroyed()
+          ? await electronDialog.showMessageBox(parent, options)
+          : await electronDialog.showMessageBox(options);
+        return response === 0;
+      },
     }),
     uninstallClaudeHooksNow: _uninstallClaudeHooksNow,
     startClaudeSettingsWatcher: () => _server.startClaudeSettingsWatcher(),
@@ -479,6 +566,7 @@ const _settingsController = createSettingsController({
     clearRecentHookEvents: (id) => _server.clearRecentHookEvents(id),
     identifyCustomApplication: (sourcePath) => require("./custom-applications").identifyCustomApplication(sourcePath),
     resizePet: _deferredResizePet,
+    rebaseSizeToRealizedPixels: () => rebaseSizeToRealizedPixels(),
     getActiveSessionAliasKeys: () =>
       _state && typeof _state.getActiveSessionAliasKeys === "function"
         ? _state.getActiveSessionAliasKeys()
@@ -500,6 +588,10 @@ const _settingsController = createSettingsController({
       code: 4001,
       reason: "Permission preview consent changed",
     }),
+    writeSlackNotifySecrets: (secrets) => writeSlackNotifySecrets(secrets),
+    getSlackNotifyStatus: () => getSlackNotifyStatus(),
+    getSlackNotifySecretInfo: () => getSlackNotifySecretInfo(),
+    sendSlackNotifyTest: () => sendSlackNotifyTest(),
     // Lazy getter so settings-actions can use the controller even though it's
     // instantiated below (forward-reference).
     get telegramMigration() {
@@ -513,6 +605,12 @@ const _settingsController = createSettingsController({
     getThemeInfo: (id) => themeRuntime.getThemeInfo(id),
     removeThemeDir: (id) => themeRuntime.removeThemeDir(id),
     getActiveTheme: () => themeRuntime.getActiveTheme(),
+    waitForThemeReloadSettled: (opts) => themeRuntime.waitForThemeReloadSettled(opts),
+    // Lazy getter: the official-theme owner is constructed after the controller
+    // (it depends on it), and only the command effect reads it.
+    get officialThemeManager() {
+      return officialThemeMain;
+    },
     globalShortcut,
     shortcutHandlers,
     // The controller is created before shortcutRuntime because each side needs
@@ -544,7 +642,12 @@ _settingsController.subscribeKey("agents", (_agents, snapshot) => {
   if (_settingsController.isLocked()) return;
   _syncCodexAutoStartGate(snapshot, "settings");
 });
+_settingsController.subscribeKey("autoStartWithCodex", (_enabled, snapshot) => {
+  if (_settingsController.isLocked()) return;
+  _syncCodexAutoStartGate(snapshot, "settings");
+});
 let _remoteSshInstallationIdentity = null;
+let _remoteSshInstallationIdentityPromise = null;
 
 async function initializeRemoteSshInstallationIdentity() {
   const remoteSsh = _settingsController.get("remoteSsh") || {};
@@ -579,6 +682,20 @@ async function initializeRemoteSshInstallationIdentity() {
     console.warn(`Clawd remote-ssh: installation binding uses weak storage backend (${identity.storageBackend})`);
   }
   return identity;
+}
+
+function ensureRemoteSshInstallationIdentity() {
+  if (_remoteSshInstallationIdentity) {
+    return Promise.resolve(_remoteSshInstallationIdentity);
+  }
+  if (_remoteSshInstallationIdentityPromise) {
+    return _remoteSshInstallationIdentityPromise;
+  }
+  _remoteSshInstallationIdentityPromise = initializeRemoteSshInstallationIdentity()
+    .finally(() => {
+      _remoteSshInstallationIdentityPromise = null;
+    });
+  return _remoteSshInstallationIdentityPromise;
 }
 
 // Mirror of `_settingsController.get("lang")` so existing sync read sites in
@@ -711,6 +828,7 @@ function safeConsoleError(...args) {
 // ── Theme loader ──
 const themeLoader = require("./theme-loader");
 const createCodexPetMain = require("./codex-pet-main");
+const createOfficialThemeMain = require("./official-theme-main");
 themeLoader.init(__dirname, app.getPath("userData"));
 themeRuntime = createThemeRuntime({
   themeLoader,
@@ -734,9 +852,12 @@ themeRuntime = createThemeRuntime({
   syncHitWin,
   syncSessionHudVisibility: () => syncSessionHudVisibility(),
   startMainTick: () => startMainTick(),
+  invalidateDisplayedVisual: (detail) => resetDisplayedVisualProjection(detail),
+  refreshDisplayedVisualHitBoxes: () => refreshDisplayedVisualHitBoxes(),
   bumpAnimationOverridePreviewPosterGeneration,
   rebuildAllMenus: () => rebuildAllMenus(),
   isManagedTheme: (themeId) => codexPetMain && codexPetMain.isManagedTheme(themeId),
+  isOfficialManagedTheme: (themeId) => !!(officialThemeMain && officialThemeMain.isManagedTheme(themeId)),
 });
 themeLoader.bindActiveThemeRuntime(themeRuntime);
 
@@ -770,6 +891,8 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   onSaveBounds: (bounds) => _settingsController.applyUpdate("settingsWindowBounds", bounds),
   getTitle: () => translate("settingsWindowTitle"),
   onBeforeCreate: () => bumpAnimationOverridePreviewPosterGeneration(),
+  // A replaced or crashed Settings page cannot send its preview-ending IPC.
+  onRendererReset: () => { void settingsSizePreviewSession.cleanup(); },
   onBeforeClosed: () => {
     if (roamFencePickerRuntime) roamFencePickerRuntime.cancel();
     bumpAnimationOverridePreviewPosterGeneration();
@@ -781,7 +904,12 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
     // the display until the next commit or restart.
     endTextScalePreview();
   },
-  onAfterClosed: () => maybeDestroyIdleAnimationPreviewPosterWindow(),
+  onAfterClosed: () => {
+    // An animation preview started from Settings outlives the window otherwise:
+    // a state preview holds for the whole clip, up to a minute.
+    if (animationOverridesMain) animationOverridesMain.cancelAnimationPreview();
+    maybeDestroyIdleAnimationPreviewPosterWindow();
+  },
 });
 
 const permissionAutomationConfirmationRuntime = createPermissionAutomationConfirmationRuntime({
@@ -817,6 +945,7 @@ roamFencePickerRuntime = createRoamFencePicker({
 shortcutRuntime = createShortcutRuntime({
   ipcMain,
   globalShortcut,
+  platform: process.platform,
   settingsController: _settingsController,
   getSettingsWindow,
   shortcutHandlers,
@@ -842,6 +971,36 @@ codexPetMain = createCodexPetMain({
   themeLoader,
 });
 const REGISTER_PROTOCOL_DEV_ARG = codexPetMain.REGISTER_PROTOCOL_DEV_ARG;
+
+// Official downloadable themes: the catalog is fetched lazily, downloads go
+// through manager-owned staging, and the final commit/uninstall run under the
+// settings controller's shared `theme` lock. All window/menu closures are lazy.
+officialThemeMain = createOfficialThemeMain({
+  app,
+  fs,
+  net,
+  path,
+  themeLoader,
+  settingsController: _settingsController,
+  getActiveTheme: () => getActiveTheme(),
+  waitForThemeReloadSettled: (opts) => themeRuntime.waitForThemeReloadSettled(opts),
+  rebuildAllMenus: () => rebuildAllMenus(),
+  sendToSettingsWindow: (channel, payload) => broadcastSettingsWindow(channel, payload),
+  getLang: () => lang,
+});
+// Startup crash recovery is intentionally narrow: only the manager's own
+// download/staging roots, only strictly valid id/version/nonce names, only
+// orphans older than the retention window.
+try {
+  const removedOrphans = officialThemeMain.cleanupOrphans();
+  if (removedOrphans.length > 0) {
+    console.log(`Clawd: cleared ${removedOrphans.length} stale official-theme artifact(s)`);
+  }
+  officialThemeMain.refreshInstalledScan();
+} catch (err) {
+  console.warn("Clawd: official theme startup cleanup failed:", err && err.message);
+}
+
 // Lenient load so a missing/corrupt user-selected theme can't brick boot.
 // If lenient fell back to "clawd" OR the variant fell back to "default",
 // hydrate prefs to match so the store stays truth.
@@ -901,24 +1060,101 @@ if (_loadedStartupTheme._id !== _requestedThemeId || _loadedStartupTheme._varian
 }
 
 // ── Pet window geometry / bounds runtime ──
+// Geometry's startup/theme-swap fallback only. It must stay a pure read:
+// Slot candidates commit to canonical state, so using one here would let a
+// hit-window sync install a payload resolved from its own
+// wall clock — the midnight/holiday race the canonical payload exists to end.
+function getEffectivePetAccessoryPayloads(activeTheme = getActiveTheme()) {
+  const snapshot = _settingsController.getSnapshot();
+  const headId = getEffectivePetAccessoryIdForTheme({
+    petAccessory: snapshot.petAccessory,
+    holidayAccessoryEnabled: snapshot.holidayAccessoryEnabled,
+    themeId: activeTheme && activeTheme._id,
+  });
+  const mouthId = getPetMouthAccessoryIdForTheme(
+    snapshot.petMouthAccessory,
+    activeTheme && activeTheme._id
+  );
+  return {
+    head: buildPetAccessoryPayload(headId, activeTheme),
+    mouth: buildPetMouthAccessoryPayload(mouthId, activeTheme),
+  };
+}
+
+function getEffectivePetAccessoryIds() {
+  const activeTheme = getActiveTheme();
+  const canonical = getPetAccessorySlotsSnapshot(activeTheme);
+  const payloads = canonical ? canonical.payloads : getEffectivePetAccessoryPayloads();
+  return Object.freeze({
+    head: payloads.head.id,
+    mouth: payloads.mouth.id,
+  });
+}
+
+function prepareCurrentAccessorySlotsDelivery(activeTheme = getActiveTheme()) {
+  return preparePetAccessorySlotsDelivery(
+    getEffectivePetAccessoryPayloads(activeTheme),
+    activeTheme
+  );
+}
+
+function deliverAccessorySlotsSnapshot(activeTheme = getActiveTheme()) {
+  const delivery = prepareCurrentAccessorySlotsDelivery(activeTheme);
+  const candidate = delivery.snapshot;
+  const delivered = sendToRenderer("pet-accessory-slots-change", candidate);
+  if (!finalizePetAccessorySlotsDelivery(delivery, delivered)) return false;
+  const geometry = describeGeometrySync(syncHitWin());
+  if (geometry.applied) {
+    try { repositionAnchoredFloatingSurfaces(); } catch {}
+  }
+  return true;
+}
+
+// Composed accessory facing as the renderer actually applied it (mini-left
+// stage XOR asset-direction stage). Defaults to unmirrored until the first
+// report; that matches the pre-accessory-hitbox behaviour.
+let _accessoryMirrored = false;
+function setAccessoryMirrored(mirrored) {
+  const next = !!mirrored;
+  if (_accessoryMirrored === next) return;
+  _accessoryMirrored = next;
+  syncHitWin();
+}
+
 const petWindowRuntime = createPetWindowRuntime({
+  // Every stranded-lock release entry (bring to primary display, send to
+  // display, manual hide) funnels through releaseStrandedDragLock and hence
+  // through this hook: one full cross-process cleanup instead of each caller
+  // reimplementing it.
+  onStrandedDragLockReleased: () => {
+    idlePaused = false;
+    mouseOverPet = false;
+    // An alive renderer with a phantom capture (its isDragging still true
+    // because the closing event was swallowed) drops it through the normal
+    // stop path, so gesture state, drag reaction and the input gate unwind.
+    sendToHitWin("force-drag-release");
+  },
   screen,
   isWin,
   isMac,
   isLinux,
+  windowsHitWindowFocusable: _hitWindowActivationRuntime.windowsHitWindowFocusable,
   linuxWindowType: LINUX_WINDOW_TYPE,
   topmostLevel: WIN_TOPMOST_LEVEL,
   getRenderWindow: () => win,
   getHitWindow: () => hitWin,
   getSettingsWindow: () => getSettingsWindow(),
   getActiveTheme: () => getActiveTheme(),
-  getCurrentState: () => _state.getCurrentState(),
-  getCurrentSvg: () => _state.getCurrentSvg(),
-  getCurrentHitBox: () => _state.getCurrentHitBox(),
+  getDisplayedVisual: () => getDisplayedVisualTuple(),
+  getCurrentState: () => getDisplayedVisualTuple().displayState,
+  getCurrentSvg: () => getDisplayedVisualTuple().file,
+  getCurrentHitBox: () => getDisplayedVisualTuple().hitBox,
+  getCurrentAccessoryPayloads: getEffectivePetAccessoryPayloads,
+  getAccessoryMirrored: () => _accessoryMirrored,
   getMiniMode: () => _mini.getMiniMode(),
   getMiniTransitioning: () => _mini.getMiniTransitioning(),
   getMiniContainedSeam: () => _mini.getContainedSeam(),
-  getMiniPeekOffset: () => _mini.PEEK_OFFSET,
+  getMiniPeekOffset: () => _mini.getMiniPeekOffset(),
   getCurrentPixelSize: () => getCurrentPixelSize(),
   getEffectiveCurrentPixelSize: (workArea) => getEffectiveCurrentPixelSize(workArea),
   getAllowEdgePinning: () => allowEdgePinningCached,
@@ -934,12 +1170,19 @@ const petWindowRuntime = createPetWindowRuntime({
   repositionFloatingBubbles: () => repositionFloatingBubbles(),
   showFloatingSurfacesForPet: () => floatingWindowRuntime.showFloatingSurfacesForPet(),
   hideFloatingSurfacesForPet: () => floatingWindowRuntime.hideFloatingSurfacesForPet(),
+  setFloatingSurfacesFullscreenSuppressed: (suppressed) => (
+    floatingWindowRuntime.setFullscreenSuppressedForPet(suppressed)
+  ),
+  // Lazy-bound like isMiniAnimating below — topmostRuntime is constructed
+  // after petWindowRuntime, but this closure only fires on a user gesture,
+  // well after module load finishes. (#935 override latch)
+  noteManualPetShow: () => topmostRuntime.noteFullscreenAutoHideOverride(),
   syncSessionHudVisibilityAndBubbles: () => syncSessionHudVisibilityAndBubbles(),
   syncPermissionShortcuts: () => syncPermissionShortcuts(),
   buildTrayMenu: () => buildTrayMenu(),
   buildContextMenu: () => buildContextMenu(),
   reapplyMacVisibility: () => reapplyMacVisibility(),
-  reassertWinTopmost: () => reassertWinTopmost(),
+  reassertWinTopmost: (...args) => reassertWinTopmost(...args),
   scheduleHwndRecovery: () => scheduleHwndRecovery(),
   cloakInspector: _cloakInspector,
   isMiniAnimating: () => _mini.getIsAnimating(),
@@ -1008,6 +1251,25 @@ function getPixelSizeFor(sizeKey, overrideWa) {
   return getProportionalPixelSize(ratio, wa);
 }
 
+function getSizeSliderContext() {
+  let wa = null;
+  if (win && !win.isDestroyed()) {
+    const { x, y, width, height } = getPetWindowBounds();
+    wa = getNearestWorkArea(x + width / 2, y + height / 2);
+  }
+  if (!wa) wa = getPrimaryWorkAreaSafe() || SYNTHETIC_WORK_AREA;
+  return resolveSizeSliderContext(
+    currentSize, getEffectiveCurrentPixelSize(), wa,
+    keepSizeAcrossDisplaysCached && isProportionalMode()
+  );
+}
+
+function rebaseSizeToRealizedPixels() {
+  const context = getSizeSliderContext();
+  if (!context || context.synced) return;
+  _deferredResizePet(formatSizeKey(context.ui));
+}
+
 function getCurrentPixelSize(overrideWa) {
   if (!isProportionalMode()) return SIZES[currentSize] || SIZES.S;
   return getPixelSizeFor(currentSize, overrideWa);
@@ -1067,6 +1329,7 @@ function getEffectiveCurrentPixelSize(overrideWa) {
 }
 let contextMenu;
 let doNotDisturb = false;
+let quotaAlertsRuntime = null;
 let isQuitting = false;
 let quitCleanupStarted = false;
 let appQuitDrainStarted = false;
@@ -1080,6 +1343,8 @@ let manageClaudeHooksAutomatically = _settingsController.get("manageClaudeHooksA
 let autoStartWithClaude = _settingsController.get("autoStartWithClaude");
 let openAtLogin = _settingsController.get("openAtLogin");
 let bubbleFollowPet = _settingsController.get("bubbleFollowPet");
+let bubbleFollowPreference = _settingsController.get("bubbleFollowPreference");
+let bubbleFixedCorner = _settingsController.get("bubbleFixedCorner");
 let sessionHudEnabled = _settingsController.get("sessionHudEnabled");
 let sessionHudShowStateLabels = _settingsController.get("sessionHudShowStateLabels");
 let sessionHudShowElapsed = _settingsController.get("sessionHudShowElapsed");
@@ -1094,17 +1359,18 @@ let sessionHudCleanupDetached = _settingsController.get("sessionHudCleanupDetach
 let sessionHudPinned = _settingsController.get("sessionHudPinned");
 let sessionStaleMs = _settingsController.get("sessionStaleMs");
 let workingStaleMs = _settingsController.get("workingStaleMs");
+let codexWorkingStaleMs = _settingsController.get("codexWorkingStaleMs");
 let detachedIdleStaleMs = _settingsController.get("detachedIdleStaleMs");
 let soundMuted = _settingsController.get("soundMuted");
 let soundVolume = _settingsController.get("soundVolume");
 let lowPowerIdleMode = _settingsController.get("lowPowerIdleMode");
 let keepAwakeWhileWorking = _settingsController.get("keepAwakeWhileWorking");
 let petTint = _settingsController.get("petTint");
-let petAccessory = _settingsController.get("petAccessory");
 let allowEdgePinningCached = _settingsController.get("allowEdgePinning");
 let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
 let fullscreenOverlayCached = _settingsController.get("fullscreenOverlay");
+let fullscreenAutoHideCached = _settingsController.get("fullscreenAutoHide");
 let textScale = _settingsController.get("textScale");
 let textScaleByDisplay = _settingsController.get("textScaleByDisplay");
 // Transient slider-drag override for ONE display — the one the settings
@@ -1229,34 +1495,180 @@ function togglePetVisibility() {
   prepManualPetVisibility();
   return petWindowRuntime.togglePetVisibility();
 }
+// Explicit-direction variant for the menus: the Show/Hide Pet items apply the
+// intent their label carried when the menu was built, so a state change that
+// lands while the menu is open degrades to a no-op instead of inverting the
+// action (see menu.js).
+function setPetVisibility(visible) {
+  prepManualPetVisibility();
+  return petWindowRuntime.setPetHidden(!visible);
+}
 function bringPetToPrimaryDisplay() {
   prepManualPetVisibility();
   return petWindowRuntime.bringPetToPrimaryDisplay();
 }
 
-function sendToRenderer(channel, ...args) {
-  if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
-  // State animations flow through this channel (applyState and the tick.js
-  // idle rotation), so it doubles as the presence mirror feed. Reactions,
-  // low-power pauses and tint/accessory changes ride other channels and are
-  // deliberately not mirrored.
-  if (channel === "state-change") {
-    const activeTheme = getActiveTheme();
-    lastDiscordPresenceVisual = {
-      state: args[0],
-      svg: args[1],
-      themeId: activeTheme && activeTheme._id,
-    };
-    if (discordPresenceBridge) {
-      try {
-        discordPresenceBridge.onVisual(
-          lastDiscordPresenceVisual.state,
-          lastDiscordPresenceVisual.svg,
-          lastDiscordPresenceVisual.themeId
-        );
-      } catch {}
-    }
+function sendRawToRenderer(channel, ...args) {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return false;
+  win.webContents.send(channel, ...args);
+  return true;
+}
+
+function inferVisualSource(displayState, file) {
+  return displayState === "idle" && file !== _state.getCurrentSvg()
+    ? "idle-animation"
+    : "state";
+}
+
+// Last free-roam walk heading sent to the renderer (roam visuals face right).
+let roamHeadingLeft = false;
+// Last pet screen side sent to the renderer; decides the mirror of idle
+// animations that opt in with mirrorOnRightSide.
+let petOnRightSide = false;
+
+function syncPetScreenSide() {
+  const bounds = getPetWindowBounds();
+  if (!bounds) return;
+  const cx = bounds.x + bounds.width / 2;
+  const wa = getNearestWorkArea(cx, bounds.y + bounds.height / 2);
+  if (!wa) return;
+  petOnRightSide = cx > wa.x + wa.width / 2;
+  // Sent unconditionally: a reloaded renderer starts back at "left".
+  sendRawToRenderer("pet-screen-side", petOnRightSide);
+}
+
+function requestDisplayedVisual(displayState, file, options = {}) {
+  if (!displayedVisualProjection) return null;
+  const activeTheme = getActiveTheme();
+  // Re-sampled on every idle request, so a drag or roam since the last idle
+  // animation is picked up before the next one starts.
+  if (displayState === "idle") syncPetScreenSide();
+  // A mirrored visual (left mini edge, leftward roam) may show a variant with
+  // pre-mirrored glyphs (theme mirroredFiles). It shares the original's
+  // silhouette, so the hit box still comes from the original file.
+  const visualFile = resolveMirroredFile(activeTheme, file, isVisualMirrored(activeTheme, displayState, {
+    miniMode: _mini.getMiniMode(),
+    miniEdge: _mini.getMiniEdge(),
+    roamHeadingLeft,
+    file,
+    petOnRightSide,
+  }));
+  return displayedVisualProjection.request({
+    themeId: activeTheme && activeTheme._id,
+    logicalState: options.logicalState || _state.getCurrentState(),
+    displayState,
+    file: visualFile,
+    hitBox: _state.resolveHitBoxForSvg(file),
+    source: options.source || inferVisualSource(displayState, file),
+    restartAnimation: options.restartAnimation === true,
+    deliver: options.deliver || ((payload) => sendRawToRenderer("state-change", payload)),
+    onLogicalSettlement: options.onLogicalSettlement,
+  });
+}
+
+function refreshIdleVisualAfterDrag() {
+  if (!displayedVisualProjection || _state.getCurrentState() !== "idle") return null;
+  const snapshot = displayedVisualProjection.getSnapshot();
+  const visual = snapshot.requested || snapshot.committed;
+  // Reactions restore their visual themselves. Do not interrupt a click
+  // reaction that started during the drag or replace a transitional visual.
+  if (!visual || visual.displayState !== "idle" || visual.source === "reaction") return null;
+  const file = _state.getCurrentSvg();
+  if (!getRightSideMirrorFiles(getActiveTheme()).includes(file)) return null;
+  // A theme without a drag reaction keeps its resting sprite throughout the
+  // drag. Re-request after the final clamp so side, glyph variant and hitbox
+  // go through the same path as the initial idle request.
+  return requestDisplayedVisual("idle", file);
+}
+
+function resetDisplayedVisualProjection(detail = "projection-reset", options = {}) {
+  if (!displayedVisualProjection) return false;
+  const activeTheme = getActiveTheme();
+  displayedVisualProjection.reset({
+    themeId: activeTheme && activeTheme._id,
+    logicalState: _state.getCurrentState(),
+    detail,
+    preserveCommitted: options.preserveCommitted === true,
+  });
+  if (options.preserveCommitted !== true) {
+    lastAppliedVisualGeneration = 0;
+    lastDiscordPresenceVisual = null;
   }
+  return true;
+}
+
+function refreshDisplayedVisualHitBoxes() {
+  if (!displayedVisualProjection) return false;
+  const refreshed = displayedVisualProjection.refreshHitBoxes(
+    (file) => _state.resolveHitBoxForSvg(file)
+  );
+  if (!refreshed) return false;
+  lastAppliedVisualGeneration = 0;
+  return syncDisplayedVisualGeometry();
+}
+
+function refreshDisplayedVisualForLowPowerMode() {
+  const activeTheme = getActiveTheme();
+  const state = _state.getCurrentState();
+  const file = _state.getCurrentSvg();
+  const override = activeTheme
+    && activeTheme.rendering
+    && activeTheme.rendering.lowPowerStaticImageOverrides
+    && activeTheme.rendering.lowPowerStaticImageOverrides[state];
+  if (!override || override.from !== file || !override.to) return false;
+  return !!requestDisplayedVisual(state, file, {
+    logicalState: state,
+    source: "state",
+  });
+}
+
+function isVisualGenerationCurrent(visualGeneration) {
+  if (!displayedVisualProjection || !Number.isSafeInteger(visualGeneration)) return false;
+  const snapshot = displayedVisualProjection.getSnapshot();
+  const current = snapshot.requested || snapshot.committed;
+  return !!(current && current.visualGeneration === visualGeneration);
+}
+
+function resolveDragReactionFile(direction) {
+  const theme = getActiveTheme();
+  const drag = theme && theme.reactions && theme.reactions.drag;
+  if (!drag || typeof drag !== "object") return null;
+  if (direction === "left" && typeof drag.fileLeft === "string") return drag.fileLeft;
+  if (direction === "right" && typeof drag.fileRight === "string") return drag.fileRight;
+  return typeof drag.file === "string" ? drag.file : null;
+}
+
+function requestDragReaction(direction) {
+  const normalizedDirection = direction === "left" || direction === "right" ? direction : null;
+  const file = resolveDragReactionFile(normalizedDirection);
+  if (!file) return null;
+  const snapshot = displayedVisualProjection.getSnapshot();
+  const activeReaction = snapshot.requested || snapshot.committed;
+  if (activeReaction && activeReaction.source === "reaction" && activeReaction.file === file) {
+    sendRawToRenderer("start-drag-reaction", null, normalizedDirection);
+    return activeReaction;
+  }
+  return requestDisplayedVisual(_state.getCurrentState(), file, {
+    source: "reaction",
+    deliver: (payload) => sendRawToRenderer("start-drag-reaction", payload, normalizedDirection),
+  });
+}
+
+function requestClickReaction(file, duration) {
+  const activeTheme = getActiveTheme();
+  if (!activeTheme || !collectRequiredAssetFiles(activeTheme).includes(file)) return null;
+  const safeDuration = Number.isFinite(duration) ? Math.max(0, duration) : 0;
+  return requestDisplayedVisual(_state.getCurrentState(), file, {
+    source: "reaction",
+    deliver: (payload) => sendRawToRenderer("play-click-reaction", payload, safeDuration),
+  });
+}
+
+function sendToRenderer(channel, ...args) {
+  if (channel === "state-change") {
+    return requestDisplayedVisual(args[0], args[1], args[2] || {});
+  }
+  return sendRawToRenderer(channel, ...args);
 }
 function sendToHitWin(channel, ...args) {
   if (hitWin && !hitWin.isDestroyed()) hitWin.webContents.send(channel, ...args);
@@ -1302,7 +1714,6 @@ function applyPetWindowPosition(x, y, opts) { return petWindowRuntime.applyPetWi
 
 function syncHitStateAfterLoad() {
   sendToHitWin("hit-state-sync", {
-    currentSvg: _state.getCurrentSvg(),
     currentState: _state.getCurrentState(),
     miniMode: _mini.getMiniMode(),
     dndEnabled: doNotDisturb,
@@ -1314,12 +1725,7 @@ function syncRendererStateAfterLoad({ includeStartupRecovery = true } = {}) {
   const activeTheme = getActiveTheme();
   const tintId = getPetTintIdForTheme(petTint, activeTheme && activeTheme._id);
   sendToRenderer("pet-tint-change", resolvePetTintPayload(tintId, activeTheme));
-  const accessoryId = getEffectivePetAccessoryIdForTheme({
-    petAccessory,
-    holidayAccessoryEnabled: _settingsController.get("holidayAccessoryEnabled"),
-    themeId: activeTheme && activeTheme._id,
-  });
-  sendToRenderer("pet-accessory-change", resolvePetAccessoryPayload(accessoryId, activeTheme));
+  deliverAccessorySlotsSnapshot(activeTheme);
   sendToRenderer("low-power-idle-mode-change", lowPowerIdleMode);
   if (_mini.getMiniMode()) {
     sendToRenderer("mini-mode-change", true, _mini.getMiniEdge());
@@ -1422,14 +1828,14 @@ function flashTaskbar() {
     });
   }
 
-  // Cache the highlight icon (orange dot) on first call. #722: it has to come
-  // back at the same point size as the normal icon, otherwise each blink
-  // resizes the tray icon and reflows the menu bar.
+  // Cache the completion icon on first call. macOS uses a dedicated Template
+  // pair in the same 18pt slot; Windows/Linux retain the 32px orange dot.
   if (!trayFlashHighlightIcon) {
     trayFlashHighlightIcon = loadTrayFlashIcon({
       nativeImage,
       platform: process.platform,
       flashPath: path.join(__dirname, "../assets/tray-icon-flash.png"),
+      flashTemplatePath: path.join(__dirname, "../assets/tray-icon-flashTemplate.png"),
       fileExists: (p) => fs.existsSync(p),
     });
   }
@@ -1475,6 +1881,28 @@ function flashTaskbar() {
 
 function syncHitWin() { return petWindowRuntime.syncHitWin(); }
 
+function getDisplayedVisualTuple() {
+  const committed = displayedVisualProjection
+    && displayedVisualProjection.getSnapshot().committed;
+  if (committed) return committed;
+  return {
+    displayState: _state.getCurrentState(),
+    file: _state.getCurrentSvg(),
+    hitBox: _state.getCurrentHitBox(),
+    source: "startup",
+    visualGeneration: 0,
+  };
+}
+
+function syncDisplayedVisualGeometry() {
+  const committed = displayedVisualProjection
+    && displayedVisualProjection.getSnapshot().committed;
+  if (!committed || committed.visualGeneration === lastAppliedVisualGeneration) return true;
+  const outcome = describeGeometrySync(syncHitWin());
+  if (outcome.applied) lastAppliedVisualGeneration = committed.visualGeneration;
+  return outcome.applied;
+}
+
 let mouseOverPet = false;
 let menuOpen = false;
 let idlePaused = false;
@@ -1490,6 +1918,35 @@ let sendSessionHudI18n = () => {};
 let getSessionHudReservedOffset = () => 0;
 let getSessionHudWindow = () => null;
 let getQuotaRingWindow = () => null;
+
+function getVisibleSessionHudBounds() {
+  try {
+    const hudWindow = getSessionHudWindow();
+    if (
+      !hudWindow
+      || (typeof hudWindow.isDestroyed === "function" && hudWindow.isDestroyed())
+      || (typeof hudWindow.isVisible === "function" && !hudWindow.isVisible())
+      || typeof hudWindow.getBounds !== "function"
+    ) {
+      return [];
+    }
+    const bounds = hudWindow.getBounds();
+    if (
+      !bounds
+      || !Number.isFinite(bounds.x)
+      || !Number.isFinite(bounds.y)
+      || !Number.isFinite(bounds.width)
+      || bounds.width <= 0
+      || !Number.isFinite(bounds.height)
+      || bounds.height <= 0
+    ) {
+      return [];
+    }
+    return [{ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }];
+  } catch {
+    return [];
+  }
+}
 const themeFadeSequencer = createThemeFadeSequencer({
   getRenderWindow: () => win,
   getHitWindow: () => hitWin,
@@ -1521,37 +1978,20 @@ function beginDragSnapshot() { return petWindowRuntime.beginDragSnapshot(); }
 function clearDragSnapshot() { return petWindowRuntime.clearDragSnapshot(); }
 function moveWindowForDrag() { return petWindowRuntime.moveWindowForDrag(); }
 
-// Windows-only (#538 drag focus-steal): the topmost watchdog calls this each
-// tick with the inverse of the fullscreen state. While a fullscreen app owns
-// the foreground we drop the hit window's activation so a click on the pet
-// can't steal focus from an exclusive-fullscreen game and minimize it; we
-// restore it when fullscreen ends because dragging needs activation (#545).
-// Idempotent via isFocusable() so the per-tick call is a no-op when unchanged.
-function setHitWinFocusable(focusable) {
-  if (!isWin) return;
-  if (!hitWin || hitWin.isDestroyed() || typeof hitWin.setFocusable !== "function") return;
-  const next = !!focusable;
-  if (typeof hitWin.isFocusable === "function" && hitWin.isFocusable() === next) return;
-  hitWin.setFocusable(next);
-  // Electron's NativeWindowViews::SetFocusable couples activation to the
-  // taskbar on Windows: SetFocusable(true) internally calls
-  // SetSkipTaskbar(false) → ITaskbarList::AddTab, so restoring activation
-  // after a fullscreen exit (or a screenshot overlay dismissing) flashes a
-  // taskbar button for the hit window (#586). Delete the tab again in the
-  // same turn, before the taskbar repaints.
-  // true-direction ONLY: SetFocusable(false) already deletes the tab
-  // internally, and re-deleting on that path broke cursor-drag while a
-  // fullscreen app was foreground (real-machine repro during #586 review;
-  // exact Windows-side mechanism unconfirmed). Do not "simplify" this into
-  // an unconditional call.
-  if (next) keepOutOfTaskbar(hitWin);
-}
+// Windows-only (#538/#562 drag focus-steal): the topmost runtime calls this
+// with the inverse of the fullscreen state. The native controller toggles
+// WS_EX_NOACTIVATE without calling BrowserWindow.setFocusable(false), whose
+// Focus(false) side effect deactivates the user's fullscreen foreground app.
+// A WM_MOUSEACTIVATE hook keeps clicks deliverable while Electron remains
+// non-focusable. If setup fails, the window falls back before first show.
+const setHitWinFocusable = _hitWindowActivationRuntime.setHitWinFocusable;
 
 // ── Mini Mode — delegated to src/mini.js ──
 // Initialized after state module (needs applyState, resolveDisplayState, etc.)
 // See _mini initialization below
 
 // ── alwaysOnTop recovery — delegated to src/topmost-runtime.js ──
+let permissionPresentationRuntime = null;
 const topmostRuntime = createTopmostRuntime({
   isWin,
   isMac,
@@ -1559,6 +1999,12 @@ const topmostRuntime = createTopmostRuntime({
   getHitWin: () => hitWin,
   recoverCloakedPet: () => petWindowRuntime.recoverIfCloaked(),
   getPendingPermissions: () => pendingPermissions,
+  getPermissionPresentationWindows: () => (
+    permissionPresentationRuntime
+    && typeof permissionPresentationRuntime.getPermissionPresentationWindows === "function"
+      ? permissionPresentationRuntime.getPermissionPresentationWindows()
+      : pendingPermissions.map((entry) => entry && entry.bubble).filter(Boolean)
+  ),
   getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   getSessionHudWindow: () => getSessionHudWindow(),
   getQuotaRingWindow: () => getQuotaRingWindow(),
@@ -1572,7 +2018,14 @@ const topmostRuntime = createTopmostRuntime({
   isMiniAnimating: () => _mini.getIsAnimating(),
   isMiniTransitioning: () => _mini.getMiniTransitioning(),
   isForegroundFullscreen: () => _isForegroundFullscreen(),
+  getForegroundFullscreenObservation: () => _isForegroundFullscreen.getLastObservation(),
+  isFullscreenWindowAlive: (windowId) => _isForegroundFullscreen.isWindowIdAlive(windowId),
   getFullscreenOverlay: () => fullscreenOverlayCached,
+  // #935 fullscreen auto-hide: the pref gate plus pet-window-runtime's
+  // dedicated visibility layer (stacked on the user's manual hide).
+  getFullscreenAutoHide: () => fullscreenAutoHideCached,
+  setFullscreenAutoHidden: (...args) => petWindowRuntime.setFullscreenAutoHidden(...args),
+  isFullscreenAutoHidden: () => petWindowRuntime.isFullscreenAutoHidden(),
   setHitWinFocusable,
   keepOutOfTaskbar,
   setForceEyeResend,
@@ -1599,26 +2052,30 @@ const {
 } = require("./agent-gate");
 const _runtimeAgentGate = createRuntimeAgentGate({
   getSnapshot: () => _settingsController.getSnapshot(),
-  // locked && recovered means prefs bytes were never read and the snapshot is
-  // only defaults. Keep every prefs-backed agent path closed for this process;
-  // fixing file access and restarting is the only authority transition.
-  isAuthoritative: () => !_settingsController.hasReadFailure(),
+  // Both unreadable prefs and a writable recovered-defaults snapshot are
+  // non-authoritative for this process. The latter may repair the primary file,
+  // but only a clean load after restart can re-open agent paths.
+  isAuthoritative: () => !_initialPrefsRecovered && !_settingsController.hasReadFailure(),
 });
 const _permCtx = {
   get win() { return win; },
   get lang() { return lang; },
   get sessions() { return sessions; },
   get bubbleFollowPet() { return bubbleFollowPet; },
+  get bubbleFollowPreference() { return bubbleFollowPreference; },
+  get bubbleFixedCorner() { return bubbleFixedCorner; },
   get permDebugLog() { return permDebugLog; },
   get doNotDisturb() { return doNotDisturb; },
   get hideBubbles() { return getAllBubblesHidden(); },
-  get petHidden() { return petWindowRuntime.isPetHidden(); },
+  get petHidden() { return petWindowRuntime.isPetEffectivelyHidden(); },
   getBubblePolicy: getRuntimeBubblePolicy,
   getPetWindowBounds,
   getNearestWorkArea,
+  getBubbleWorkArea,
   getHitRectScreen,
   getHudReservedOffset: () => getSessionHudReservedOffset(),
-  getTextScale: () => getTextScaleForPetWindows(),
+  getSessionHudBounds: () => getVisibleSessionHudBounds(),
+  getTextScale: (workArea) => getTextScaleForBubbleWorkArea(workArea),
   guardAlwaysOnTop,
   reapplyMacVisibility,
   // #640: permission.js re-runs the editing-overlap dodge scan whenever the
@@ -1630,12 +2087,15 @@ const _permCtx = {
     _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) =>
     _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () =>
     _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   // The permission layer consumes one normalized runtime mode. DND,
   // headless, per-agent and bubble gates run before this chokepoint.
   getPermissionAutomationMode: () =>
     _settingsController.get("permissionAutomationMode") || "off",
+  isDestructiveReminderEnabled: () =>
+    _settingsController.get("destructiveActionReminder") === true,
   getEffectivePermissionAutomationMode: (entry, options) =>
     sessionAutomationCoordinator
       ? sessionAutomationCoordinator.getEffectiveMode(entry, options)
@@ -1681,6 +2141,7 @@ const _permCtx = {
   }),
   reportShortcutFailure: (actionId, reason) => shortcutRuntime.reportFailure(actionId, reason),
   clearShortcutFailure: (actionId) => shortcutRuntime.clearFailure(actionId),
+  repositionFloatingBubbles: () => repositionFloatingBubbles(),
   repositionUpdateBubble: () => repositionUpdateBubble(),
   // permission.js still calls this legacy-shaped callback after the update
   // bubble has moved; only Orbit needs the second geometry pass here.
@@ -1696,9 +2157,19 @@ const _permCtx = {
     if (!_state || typeof _state.clearPermissionNotification !== "function") return;
     _state.clearPermissionNotification(permEntry && permEntry.sessionId, options);
   },
+  // Best-effort, read-only "permission needed" heads-up to Slack. Slack cannot
+  // resolve the approval in this build (webhook is one-way), so this only
+  // announces — the desktop bubble / other channels still own the decision.
+  notifySlackPermission: (payload, options = {}) => {
+    const client = getSlackNotifyClient();
+    if (client && typeof client.notifyPermissionRequest === "function") {
+      try { client.notifyPermissionRequest(payload, options); } catch {}
+    }
+  },
 };
 const _perm = initPermission(_permCtx);
-const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, isPermissionEntryLive, canAutoResolvePendingPermission, beginSessionTrustConfirmation, endSessionTrustConfirmation, syncPermissionBubbleContent, maybeStartRemoteApproval, clearCodexNotifyBubbles, showCodexUserInputBubble, clearCodexUserInputBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission } = _perm;
+permissionPresentationRuntime = _perm;
+const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, isPermissionEntryLive, canAutoResolvePendingPermission, beginSessionTrustConfirmation, endSessionTrustConfirmation, syncPermissionBubbleContent, maybeStartRemoteApproval, clearCodexNotifyBubbles, showCodexUserInputBubble, clearCodexUserInputBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission, dismissOpencodeFamilyPermissionResolvedExternally } = _perm;
 const pendingPermissions = _perm.pendingPermissions;
 let permDebugLog = null; // set after app.whenReady()
 let updateDebugLog = null; // set after app.whenReady()
@@ -1731,15 +2202,18 @@ function getPendingPermissionFocusEntry(sessionId) {
 const _updateBubbleCtx = {
   get win() { return win; },
   get bubbleFollowPet() { return bubbleFollowPet; },
-  get petHidden() { return petWindowRuntime.isPetHidden(); },
+  get bubbleFollowPreference() { return bubbleFollowPreference; },
+  get bubbleFixedCorner() { return bubbleFixedCorner; },
+  get petHidden() { return petWindowRuntime.isPetEffectivelyHidden(); },
   getBubblePolicy: getRuntimeBubblePolicy,
-  getPendingPermissions: () => pendingPermissions,
   getPetWindowBounds,
   getNearestWorkArea,
+  getBubbleWorkArea,
   getUpdateBubbleAnchorRect,
   getHitRectScreen,
-  getHudReservedOffset: () => getSessionHudReservedOffset(),
-  getTextScale: () => getTextScaleForPetWindows(),
+  getPermissionBubbleBounds: () => _perm.getVisibleBubbleBounds(),
+  getSessionHudBounds: () => getVisibleSessionHudBounds(),
+  getTextScale: (workArea) => getTextScaleForBubbleWorkArea(workArea),
   guardAlwaysOnTop,
   reapplyMacVisibility,
   repositionQuotaRing: () => repositionQuotaRing(),
@@ -1760,9 +2234,16 @@ floatingWindowRuntime = createFloatingWindowRuntime({
   repositionSessionHud: () => repositionSessionHud(),
   repositionQuotaRing: () => repositionQuotaRing(),
   syncSessionHudVisibility: () => syncSessionHudVisibility(),
-  syncUpdateBubbleVisibility: () => syncUpdateBubbleVisibility(),
-  hideUpdateBubble: () => hideUpdateBubble(),
+  syncUpdateBubbleVisibility: (hiddenOverride) => syncUpdateBubbleVisibility(hiddenOverride),
+  suspendUpdateBubbleForPet: () => _updateBubble.suspendForPetHidden(),
+  suspendUpdateBubbleForFullscreen: () => _updateBubble.suspendForFullscreen(),
+  resumeUpdateBubbleFromFullscreen: () => _updateBubble.resumeFromFullscreen(),
   keepOutOfTaskbar,
+  showPermissionSurfacesForPet: () => _perm.showPermissionSurfacesForPet(),
+  hidePermissionSurfacesForPet: () => _perm.hidePermissionSurfacesForPet(),
+  setPermissionSurfacesFullscreenSuppressed: (suppressed) => (
+    _perm.setPermissionSurfacesFullscreenSuppressed(suppressed)
+  ),
 });
 
 function repositionFloatingBubbles() {
@@ -1784,6 +2265,7 @@ function syncSessionHudVisibilityAndBubbles() {
 
 // ── State machine — delegated to src/state.js ──
 let showDashboard = () => {};
+let showQuickSelect = () => {};
 let broadcastDashboardSessionSnapshot = () => {};
 let sendDashboardI18n = () => {};
 
@@ -1805,23 +2287,54 @@ function getIdleVisualChoice() {
 // should already use the selected idle visual and tint instead of briefly
 // showing theme defaults. getRendererConfig() returns a fresh object, safe to
 // extend.
-function buildRendererThemeConfig() {
+function buildRendererThemeConfig(accessorySnapshot = null) {
   const cfg = themeRuntime.getRendererConfig();
   if (cfg) {
     const activeTheme = getActiveTheme();
     const tintSelections = _settingsController.get("petTint");
     const tintId = getPetTintIdForTheme(tintSelections, activeTheme && activeTheme._id);
-    const accessoryId = getEffectivePetAccessoryIdForTheme({
-      petAccessory: _settingsController.get("petAccessory"),
-      holidayAccessoryEnabled: _settingsController.get("holidayAccessoryEnabled"),
-      themeId: activeTheme && activeTheme._id,
-    });
+    const canonical = accessorySnapshot || getPetAccessorySlotsSnapshot(activeTheme);
     cfg.idleDefaultVisual = getIdleVisualChoice();
     cfg.petTintPayload = resolvePetTintPayload(tintId, activeTheme);
-    cfg.accessoryPayload = resolvePetAccessoryPayload(accessoryId, activeTheme);
+    if (canonical) {
+      cfg.accessorySlots = {
+        themeId: canonical.themeId,
+        accessoryGeneration: canonical.accessoryGeneration,
+        head: {
+          supported: cfg.accessorySupported === true,
+          attachments: cfg.accessoryAttachments || null,
+          payload: canonical.payloads.head,
+        },
+        mouth: {
+          supported: cfg.mouthAccessorySupported === true,
+          attachments: cfg.mouthAccessoryAttachments || null,
+          payload: canonical.payloads.mouth,
+        },
+      };
+    }
   }
   return cfg;
 }
+
+function deliverRendererThemeConfig() {
+  const delivery = prepareCurrentAccessorySlotsDelivery();
+  const delivered = sendToRenderer(
+    "theme-config",
+    buildRendererThemeConfig(delivery.snapshot)
+  );
+  return !!finalizePetAccessorySlotsDelivery(delivery, delivered);
+}
+
+const recapRuntime = createRecapRuntime({
+  // A default-filled snapshot is not user authority when prefs were unreadable,
+  // recovered, or written by a future app version. Start paused in that case;
+  // a later explicit, controller-accepted toggle may still call setEnabled().
+  getEnabled: () => !_recapStartupAuthorityLost
+    && _settingsController.get("recapEnabled") !== false,
+  powerMonitor,
+  logWarn: console.warn,
+  onRecorded: () => settingsWindowRuntime.notifyRecapChanged(),
+});
 
 const _stateCtx = {
   get theme() { return getActiveTheme(); },
@@ -1829,6 +2342,7 @@ const _stateCtx = {
   get hitWin() { return hitWin; },
   // Last-known account quota survives app restarts (state-account-quota.js).
   accountQuotaPersistPath: require("./state-account-quota").DEFAULT_PERSIST_PATH,
+  recapSink: recapRuntime,
   get claudeQuotaCollectionEnabled() { return claudeQuotaCollectionEnabled; },
   get kimiQuotaCollectionEnabled() { return kimiQuotaCollectionEnabled; },
   get quotaMergeSources() { return quotaMergeSources; },
@@ -1841,6 +2355,7 @@ const _stateCtx = {
   set miniSleepPeeked(v) { _mini.setMiniSleepPeeked(v); },
   get miniPeeked() { return _mini.getMiniPeeked(); },
   set miniPeeked(v) { _mini.setMiniPeeked(v); },
+  cancelPendingMiniPeek: (resetState) => _mini.cancelPendingMiniPeek(resetState),
   get idlePaused() { return idlePaused; },
   set idlePaused(v) { idlePaused = v; },
   get forceEyeResend() { return forceEyeResend; },
@@ -1871,12 +2386,13 @@ const _stateCtx = {
   isAgentNotificationHookEnabled: (agentId) =>
     _runtimeAgentGate.isAgentNotificationHookEnabled(agentId),
   resolveAgentDisplayName: _resolveAgentDisplayName,
-  miniPeekIn: () => miniPeekIn(),
+  miniPeekIn: (mode) => miniPeekIn(mode),
   miniPeekOut: () => miniPeekOut(),
   buildContextMenu: () => buildContextMenu(),
   buildTrayMenu: () => buildTrayMenu(),
   debugLog: (msg) => sessionLog(msg),
   broadcastSessionSnapshot: (snapshot) => {
+    quotaAlertsRuntime?.observeQuota();
     reconcilePowerSaveBlocker();
     broadcastDashboardSessionSnapshot(snapshot);
     broadcastSessionHudSnapshot(snapshot);
@@ -1884,8 +2400,25 @@ const _stateCtx = {
     // R1a: best-effort completion notifications. Must never throw or block the
     // broadcast — the companion computes synchronously and fires sends async.
     if (telegramCompanion) {
-      try { telegramCompanion.onSnapshot(snapshot); } catch {}
+      try {
+        const telegramSnapshot = {
+          ...snapshot,
+          sessions: Array.isArray(snapshot && snapshot.sessions)
+            ? snapshot.sessions.map((entry) => {
+              const runtimeEntry = entry && entry.id ? sessions.get(String(entry.id)) : null;
+              return {
+                ...entry,
+                agentPid: runtimeEntry && runtimeEntry.agentPid || null,
+              };
+            })
+            : [],
+        };
+        telegramCompanion.onSnapshot(telegramSnapshot);
+      } catch {}
     }
+    // Slack completion pings ride the same fanout; the client dedupes internally
+    // and fires sends async, so this never throws or blocks the broadcast.
+    try { getSlackNotifyClient().onSnapshot(snapshot); } catch {}
     if (discordPresenceBridge) {
       try { discordPresenceBridge.onSnapshot(snapshot); } catch {}
     }
@@ -1908,8 +2441,14 @@ const _stateCtx = {
   getStaleConfig: () => ({
     sessionStaleMs,
     workingStaleMs,
+    codexWorkingStaleMs,
     detachedIdleStaleMs,
   }),
+  hasReplyableCompletionMapping: (sessionId, session) => !!(
+    telegramDirectSend
+    && typeof telegramDirectSend.hasReplyableCompletionMapping === "function"
+    && telegramDirectSend.hasReplyableCompletionMapping(sessionId, session)
+  ),
   getSessionAliases: () => _settingsController.get("sessionAliases"),
   getSessionAutomationRecords: () =>
     sessionAutomationStore ? sessionAutomationStore.list() : [],
@@ -1923,6 +2462,40 @@ const _stateCtx = {
   hasAnyEnabledAgent: () => _runtimeAgentGate.hasAnyEnabledAgent(),
 };
 const _state = require("./state")(_stateCtx);
+displayedVisualProjection = createDisplayedVisualProjection({
+  projectActualFile: ({ actualFile, requested }) => {
+    const activeTheme = getActiveTheme();
+    if (!activeTheme || !collectRequiredAssetFiles(activeTheme).includes(actualFile)) return null;
+    return {
+      displayState: requested.displayState,
+      hitBox: _state.resolveHitBoxForSvg(actualFile),
+    };
+  },
+  onCommit: (visual) => {
+    syncDisplayedVisualGeometry();
+    try { repositionAnchoredFloatingSurfaces(); } catch {}
+    if (visual.source === "reaction") return;
+    lastDiscordPresenceVisual = {
+      state: visual.displayState,
+      svg: visual.file,
+      themeId: visual.themeId,
+    };
+    if (discordPresenceBridge) {
+      try {
+        discordPresenceBridge.onVisual(
+          lastDiscordPresenceVisual.state,
+          lastDiscordPresenceVisual.svg,
+          lastDiscordPresenceVisual.themeId
+        );
+      } catch {}
+    }
+  },
+  onRendererUnresponsive: () => {
+    if (!win || win.isDestroyed()) return;
+    resetDisplayedVisualProjection("renderer-unresponsive", { preserveCommitted: true });
+    petWindowRuntime.reloadWindowWebContents(win);
+  },
+});
 const _kimiQuotaCredentialStore = createKimiQuotaCredentialStore({ safeStorage });
 const _kimiQuotaRuntime = createKimiQuotaRuntime({
   credentialStore: _kimiQuotaCredentialStore,
@@ -1946,10 +2519,21 @@ _settingsController.subscribeKey("agents", (_agents, snapshot) => {
   }
 });
 const { setState, applyState, updateSession, resolveDisplayState, getSvgOverride,
-        enableDoNotDisturb, disableDoNotDisturb, startStaleCleanup, stopStaleCleanup,
+        enableDoNotDisturb, disableDoNotDisturb: disableDoNotDisturbState,
+        startStaleCleanup, stopStaleCleanup,
         startWakePoll, stopWakePoll, detectRunningAgentProcesses,
         startStartupRecovery: _startStartupRecovery } = _state;
 const sessions = _state.sessions;
+
+function disableDoNotDisturb() {
+  const result = disableDoNotDisturbState();
+  quotaAlertsRuntime?.observeQuota();
+  return result;
+}
+
+function showQuotaAlert(event) {
+  return quotaNotifications.show(event);
+}
 
 async function showSessionAutomationWarning(entry) {
   const parent = selectSessionAutomationDialogParent({
@@ -2053,6 +2637,7 @@ const _tickCtx = {
   set miniSleepPeeked(v) { _mini.setMiniSleepPeeked(v); },
   get miniPeeked() { return _mini.getMiniPeeked(); },
   set miniPeeked(v) { _mini.setMiniPeeked(v); },
+  cancelPendingMiniPeek: (resetState) => _mini.cancelPendingMiniPeek(resetState),
   get mouseOverPet() { return mouseOverPet; },
   set mouseOverPet(v) { mouseOverPet = v; },
   get forceEyeResend() { return forceEyeResend; },
@@ -2061,10 +2646,12 @@ const _tickCtx = {
   get startupRecoveryActive() { return _state.getStartupRecoveryActive(); },
   sendToRenderer,
   sendToHitWin,
+  isVisualGenerationCurrent,
   setState,
   applyState,
   getIdleVisualChoice,
-  miniPeekIn: () => miniPeekIn(),
+  getEffectiveAccessoryIds: getEffectivePetAccessoryIds,
+  miniPeekIn: (mode) => miniPeekIn(mode),
   miniPeekOut: () => miniPeekOut(),
   getObjRect,
   getHitRectScreen,
@@ -2136,6 +2723,18 @@ function focusDashboardSession(sessionId, options = {}) {
     return true;
   }
 
+  if (focusTarget.type === "dsh-desktop" && focusTarget.url) {
+    focusDshDesktopTarget({
+      shell,
+      focusEntry,
+      sessionId: id,
+      requestSource,
+      url: focusTarget.url,
+      focusLog,
+    });
+    return true;
+  }
+
   if (focusTarget.type === "terminal") {
     return focusTerminalSession(focusEntry, id, requestSource);
   }
@@ -2168,6 +2767,8 @@ const _dashboard = require("./dashboard")({
   t: (key) => translate(key),
   getSessionSnapshot: () => _state.buildSessionSnapshot(),
   getI18n: () => getDashboardI18nPayload(),
+  focusSession: (sessionId, options) => focusDashboardSession(sessionId, options),
+  isAppQuitting: () => isQuitting,
   getPetWindowBounds,
   getNearestWorkArea,
   getSettingsWindow: () => settingsWindowRuntime.getWindow(),
@@ -2181,15 +2782,31 @@ const _dashboard = require("./dashboard")({
   iconPath: settingsWindowRuntime.getIconPath(),
 });
 showDashboard = _dashboard.showDashboard;
-broadcastDashboardSessionSnapshot = _dashboard.broadcastSessionSnapshot;
-sendDashboardI18n = _dashboard.sendI18n;
+// The keyboard mode is a temporary state of the real Dashboard page, so it is
+// owned by the Dashboard rather than by a second window/renderer.
+showQuickSelect = () => _dashboard.quick.show();
+broadcastDashboardSessionSnapshot = (snapshot) => {
+  _dashboard.broadcastSessionSnapshot(snapshot);
+};
+sendDashboardI18n = () => {
+  _dashboard.sendI18n();
+};
+// The quick host is a real window whose own `close` handler refuses to close
+// (it is a borrow surface for the shared page, not something the user destroys).
+// Electron closes every window BEFORE `will-quit`, so disposing it only there
+// deadlocks a normal Quit: the close is refused, the window survives and
+// `will-quit` never arrives. Tear it down while the app is still deciding to
+// quit; the `will-quit` call stays as an idempotent backstop for a host created
+// after that point.
+app.on("before-quit", () => _dashboard.quick.dispose());
+app.on("will-quit", () => _dashboard.quick.dispose());
 
 // ── First-run onboarding tutorial ──
 // Buckets the installable agents for the tutorial's step 2. We call the
-// detector with skipDefaultIntegrations:false so the default integrations
-// (claude-code, codex) are checked too — that's the only way to flag the
-// marquee "default Codex hook but Codex isn't installed → recommend removing"
-// case, which the Settings UI doesn't surface.
+// detector with skipDefaultIntegrations:false so the default integrations are
+// present in the report; the bucketer still exempts them from cleanup (#895 —
+// a missing ~/.codex is not evidence that a Codex hook is stale), so this flag
+// only affects the active/install buckets.
 function buildTutorialAgentOnboardingState() {
   const { detectAgentInstallations } = require("./agent-installation-detector");
   const { INSTALLABLE_AGENT_IDS } = require("./settings-actions-agents");
@@ -2214,7 +2831,10 @@ function buildTutorialAgentOnboardingState() {
 function buildTutorialShortcutsSummary() {
   const { SHORTCUT_ACTIONS, SHORTCUT_ACTION_IDS } = require("./shortcut-actions");
   const userShortcuts = _settingsController.get("shortcuts") || {};
-  return SHORTCUT_ACTION_IDS.map((id) => {
+  return SHORTCUT_ACTION_IDS.filter((id) => {
+    const action = SHORTCUT_ACTIONS[id] || {};
+    return action.showInTutorial !== false;
+  }).map((id) => {
     const action = SHORTCUT_ACTIONS[id] || {};
     const accelerator = Object.prototype.hasOwnProperty.call(userShortcuts, id)
       ? userShortcuts[id]
@@ -2283,8 +2903,7 @@ const _tutorial = require("./tutorial")({
   uninstallAgent: (agentId) => _settingsController.applyCommand("uninstallAgentIntegration", { agentId }),
   registerShortcut: (payload) => _settingsController.applyCommand("registerShortcut", payload),
   resetShortcut: (payload) => _settingsController.applyCommand("resetShortcut", payload),
-  // v1: deep-link to a specific tab is deferred — open Settings to its default tab.
-  openSettingsTab: () => settingsWindowRuntime.open(),
+  openSettingsTab: (tab) => settingsWindowRuntime.open({ tab }),
   markTutorialSeen: () => {
     _settingsController.applyUpdate("tutorialSeen", true);
   },
@@ -2301,7 +2920,7 @@ const _ringGeom = require("./quota-ring-geometry");
 
 const _sessionHud = require("./session-hud")({
   get win() { return win; },
-  get petHidden() { return petWindowRuntime.isPetHidden(); },
+  get petHidden() { return petWindowRuntime.isPetEffectivelyHidden(); },
   get sessionHudEnabled() { return sessionHudEnabled; },
   get sessionHudShowStateLabels() { return sessionHudShowStateLabels; },
   get sessionHudShowElapsed() { return sessionHudShowElapsed; },
@@ -2346,6 +2965,10 @@ agentRuntime = createAgentRuntimeMain({
   clearCodexNotifyBubbles: (...args) => clearCodexNotifyBubbles(...args),
   showCodexUserInputBubble: (...args) => showCodexUserInputBubble(...args),
   clearCodexUserInputBubbles: (...args) => clearCodexUserInputBubbles(...args),
+  loadCodexArchiveTracker: () => require("./codex-archive-tracker"),
+  onCodexArchiveLifecycleEnd: (payload) => {
+    if (sessionAutomationCoordinator) sessionAutomationCoordinator.onSessionLifecycleEnd(payload);
+  },
 });
 
 // ── HTTP server — delegated to src/server.js ──
@@ -2388,11 +3011,15 @@ const _serverCtx = {
   isAgentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
   setState,
   updateSession: agentRuntime.updateSessionFromServer,
-  updateSessionMetadata: (sessionId, opts) => _state.updateSessionMetadata(sessionId, opts),
+  observeClaudeToolPhase: _state.observeClaudeToolPhase,
+  updateSessionMetadata: agentRuntime.updateSessionMetadataFromServer,
+  shouldSuppressCodexArchive: (rawSessionId, opts) =>
+    agentRuntime.shouldSuppressCodexArchive(rawSessionId, opts),
   clearClaudeStatuslineAuthority: (profileId) => _state.clearClaudeStatuslineAuthority(profileId),
   clearLocalClaudeQuota: () => _state.clearLocalClaudeQuota(),
   updateAccountQuota: (host, quotas) => _state.updateAccountQuota(host, quotas),
@@ -2407,12 +3034,32 @@ const _serverCtx = {
       && sessionAutomationCoordinator.resolveIfAllowed(entry, options)),
   showPermissionBubble,
   showCodexUserInputBubble,
+  syncPermissionBubbleContent,
   clearCodexUserInputBubbles,
   handleTestResult: (result, context) => handleTestResult(result, context),
   maybeStartRemoteApproval,
   replyOpencodeFamilyPermission,
+  dismissOpencodeFamilyPermissionResolvedExternally,
   syncPermissionShortcuts,
   permLog,
+  // #898: the settings watcher pauses Claude hook auto-repair when settings.json
+  // shrinks suspiciously (a third-party overwrite). The server already dedups to
+  // once per persisting shrink via its shrinkNotified flag; surface that pause
+  // as an active Windows tray balloon so the user knows repair is on hold without
+  // opening Doctor — mirroring fireCodexHookNudge's balloon.
+  notifySuspiciousShrink: () => {
+    try {
+      if (process.platform !== "win32") return;
+      const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
+      trayBalloonOwner.show(tray, {
+        iconType: "warning",
+        title: translate("claudeHookGuardNudgeTitle"),
+        content: translate("claudeHookGuardNudgeBody"),
+      });
+    } catch (err) {
+      console.warn("Clawd: Claude hook guard balloon failed:", err && err.message);
+    }
+  },
 };
 const _server = require("./server")(_serverCtx);
 const { startHttpServer, getHookServerPort } = _server;
@@ -2466,7 +3113,13 @@ function enqueueMobilePreviewReconcile(snapshot = _settingsController.getSnapsho
       const server = ensureMobilePreviewServer();
       if (desired.revision !== _mobilePreviewReconcileRevision) return;
       setMobilePermissionObservationEnabled(desired.permissionEnabled);
-      await server.start();
+      await startMobilePreviewServerSafely(server, {
+        source: "settings-reconcile",
+        onError: (err) => console.warn(
+          "Clawd mobile preview: start failed:",
+          err && err.message ? err.message : err,
+        ),
+      });
 
       // A newer disable may have committed while listen() was in flight.
       // Never leave that stale listener alive while the queued successor waits.
@@ -2557,6 +3210,7 @@ function getConfiguredFeishuApprovalClient() {
 }
 
 function telegramApprovalLog(level, message, meta = {}) {
+  const diagnosticMeta = sanitizeTelegramApprovalLogMeta(meta);
   const parts = [`telegram approval ${level}: ${message}`];
   if (meta && meta.text) parts.push(String(meta.text).trim());
   if (meta && meta.error) parts.push(String(meta.error).trim());
@@ -2565,6 +3219,10 @@ function telegramApprovalLog(level, message, meta = {}) {
     if (value !== undefined && value !== null && value !== "") {
       parts.push(`${key}=${String(value).trim()}`);
     }
+  }
+  for (const key of ["outcome", "mode", "proxy"]) {
+    const value = diagnosticMeta[key];
+    if (value) parts.push(`${key}=${value}`);
   }
   permLog(parts.filter(Boolean).join(" | "));
 }
@@ -2846,6 +3504,9 @@ function writeFeishuApprovalSecrets(secrets) {
     prepareFeishuSessionAutomationRouteChange(nextRouteSignature);
     feishuApprovalSecretsRevision += 1;
     queueFeishuApprovalSync("secrets");
+    if (feishuApprovalMigrationNudge) {
+      void feishuApprovalMigrationNudge.sync({ allowNotify: false });
+    }
   }
   return result;
 }
@@ -3086,6 +3747,132 @@ async function sendFeishuApprovalTest(persisted = null) {
   }
 }
 
+// --- Slack notifications (one-way) -----------------------------------------
+// Webhook / chat.postMessage are stateless HTTP, so there is no client to
+// restart on config change: the singleton reads current prefs+secrets lazily on
+// each send, and writing secrets just changes what the next read sees.
+function slackNotifyLog(level, message, meta = {}) {
+  const parts = [`slack notify ${level}: ${message}`];
+  if (meta && meta.errorClass) parts.push(`errorClass=${String(meta.errorClass).trim()}`);
+  if (meta && meta.error) parts.push(String(meta.error).trim());
+  if (meta && meta.id) parts.push(`id=${String(meta.id).trim()}`);
+  const config = getSlackNotifyPrefs();
+  const secrets = getSlackNotifySecrets();
+  const redactionSecrets = slackNotifySettings.redactionSecretsForSlackNotify(config, secrets);
+  for (const secret of redactionSecrets) {
+    if (!secret) continue;
+    for (let i = 0; i < parts.length; i += 1) {
+      parts[i] = String(parts[i]).split(String(secret)).join("<redacted>");
+    }
+  }
+  permLog(parts.filter(Boolean).join(" | "));
+}
+
+function getSlackNotifyPrefs() {
+  return slackNotifySettings.normalizeSlackNotify(_settingsController.get("slackNotify"));
+}
+
+// Canonical path only — no env-var override, mirroring the Feishu/Telegram
+// secret writers so a stray env var cannot redirect where the webhook lands.
+function getSlackNotifyPaths() {
+  const userDataDir = app.getPath("userData");
+  return {
+    userDataDir,
+    secretsEnvFilePath: slackNotifySettings.defaultSecretsEnvFilePath(userDataDir),
+  };
+}
+
+function getSlackNotifySecrets() {
+  const paths = getSlackNotifyPaths();
+  return slackNotifySettings.readSecretsEnvFile({ fs, filePath: paths.secretsEnvFilePath });
+}
+
+function getSlackNotifySecretInfo() {
+  const paths = getSlackNotifyPaths();
+  return slackNotifySettings.readMaskedSecrets({ fs, filePath: paths.secretsEnvFilePath });
+}
+
+function getSlackNotifyStatus() {
+  const config = getSlackNotifyPrefs();
+  const secrets = getSlackNotifySecrets();
+  const ready = slackNotifySettings.readiness(config, secrets);
+  // The UI needs these four apart, not collapsed: a stored-but-unusable
+  // credential, a usable one with sending switched off, and a fully live
+  // channel are three different things to say to the user.
+  const state = slackNotifySettings.describeTransport(config, secrets);
+  return {
+    credentialsPresent: state.credentialsPresent,
+    transportConfigured: !!state.transport,
+    transportReason: state.reason || "",
+    stored: state.stored,
+    enabled: config.enabled === true,
+    // `configured` remains as a compatibility alias, but means transport
+    // readiness rather than the master switch. `ready` is the live state.
+    configured: !!state.transport,
+    ready: ready.ready === true,
+    reason: ready.ready ? "ready" : (ready.reason || ""),
+    message: ready.message || "",
+    // From describeTransport, not readiness: readiness reports no transport
+    // whenever sending is switched off, which would contradict
+    // transportConfigured above and leave the card unable to name the
+    // credential it is about to use.
+    transport: state.transport,
+    notifyOnDone: config.notifyOnDone === true,
+    notifyOnError: config.notifyOnError === true,
+    notifyOnPermission: config.notifyOnPermission === true,
+    outputMode: config.outputMode,
+    secretsStored: !!(secrets.webhookUrl || secrets.botToken),
+    webhookConfigured: !!secrets.webhookUrl,
+    botTokenConfigured: !!secrets.botToken,
+  };
+}
+
+function broadcastSlackNotifyStatus() {
+  broadcastSettingsWindow("remoteApproval:status-changed", {
+    channel: "slack",
+    status: getSlackNotifyStatus(),
+  });
+}
+
+function writeSlackNotifySecrets(secrets) {
+  const paths = getSlackNotifyPaths();
+  const result = slackNotifySettings.writeSecretsEnvFile({
+    fs,
+    path,
+    filePath: paths.secretsEnvFilePath,
+    secrets,
+    platform: process.platform,
+  });
+  if (result && result.status === "ok") {
+    broadcastSlackNotifyStatus();
+  }
+  return result;
+}
+
+function getSlackNotifyClient() {
+  if (!slackNotifyClient) {
+    slackNotifyClient = createSlackNotifyClient({
+      getConfig: () => getSlackNotifyPrefs(),
+      getSecrets: () => getSlackNotifySecrets(),
+      getLang: () => _settingsController.get("lang") || lang || "en",
+      log: slackNotifyLog,
+    });
+  }
+  return slackNotifyClient;
+}
+
+async function sendSlackNotifyTest() {
+  const client = getSlackNotifyClient();
+  if (!client || typeof client.sendTest !== "function") {
+    return { status: "error", code: "not-running", message: "Slack notifier is not available" };
+  }
+  try {
+    return await client.sendTest();
+  } catch (err) {
+    return { status: "error", code: "threw", message: err && err.message ? err.message : String(err) };
+  }
+}
+
 function getTelegramApprovalTokenStatus() {
   const paths = getTelegramApprovalPaths();
   return telegramApprovalSettings.tokenStatus({
@@ -3194,6 +3981,12 @@ function telegramTokenFileDigest(filePath) {
   }
 }
 
+function invalidateTelegramDirectSendMappings(reason, options = {}) {
+  if (!telegramDirectSend || typeof telegramDirectSend.invalidateMappings !== "function") return;
+  telegramDirectSend.invalidateMappings(options);
+  try { telegramApprovalLog("debug", "direct-send mappings invalidated", { reason }); } catch {}
+}
+
 function writeTelegramApprovalToken(token) {
   const paths = getTelegramApprovalPaths();
   const beforeDigest = telegramTokenFileDigest(paths.tokenEnvFilePath);
@@ -3218,6 +4011,12 @@ function writeTelegramApprovalToken(token) {
   }
   if (result && result.status === "ok") {
     const identityChanged = beforeDigest !== telegramTokenFileDigest(paths.tokenEnvFilePath);
+    if (identityChanged) {
+      invalidateTelegramDirectSendMappings("token_changed");
+      if (telegramNativeRunner && typeof telegramNativeRunner.resetOffset === "function") {
+        telegramNativeRunner.resetOffset();
+      }
+    }
     if (_telegramMigrationController
       && typeof _telegramMigrationController.reconcileConfiguration === "function") {
       void _telegramMigrationController.reconcileConfiguration({ identityChanged });
@@ -3236,29 +4035,78 @@ async function initTelegramMigrationController() {
   const {
     createClipboardFallbackDeliveryAdapter,
     createTelegramDirectSend,
-    createWindowsPasteOnlyDeliveryAdapter,
   } = require("./telegram-direct-send");
+  const { createWindowsConsoleInputDeliveryAdapter } = require("./windows-console-input");
+  const { createCodexQueueDeliveryAdapter } = require("./codex-queue-delivery");
+  const { deriveCodexHomeFromTranscriptPath } = require("./codex-thread-id");
+  const {
+    isCodexCliOriginator,
+    isCodexDesktopOriginator,
+  } = require("../hooks/codex-originator");
   const { createTelegramNativeRunner } = require("./telegram-native-runner");
   const { createTelegramFetchTransport } = require("./telegram-fetch-transport");
   const tokenStore = envFileTokenStore({ filePath: paths.tokenEnvFilePath });
-  telegramDirectSend = createTelegramDirectSend({
-    getSessionSnapshot: () => _state && typeof _state.buildSessionSnapshot === "function"
+  const getTelegramDirectSendSnapshot = () => {
+    const snapshot = _state && typeof _state.buildSessionSnapshot === "function"
       ? _state.buildSessionSnapshot()
-      : { sessions: [] },
+      : { sessions: [] };
+    const snapshotSessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+    return {
+      ...snapshot,
+      sessions: snapshotSessions.map((entry) => {
+        const runtimeEntry = entry && entry.id ? sessions.get(String(entry.id)) : null;
+        return {
+          ...entry,
+          agentPid: runtimeEntry && runtimeEntry.agentPid || null,
+          // Direct Send keeps this main-process-only. It is derived from the
+          // authoritative rollout path and never enters the shared UI snapshot.
+          codexHome: deriveCodexHomeFromTranscriptPath(
+            runtimeEntry && runtimeEntry.transcriptPath,
+            process.platform,
+          ),
+        };
+      }),
+    };
+  };
+  const windowsConsoleDeliveryAdapter = createWindowsConsoleInputDeliveryAdapter();
+  const codexQueueDeliveryAdapter = createCodexQueueDeliveryAdapter({
+    osPlatform: process.platform,
+    log: telegramApprovalLog,
+  });
+  telegramDirectSend = createTelegramDirectSend({
+    getSessionSnapshot: getTelegramDirectSendSnapshot,
     getPendingPermissions: () => pendingPermissions,
     focusSession: (sessionId, options) => focusDashboardSession(sessionId, options),
-    deliveryAdapter: createWindowsPasteOnlyDeliveryAdapter({
-      clipboard,
-      restoreClipboardOnSuccess: true,
-    }),
+    deliveryAdapter: windowsConsoleDeliveryAdapter,
+    getDeliveryAdapter: ({ entry } = {}) => {
+      if (!entry || entry.agentId !== "codex") return windowsConsoleDeliveryAdapter;
+      const originator = entry.codexOriginator || entry.originator;
+      if (isCodexDesktopOriginator(originator)) return codexQueueDeliveryAdapter;
+      if (isCodexCliOriginator(originator) && entry.codexHome) return codexQueueDeliveryAdapter;
+      // A CLI session without store provenance keeps the established Windows
+      // Console path. On other hosts that adapter fails into clipboard fallback.
+      if (isCodexCliOriginator(originator)) return windowsConsoleDeliveryAdapter;
+      // An unknown originator must not inherit a known Codex delivery path.
+      // The queue adapter rejects it through canDeliver(), which sends this
+      // reply to the clipboard fallback without injecting OS input.
+      return codexQueueDeliveryAdapter;
+    },
     fallbackAdapter: createClipboardFallbackDeliveryAdapter({ clipboard }),
     isEnabled: () => {
       const snap = _telegramMigrationController && typeof _telegramMigrationController.getSnapshot === "function"
         ? _telegramMigrationController.getSnapshot()
         : null;
       return !!(snap && snap.state === "NATIVE_ACTIVE"
+        && telegramNativeRunner && typeof telegramNativeRunner.isPolling === "function"
+        && telegramNativeRunner.isPolling()
         && getTelegramApprovalPrefs().r3DirectSendEnabled === true);
     },
+    getRouteGeneration: () => (
+      telegramNativeRunner
+      && typeof telegramNativeRunner.getRouteGeneration === "function"
+        ? telegramNativeRunner.getRouteGeneration()
+        : null
+    ),
     osPlatform: process.platform,
     getLang: () => lang,
     log: telegramApprovalLog,
@@ -3298,6 +4146,8 @@ async function initTelegramMigrationController() {
         ? _telegramMigrationController.getSnapshot()
         : null;
       return !!(snap && snap.state === "NATIVE_ACTIVE"
+        && telegramNativeRunner && typeof telegramNativeRunner.isPolling === "function"
+        && telegramNativeRunner.isPolling()
         && getTelegramApprovalPrefs().r3DirectSendEnabled === true);
     },
     onTextMessage: (payload) => telegramDirectSend && telegramDirectSend.handleTextMessage(payload),
@@ -3324,22 +4174,63 @@ async function initTelegramMigrationController() {
     getClient: () => getTelegramCompanionClient(),
     getLang: () => _settingsController.get("lang") || lang || "en",
     getCompletionOutputMode: () => getTelegramApprovalPrefs().completionOutputMode || "off",
-    getNotifyOnComplete: () => getTelegramApprovalPrefs().notifyOnComplete === true,
+    getNotifyOnComplete: () => {
+      const prefs = getTelegramApprovalPrefs();
+      // Direct replies need a Telegram message to bind to even when the user
+      // keeps assistant output disabled. Treat the explicit reply opt-in as a
+      // bare completion-ping opt-in without changing the stored legacy flag.
+      return prefs.notifyOnComplete === true || prefs.r3DirectSendEnabled === true;
+    },
     // Native-active client present. The companion still advances its dedupe map
     // while native is inactive, and internally decides whether to send a bare
     // ping or require assistant output based on tgApproval prefs.
     isEnabled: () => !!getTelegramCompanionClient(),
-    onNotificationSent: ({ entry, messageId }) => {
+    getNotificationContext: (entry) => (
+      telegramDirectSend
+      && typeof telegramDirectSend.createCompletionNotificationContext === "function"
+        ? telegramDirectSend.createCompletionNotificationContext(entry)
+        : null
+    ),
+    isNotificationRouteCurrent: (context) => (
+      telegramDirectSend
+      && typeof telegramDirectSend.isCompletionNotificationRouteCurrent === "function"
+        ? telegramDirectSend.isCompletionNotificationRouteCurrent(context)
+        : false
+    ),
+    onNotificationSent: ({ entry, messageId, chatId, notificationContext }) => {
       if (telegramDirectSend && typeof telegramDirectSend.registerCompletionNotification === "function") {
+        // The notification context freezes the live agent PID when completion
+        // is observed. Keep this lookup only as a compatibility fallback for
+        // callers that do not provide that context; registration always
+        // prefers the earlier frozen identity so a reused session id cannot be
+        // rebound while Telegram delivery is in flight.
+        const runtimeEntry = entry && entry.id
+          ? sessions.get(String(entry.id))
+          : null;
         telegramDirectSend.registerCompletionNotification({
           messageId,
+          chatId,
           sessionId: entry && entry.id,
+          agentId: entry && entry.agentId,
+          sourcePid: entry && entry.sourcePid,
+          agentPid: runtimeEntry && runtimeEntry.agentPid || (entry && entry.agentPid),
+          editor: entry && entry.editor,
+          wtHwnd: entry && entry.wtHwnd,
+          orcaPaneKey: entry && entry.orcaPaneKey,
+          notificationContext,
         });
       }
     },
     log: telegramApprovalLog,
   });
 
+  // Seed before publishing the controller. If Settings changes the recipient
+  // while init awaits native startup, the subscription below must recognize
+  // that first edit as an identity change and queue reconciliation behind init.
+  telegramApprovalIdentitySignature = buildTelegramApprovalIdentitySignature(
+    getTelegramApprovalPrefs()
+  );
+  telegramDirectSendGateEnabled = getTelegramApprovalPrefs().r3DirectSendEnabled === true;
   _telegramMigrationController = createTelegramMigrationController({
     native: nativeRunner,
     readPrefs: () => readTelegramMigrationPrefsForController(),
@@ -3404,9 +4295,12 @@ async function initTelegramMigrationController() {
   });
 
   await _telegramMigrationController.init();
+  // Re-read after init so the baseline always matches the committed Settings
+  // snapshot, including an edit that raced with native startup.
   telegramApprovalIdentitySignature = buildTelegramApprovalIdentitySignature(
     getTelegramApprovalPrefs()
   );
+  telegramDirectSendGateEnabled = getTelegramApprovalPrefs().r3DirectSendEnabled === true;
   return _telegramMigrationController;
 }
 
@@ -3615,6 +4509,11 @@ function showResumeInput(t) {
 const _menuCtx = {
   get win() { return win; },
   get sessions() { return sessions; },
+  cancelRoam: () => _roam.cancelRoam(),
+  resetKeepSizeFrozen: () => resetKeepSizeFrozen(),
+  // Recovery actions must defeat a stranded drag lock (syncHitWin defers while
+  // it is held); see pet-window-runtime releaseStrandedDragLock.
+  releaseStrandedDragLock: () => petWindowRuntime.releaseStrandedDragLock(),
   get currentSize() { return currentSize; },
   set currentSize(v) { _settingsController.applyUpdate("size", v); },
   get doNotDisturb() { return doNotDisturb; },
@@ -3667,13 +4566,16 @@ const _menuCtx = {
   get soundVolume() { return soundVolume; },
   get pendingPermissions() { return pendingPermissions; },
   repositionBubbles: () => repositionFloatingBubbles(),
-  get petHidden() { return petWindowRuntime.isPetHidden(); },
-  togglePetVisibility: () => togglePetVisibility(),
+  get petHidden() { return petWindowRuntime.isPetEffectivelyHidden(); },
+  setPetVisibility: (visible) => setPetVisibility(visible),
   bringPetToPrimaryDisplay: () => bringPetToPrimaryDisplay(),
   get isQuitting() { return isQuitting; },
   set isQuitting(v) { isQuitting = v; },
   get menuOpen() { return menuOpen; },
-  set menuOpen(v) { menuOpen = v; },
+  set menuOpen(v) {
+    if (v) _mini.cancelPendingMiniPeek(true);
+    menuOpen = v;
+  },
   get tray() { return tray; },
   set tray(v) { tray = v; },
   get contextMenuOwner() { return contextMenuOwner; },
@@ -3781,11 +4683,12 @@ const _menuCtx = {
   getNearestWorkArea,
   reapplyMacVisibility,
   getSettingsWindow,
+  getSystemVersion: () => process.getSystemVersion(),
   discoverThemes: () => themeLoader.discoverThemes(),
   getActiveThemeId: () => themeRuntime.getActiveThemeId("clawd"),
   getActiveThemeCapabilities: () => themeRuntime.getActiveThemeCapabilities(),
   ensureUserThemesDir: () => themeLoader.ensureUserThemesDir(),
-  openSettingsWindow: () => settingsWindowRuntime.open(),
+  openSettingsWindow: (options) => settingsWindowRuntime.open(options),
   showTutorial: () => _tutorial.open(),
 };
 const _menu = require("./menu")(_menuCtx);
@@ -3798,7 +4701,10 @@ const SETTINGS_MIRROR_SETTERS = {
   lang: (v) => { lang = v; }, size: (v) => { currentSize = v; resetKeepSizeFrozen(); }, showTray: (v) => { showTray = v; },
   showDock: (v) => { showDock = v; if (macHideController) macHideController.noteManualChange(); }, manageClaudeHooksAutomatically: (v) => { manageClaudeHooksAutomatically = v; },
   autoStartWithClaude: (v) => { autoStartWithClaude = v; }, openAtLogin: (v) => { openAtLogin = v; },
-  bubbleFollowPet: (v) => { bubbleFollowPet = v; }, sessionHudEnabled: (v) => { sessionHudEnabled = v; },
+  bubbleFollowPet: (v) => { bubbleFollowPet = v; },
+  bubbleFollowPreference: (v) => { bubbleFollowPreference = v; },
+  bubbleFixedCorner: (v) => { bubbleFixedCorner = v; },
+  sessionHudEnabled: (v) => { sessionHudEnabled = v; },
   sessionHudShowStateLabels: (v) => { sessionHudShowStateLabels = v; },
   sessionHudShowElapsed: (v) => { sessionHudShowElapsed = v; },
   sessionHudShowContextUsage: (v) => { sessionHudShowContextUsage = v; },
@@ -3813,13 +4719,20 @@ const SETTINGS_MIRROR_SETTERS = {
   sessionHudCleanupDetached: (v) => { sessionHudCleanupDetached = v; },
   sessionHudPinned: (v) => { sessionHudPinned = v; },
   sessionStaleMs: (v) => { sessionStaleMs = v; }, workingStaleMs: (v) => { workingStaleMs = v; },
+  codexWorkingStaleMs: (v) => { codexWorkingStaleMs = v; },
   detachedIdleStaleMs: (v) => { detachedIdleStaleMs = v; },
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
   petTint: (v) => { petTint = v; },
-  petAccessory: (v) => { petAccessory = v; },
   allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; resetKeepSizeFrozen(); },
   fullscreenOverlay: (v) => { fullscreenOverlayCached = v; },
+  fullscreenAutoHide: (v) => {
+    fullscreenAutoHideCached = v;
+    if (!v) {
+      topmostRuntime.clearFullscreenAutoHideOverride();
+      petWindowRuntime.setFullscreenAutoHidden(false);
+    }
+  },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
   textScaleByDisplay: (v) => { textScaleByDisplay = v; textScalePreview = null; },
@@ -3841,11 +4754,13 @@ const holidayAccessoryRuntime = createHolidayAccessoryRuntime({
   getSettingsSnapshot: () => _settingsController.getSnapshot(),
   getActiveTheme: () => getActiveTheme(),
   sendToRenderer,
+  onAccessoryChange: syncHitWin,
   logWarn: console.warn,
 });
 
 const settingsEffectRouter = createSettingsEffectRouter({
   settingsController: _settingsController,
+  recapRuntime,
   BrowserWindow,
   updateMirrors: updateSettingsMirrors,
   createTray,
@@ -3885,6 +4800,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   exitMiniMode: () => exitMiniMode(),
   getMiniMode: () => _mini.getMiniMode(),
   getActiveTheme: () => getActiveTheme(),
+  syncHitWin,
   // #509: re-rest the pet on the newly selected idle visual right away, but
   // only while actually idle — task/sleep/mini states pick it up on their
   // next natural revert instead.
@@ -3892,21 +4808,67 @@ const settingsEffectRouter = createSettingsEffectRouter({
     if (_state.getCurrentState() !== "idle") return;
     _state.applyState("idle", _state.getSvgOverride("idle"));
   },
+  refreshDisplayedVisual: refreshDisplayedVisualForLowPowerMode,
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
   disableMobilePermissionObservation: () => setMobilePermissionObservationEnabled(false),
   enqueueMobilePreviewReconcile,
+  setRecapEnabled: (enabled) => recapRuntime.setEnabled(enabled),
   logWarn: console.warn,
 });
 settingsEffectRouter.start();
+feishuApprovalMigrationNudge = createFeishuApprovalMigrationNudge({
+  getConfig: () => getFeishuApprovalPrefs(),
+  getSecrets: () => getFeishuApprovalSecrets(),
+  getLastSignature: () => _settingsController.get("feishuApprovalMigrationLastNotified") || "",
+  setLastSignature: (value) =>
+    _settingsController.applyUpdate("feishuApprovalMigrationLastNotified", value),
+  showNotification: ({ onClick }) => {
+    const title = translate("feishuApprovalMigrationNudgeTitle");
+    const body = translate("feishuApprovalMigrationNudgeBody");
+    try {
+      const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
+      if (process.platform === "win32" && trayBalloonOwner.show(tray, {
+        iconType: "warning",
+        title,
+        content: body,
+        onClick,
+      })) {
+        return true;
+      }
+      if (Notification && typeof Notification.isSupported === "function" && Notification.isSupported()) {
+        const notification = new Notification({ title, body });
+        notification.once("click", onClick);
+        notification.show();
+        return true;
+      }
+    } catch (err) {
+      console.warn("Clawd: Feishu/Lark upgrade nudge failed:", err && err.message);
+    }
+    console.warn(`Clawd: ${body}`);
+    return false;
+  },
+  openSettings: () => settingsWindowRuntime.open(),
+});
 _settingsController.subscribeKey("tgApproval", (value) => {
   syncTelegramSessionAutomationRoute();
   if (suppressTelegramMigrationReconcile > 0) return;
+  const normalized = telegramApprovalSettings.normalizeTelegramApproval(value);
+  const nextDirectSendEnabled = normalized.r3DirectSendEnabled === true;
+  const directSendGateChanged = telegramDirectSendGateEnabled !== null
+    && nextDirectSendEnabled !== telegramDirectSendGateEnabled;
+  telegramDirectSendGateEnabled = nextDirectSendEnabled;
+  if (directSendGateChanged) {
+    invalidateTelegramDirectSendMappings("direct_send_toggle_changed", {
+      notificationRouteChanged: false,
+    });
+  }
   const nextSignature = buildTelegramApprovalIdentitySignature(value);
   const identityChanged = telegramApprovalIdentitySignature !== ""
     && nextSignature !== telegramApprovalIdentitySignature;
   telegramApprovalIdentitySignature = nextSignature;
   if (!identityChanged) return;
+  invalidateTelegramDirectSendMappings("recipient_changed");
   if (_telegramMigrationController
     && typeof _telegramMigrationController.reconcileConfiguration === "function") {
     void _telegramMigrationController.reconcileConfiguration({ identityChanged: true });
@@ -3921,6 +4883,12 @@ _settingsController.subscribeKey("feishuApproval", () => {
     getFeishuApprovalSecrets()
   ));
   queueFeishuApprovalSync("settings");
+  if (feishuApprovalMigrationNudge) {
+    void feishuApprovalMigrationNudge.sync({ allowNotify: false });
+  }
+});
+_settingsController.subscribeKey("slackNotify", () => {
+  broadcastSlackNotifyStatus();
 });
 animationOverridesMain = createSettingsAnimationOverridesMain({
   app,
@@ -4008,6 +4976,10 @@ registerDoctorIpc({
   shell,
   server: _server,
   getPrefsSnapshot: () => _settingsController.getSnapshot(),
+  getPrefsReadFailure: () => _settingsController.hasReadFailure(),
+  getPrefsRecovered: () => _initialPrefsRecovered && !_settingsController.hasReadFailure(),
+  getPrefsRecoveryBackupFailed: () => _initialPrefsRecoveryBackupFailed,
+  getFeishuApprovalSecrets: () => getFeishuApprovalSecrets(),
   getDoNotDisturb: () => doNotDisturb,
   getLocale: () => _settingsController.get("lang") || "en",
   resolveAgentDisplayName: _resolveAgentDisplayName,
@@ -4043,7 +5015,7 @@ const _remoteSshIpc = registerRemoteSshIpc({
   transportCoordinator: _remoteSshTransportCoordinator,
   BrowserWindow,
   isPackaged: app.isPackaged,
-  getInstallationIdentity: () => _remoteSshInstallationIdentity,
+  getInstallationIdentity: ensureRemoteSshInstallationIdentity,
   enableProfileIsolation: process.env.CLAWD_ENABLE_EXPERIMENTAL_REMOTE_ISOLATION === "1",
 });
 
@@ -4090,6 +5062,22 @@ const settingsSizePreviewSession = createSettingsSizePreviewSession({
   },
 });
 
+const quotaNotifications = createQuotaNotificationPresenter({
+  Notification, platform: process.platform, trayBalloonOwner, getTray: () => _menu.getTray(),
+  isSuppressed: () => doNotDisturb || isQuitting || !app.isReady(),
+  isMuted: () => soundMuted, getLang: () => lang, openSettings: () => settingsWindowRuntime.open(),
+});
+const quotaNotificationIpc = registerQuotaNotificationIpc({
+  ipcMain, settingsController: _settingsController, getSettingsWindow,
+  testNotification: () => quotaNotifications.test(),
+});
+quotaAlertsRuntime = createQuotaAlertsRuntime({
+  settingsController: _settingsController, state: _state,
+  getDoNotDisturb: () => doNotDisturb, notifyQuota: showQuotaAlert,
+  historyPath: path.join(app.getPath("userData"), "quota-alert-history.json"),
+  powerMonitor, logWarn: (message) => console.warn(message),
+});
+
 const settingsIpcRuntime = registerSettingsIpc({
   ipcMain,
   app,
@@ -4099,6 +5087,7 @@ const settingsIpcRuntime = registerSettingsIpc({
   fs,
   path,
   settingsController: _settingsController,
+  recapRuntime,
   getQuotaSourceCount: () => _state.getQuotaSourceCount(),
   getQuotaRingProviders: () => _ringGeom.listQuotaRingProviders(
     _state.buildSessionSnapshot(),
@@ -4106,6 +5095,7 @@ const settingsIpcRuntime = registerSettingsIpc({
   ),
   themeLoader,
   codexPetMain,
+  officialThemeMain,
   getSettingsWindow,
   getActiveTheme: () => getActiveTheme(),
   getLang: () => lang,
@@ -4120,6 +5110,7 @@ const settingsIpcRuntime = registerSettingsIpc({
       resolveTextScaleForKey(textScaleByDisplay, textScale, getSettingsDisplayKey()) * 100
     ),
   }),
+  getSizeContext: getSizeSliderContext,
   sendToRenderer,
   getDoNotDisturb: () => doNotDisturb,
   getSoundMuted: () => soundMuted,
@@ -4156,11 +5147,23 @@ const settingsIpcRuntime = registerSettingsIpc({
   getLanWsServer: () => _lanWss,
 });
 
+const sessionHistoryRuntime = createSessionHistoryRuntime({
+  getSessions: () => _state.sessions,
+  isAgentEnabled: (agentId) => (
+    _runtimeAgentGate.isAgentEnabled(agentId)
+    && _runtimeAgentGate.isAgentIntegrationInstalled(agentId)
+  ),
+  launchClaudeSession: (mode, cwd, sessionId, profile) => (
+    launchClaudeSession(mode, cwd, sessionId, {}, profile)
+  ),
+});
+
 registerSessionIpc({
   ipcMain,
   getSessionSnapshot: () => _state.buildSessionSnapshot(),
   getI18n: () => getDashboardI18nPayload(),
-  getDashboardWindow: () => _dashboard.getWindow(),
+  getDashboardWebContents: () => _dashboard.getWebContents(),
+  quickMode: _dashboard.quick,
   getKimiQuotaStatus: () => _kimiQuotaRuntime.getStatus(),
   refreshKimiQuota: () => _kimiQuotaRuntime.refresh(),
   focusSession: (sessionId, options) => focusDashboardSession(sessionId, options),
@@ -4169,14 +5172,26 @@ registerSessionIpc({
   ackSessionCompletion: (sessionId) => _state.ackSessionCompletion(sessionId),
   setSessionAlias: (payload) => _settingsController.applyCommand("setSessionAlias", payload),
   setSessionAutomationOverride: (payload, context) => {
+    // The Dashboard page can live in a WebContentsView, where
+    // BrowserWindow.fromWebContents() returns null and the warning would fall
+    // back to the always-on-top pet — visible but not interactive on Windows.
+    // Resolve the owner instead, and make sure a quick round is ended so the
+    // modal parents onto a real ordinary window.
     let warningParent = null;
     try {
-      warningParent = BrowserWindow.fromWebContents(context && context.sender);
+      const sender = context && context.sender;
+      if (_dashboard.getHostForWebContents(sender)) {
+        warningParent = _dashboard.promoteToOrdinaryWindow();
+      } else {
+        warningParent = BrowserWindow.fromWebContents(sender);
+      }
     } catch {}
     return sessionAutomationCoordinator.setSessionAutomationOverride(payload, { warningParent });
   },
   clearSessionAutomationGrant: (payload) =>
     sessionAutomationCoordinator.clearSessionAutomationGrant(payload),
+  getSessionHistory: () => sessionHistoryRuntime.getHistory(),
+  resumeSessionFromHistory: (payload) => sessionHistoryRuntime.resume(payload),
   showDashboard: (options) => showDashboard(options),
   setSessionHudPinned: (value) => {
     const result = _settingsController.applyUpdate("sessionHudPinned", !!value);
@@ -4242,6 +5257,7 @@ function createWindow() {
     restoreMiniFromPrefs: (prefsSnapshot, pixelSize) => _mini.restoreFromPrefs(prefsSnapshot, pixelSize),
   });
 
+  const initialAccessoryDelivery = prepareCurrentAccessorySlotsDelivery();
   petWindowRuntime.createRenderWindow({
     BrowserWindow,
     size,
@@ -4249,11 +5265,12 @@ function createWindow() {
     initialVirtualBounds,
     preloadPath: path.join(__dirname, "preload.js"),
     loadFilePath: path.join(__dirname, "index.html"),
-    themeConfig: buildRendererThemeConfig(),
+    themeConfig: buildRendererThemeConfig(initialAccessoryDelivery.snapshot),
     setRenderWindow: (createdWindow) => { win = createdWindow; },
     isQuitting: () => isQuitting,
     applyDockVisibility,
   });
+  finalizePetAccessorySlotsDelivery(initialAccessoryDelivery, true);
 
   buildContextMenu();
   if (!isMac || showTray) createTray();
@@ -4266,6 +5283,9 @@ function createWindow() {
     loadFilePath: path.join(__dirname, "hit.html"),
     hitThemeConfig: themeRuntime.getHitRendererConfig(),
     guardAlwaysOnTop,
+    prepareActivation: (createdHitWin) => (
+      _hitWindowActivationRuntime.controller.prepare(createdHitWin)
+    ),
     onDidFinishLoad: () => {
       sendToHitWin("theme-config", themeRuntime.getHitRendererConfig());
       if (themeRuntime.isReloadInProgress()) return;
@@ -4303,22 +5323,38 @@ function createWindow() {
     moveWindowForDrag: () => moveWindowForDrag(),
     setIdlePaused: (value) => { idlePaused = !!value; },
     setLowPowerIdlePaused,
+    setAccessoryMirror: setAccessoryMirrored,
     isMiniTransitioning: () => _mini.getMiniTransitioning(),
     getCurrentState: () => _state.getCurrentState(),
     getCurrentSvg: () => _state.getCurrentSvg(),
     sendToRenderer,
+    requestDragReaction,
+    requestClickReaction,
+    refreshIdleVisualAfterDrag,
+    settleVisual: (event, payload) => {
+      if (
+        !win
+        || win.isDestroyed()
+        || !isTrustedMainFrameEvent(event, win.webContents)
+      ) return false;
+      return displayedVisualProjection.settle(payload);
+    },
     recoverVisiblePetAfterRendererLoad: (event) => {
       if (!win || win.isDestroyed()) return;
       if (!event || event.sender !== win.webContents) return;
       if (themeRuntime.isReloadInProgress()) return;
       petWindowRuntime.recoverVisiblePetAfterRendererLoad();
     },
-    setDragLocked: (value) => { petWindowRuntime.setDragLocked(value); },
+    setDragLocked: (value) => {
+      if (value) _mini.cancelPendingMiniPeek(true);
+      petWindowRuntime.setDragLocked(value);
+    },
     setMouseOverPet: (value) => { mouseOverPet = !!value; },
     cancelRoam: () => _roam.cancelRoam(),
     beginDragSnapshot: () => beginDragSnapshot(),
     clearDragSnapshot: () => clearDragSnapshot(),
     syncHitWin: () => syncHitWin(),
+    syncDisplayedVisualGeometry,
     syncImeEditingPetDodge: () => topmostRuntime.syncImeEditingPetDodge(),
     isMiniMode: () => _mini.getMiniMode(),
     checkMiniModeSnap: () => checkMiniModeSnap(),
@@ -4384,6 +5420,11 @@ function createWindow() {
       reconcilePowerSaveBlocker();
       broadcastDashboardSessionSnapshot(recoveredSnapshot);
       broadcastSessionHudSnapshot(recoveredSnapshot);
+      // The Slack notifier is not on the broadcast above, so without this its
+      // first snapshot would be some later event — which its priming branch
+      // swallows, losing the first completion after a restart. Prime it with
+      // what is already history instead.
+      try { getSlackNotifyClient().prime(recoveredSnapshot); } catch {}
       if (!doNotDisturb && !_mini.getMiniMode()) {
         const recoveredState = resolveDisplayState();
         applyState(recoveredState, getSvgOverride(recoveredState));
@@ -4401,9 +5442,14 @@ function createWindow() {
   // Also handles crash recovery (render-process-gone → reload)
   win.webContents.on("did-start-loading", () => {
     setLowPowerIdlePaused(false);
+    // A fresh document draws upright: no .mini-left class, no inline scale on
+    // the direction stage. Keeping the old facing here would leave the hit
+    // window mirrored against an unmirrored pet until something happens to
+    // make the renderer report again.
+    setAccessoryMirrored(false);
   });
   win.webContents.on("did-finish-load", () => {
-    sendToRenderer("theme-config", buildRendererThemeConfig());
+    deliverRendererThemeConfig();
     petWindowRuntime.resendViewportOffsets();
     if (themeRuntime.isReloadInProgress()) return;
     syncRendererStateAfterLoad();
@@ -4416,6 +5462,7 @@ function createWindow() {
     petWindowRuntime.setDragLocked(false);
     idlePaused = false;
     mouseOverPet = false;
+    resetDisplayedVisualProjection("renderer-process-gone", { preserveCommitted: true });
     petWindowRuntime.reloadWindowWebContents(win, { crashKey: "renderWin", details });
   });
 
@@ -4435,6 +5482,7 @@ function createWindow() {
     displayMetricsGeometryTimer = setTimeout(() => {
       displayMetricsGeometryTimer = null;
       petWindowRuntime.handleDisplayMetricsChanged();
+      settingsWindowRuntime.notifySizeContextChanged();
     }, 400);
   };
   // PR #751 second-review C-6 (Codex non-blocking): §4.3.14's
@@ -4460,8 +5508,14 @@ function createWindow() {
   // existing invalidateDisplaysCache() call) — previously only
   // metrics-changed did, leaving a stale inset alive across a monitor
   // unplug/replug or a genuine topology addition.
-  screen.on("display-removed", () => petWindowRuntime.handleDisplayRemoved());
-  screen.on("display-added", () => petWindowRuntime.handleDisplayAdded());
+  screen.on("display-removed", () => {
+    petWindowRuntime.handleDisplayRemoved();
+    settingsWindowRuntime.notifySizeContextChanged();
+  });
+  screen.on("display-added", () => {
+    petWindowRuntime.handleDisplayAdded();
+    settingsWindowRuntime.notifySizeContextChanged();
+  });
 
   // textScale is per-display: when the topology changes, window→display
   // mappings (and therefore effective scales) can change wholesale. Debounced
@@ -4491,6 +5545,23 @@ function getPrimaryWorkAreaSafe() {
   }
 }
 
+function getBubbleWorkArea(followPet, petBounds) {
+  return resolveBubbleWorkArea({
+    followPet,
+    petBounds: petBounds || getPetWindowBounds(),
+    getPrimaryWorkArea: getPrimaryWorkAreaSafe,
+    getNearestWorkArea,
+    syntheticWorkArea: SYNTHETIC_WORK_AREA,
+  });
+}
+
+function getTextScaleForBubbleWorkArea(workArea) {
+  const displayKey = isUsableBubbleWorkArea(workArea)
+    ? getDisplayKeyForBounds(workArea)
+    : null;
+  return effectiveTextScaleForKey(displayKey || getPetDisplayKey());
+}
+
 function getNearestWorkArea(cx, cy) {
   return findNearestWorkArea(screen.getAllDisplays(), getPrimaryWorkAreaSafe(), cx, cy);
 }
@@ -4510,6 +5581,9 @@ const _miniCtx = {
   get doNotDisturb() { return doNotDisturb; },
   set doNotDisturb(v) { doNotDisturb = v; },
   get currentState() { return _state.getCurrentState(); },
+  get mouseOverPet() { return mouseOverPet; },
+  get dragLocked() { return petWindowRuntime.isDragLocked(); },
+  get menuOpen() { return menuOpen; },
   notifyUpdaterSilentExit: () => notifyUpdaterSilentExit(),
   SIZES,
   getCurrentPixelSize,
@@ -4526,6 +5600,7 @@ const _miniCtx = {
   clampToScreenVisual,
   getNearestWorkArea,
   getPetWindowBounds,
+  getHitRectScreen,
   applyPetWindowBounds,
   applyPetWindowPosition,
   setViewportOffsetY,
@@ -4554,7 +5629,7 @@ const _mini = require("./mini")(_miniCtx);
 const handleTestResult = createTestReactionHandler({
   getEnabled: () => _settingsController.get("testReactionsEnabled") === true,
   getDoNotDisturb: () => doNotDisturb,
-  isPetHidden: () => petWindowRuntime.isPetHidden(),
+  isPetHidden: () => petWindowRuntime.isPetEffectivelyHidden(),
   getMiniMode: () => _mini.getMiniMode(),
   getMiniTransitioning: () => _mini.getMiniTransitioning(),
   isDragging: () => petWindowRuntime.isDragLocked(),
@@ -4566,6 +5641,8 @@ const { enterMiniMode, exitMiniMode, enterMiniViaMenu, miniPeekIn, miniPeekOut,
 
 // ── Free Roam — initialized here after state and mini modules ──
 const _roamCtx = {
+  hasActiveSessions: anySessionInProgress,
+  resolveDisplayState,
   get win() { return win; },
   get dragLocked() { return petWindowRuntime.isDragLocked(); },
   getPetWindowBounds,
@@ -4584,14 +5661,31 @@ const _roamCtx = {
   clampToScreenVisual,
   getMiniMode: () => _mini.getMiniMode(),
   getCurrentState: () => _state.getCurrentState(),
+  isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),
   get miniTransitioning() { return _mini.getMiniTransitioning(); },
   applyState: (state, svgOverride, opts) => _state.applyState(state, svgOverride, opts),
   setState: (state, svgOverride, opts) => _state.setState(state, svgOverride, opts),
-  setRoamHeading: (headingLeft) => sendToRenderer("roam-heading", !!headingLeft),
+  setRoamHeading: (headingLeft) => {
+    const turned = roamHeadingLeft !== !!headingLeft;
+    roamHeadingLeft = !!headingLeft;
+    sendToRenderer("roam-heading", roamHeadingLeft);
+    // A turn between walks keeps the "roam" state, so setState() sends no new
+    // visual; re-request it when the theme has a mirrored variant to swap.
+    const roamSvg = _state.getCurrentSvg();
+    if (turned && _state.getCurrentState() === "roam"
+      && resolveMirroredFile(getActiveTheme(), roamSvg, true) !== roamSvg) {
+      sendToRenderer("state-change", "roam", roamSvg);
+    }
+  },
   // #640: hold still while the user types into a bubble text field (macOS)
   isImeEditingActive: () => pendingPermissions.some(
-    (p) => p && p.bubble && !p.bubble.isDestroyed() && p.bubble.__clawdMacImeEditing
+    (p) => p
+      && p.bubble
+      && !p.bubble.isDestroyed()
+      && p.bubble.isVisible()
+      && p.bubble.__clawdMacImeEditing
   ),
+  hasVisiblePermissionBubbles: () => _perm.hasVisiblePermissionBubbles(),
   // #810: optional roam fence — validated async loader for
   // ~/.clawd/roam-area.json; roam reads its in-memory cache at target pick
   // time and kicks refresh() when scheduling walks (see src/roam-fence.js).
@@ -4692,9 +5786,9 @@ if (!gotTheLock) {
   // Only the winning instance may publish the startup gate. A losing instance
   // can have a stale/default prefs snapshot and must never become the final
   // writer after the active instance has disabled Codex.
-  // A future-version or recovered snapshot is not authoritative enough to
-  // publish an enabled external gate. Fail closed until a valid prefs commit
-  // reaches the post-commit agents subscriber above.
+  // A future-version, recovered, or partially malformed snapshot is not
+  // authoritative enough to publish an enabled external gate. The evaluator
+  // latches that decision for this process; only a clean restart can reopen it.
   const startupGateSnapshot = (
     _initialPrefsLoad.locked === true
     || _initialPrefsLoad.recovered === true
@@ -4702,7 +5796,7 @@ if (!gotTheLock) {
   ) ? null : _initialPrefsLoad.snapshot;
   _syncCodexAutoStartGate(startupGateSnapshot, "startup");
   app.on("second-instance", (_event, commandLine) => {
-    if (petWindowRuntime.isPetHidden()) {
+    if (petWindowRuntime.isPetEffectivelyHidden()) {
       prepManualPetVisibility();
       petWindowRuntime.setPetHidden(false);
     } else {
@@ -4748,10 +5842,12 @@ if (!gotTheLock) {
     try {
       const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
       if (process.platform === "win32") {
+        const { getCodexHookNudgeKeys } = require("./codex-hook-health");
+        const keys = getCodexHookNudgeKeys(verdict);
         trayBalloonOwner.show(tray, {
           iconType: "warning",
-          title: t("codexHookHealthNudgeTitle"),
-          content: t("codexHookHealthNudgeBody"),
+          title: t(keys.title),
+          content: t(keys.body),
         });
       }
     } catch (err) {
@@ -4779,19 +5875,54 @@ if (!gotTheLock) {
     }
   }
 
-  app.whenReady().then(async () => {
-    // macOS: override the dock icon with a version padded to the macOS icon
-    // grid (~80.5% of the canvas, ~100px transparent margin per side) so the
-    // Dock tile matches neighbor apps. The build-time icon.png sits ~72.6%
-    // (looks small); the earlier full-bleed dock-icon.png looked oversized
-    // (issue #416). Source preserved at assets/source/dock-icon-fullbleed.png.
-    if (isMac && app.dock && _settingsController.get("showDock") !== false) {
-      try {
-        app.dock.setIcon(path.join(__dirname, "..", "assets", "dock-icon.png"));
-      } catch (_) {
-        // non-fatal: fall back to the bundled icon
+  function notifyPrefsAuthorityFailure() {
+    const readFailure = _settingsController.hasReadFailure();
+    if (!readFailure && !_initialPrefsRecovered) return false;
+    const title = translate(_initialPrefsRecoveryBackupFailed
+      ? "prefsRecoveryBackupFailedNudgeTitle"
+      : (readFailure ? "prefsReadFailureNudgeTitle" : "prefsRecoveredNudgeTitle"));
+    const body = translate(_initialPrefsRecoveryBackupFailed
+      ? "prefsRecoveryBackupFailedNudgeBody"
+      : (readFailure ? "prefsReadFailureNudgeBody" : "prefsRecoveredNudgeBody"));
+    const onClick = () => settingsWindowRuntime.open();
+    try {
+      const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
+      if (process.platform === "win32" && trayBalloonOwner.show(tray, {
+        iconType: "warning",
+        title,
+        content: body,
+        onClick,
+      })) {
+        return true;
       }
+      if (Notification && typeof Notification.isSupported === "function" && Notification.isSupported()) {
+        const notification = new Notification({ title, body });
+        notification.once("click", onClick);
+        notification.show();
+        return true;
+      }
+    } catch (err) {
+      console.warn("Clawd: preferences authority nudge failed:", err && err.message);
     }
+    console.warn(`Clawd: ${body}`);
+    return false;
+  }
+
+  app.whenReady().then(async () => {
+    // Older macOS and development builds retain the padded runtime icon from
+    // #416. Packaged Tahoe+ leaves the Dock untouched so macOS can apply the
+    // user's Default/Dark/Clear/Tinted treatment to the bundle icon (#941).
+    const installRuntimeDockIcon = resolveRuntimeDockIconPolicy({
+      platform: process.platform,
+      isPackaged: app.isPackaged === true,
+      getSystemVersion: () => process.getSystemVersion(),
+    });
+    installStartupDockIcon({
+      dock: app.dock,
+      showDock: _settingsController.get("showDock") !== false,
+      dockIconPath: path.join(__dirname, "..", "assets", "dock-icon.png"),
+      installRuntimeIcon: installRuntimeDockIcon,
+    });
 
     const protocolRegistered = codexPetMain.registerProtocolClient();
     if (process.argv.includes(REGISTER_PROTOCOL_DEV_ARG)) {
@@ -4807,20 +5938,11 @@ if (!gotTheLock) {
     // First-run only: seed UI language from the device locale, before createWindow
     // so the very first menu/tray render is already in the user's language.
     hydrateFreshInstallLanguage();
-    try {
-      await initializeRemoteSshInstallationIdentity();
-    } catch (err) {
-      _remoteSshInstallationIdentity = null;
-      console.error("Clawd remote-ssh: installation identity initialization failed:", err && err.message);
-    }
-    // safeStorage is only guaranteed after Electron is ready. This reconciles
-    // the local key/quota binding and never performs a Kimi network request.
-    try {
-      await _kimiQuotaRuntime.initialize();
-    } catch (err) {
-      console.warn("Clawd: Kimi quota startup reconciliation failed:", err && err.message);
-    }
-
+    // Remote SSH installation identity is intentionally lazy. Loading it uses
+    // macOS Keychain through safeStorage, so ordinary Clawd startup must not
+    // request credential access when no Remote SSH action is being performed.
+    // Explicit Remote SSH status/actions and connect-on-launch profiles load it
+    // through the single-flight provider injected into remote-ssh-ipc above.
     permDebugLog = path.join(app.getPath("userData"), "permission-debug.log");
     updateDebugLog = path.join(app.getPath("userData"), "update-debug.log");
     sessionDebugLog = path.join(app.getPath("userData"), "session-debug.log");
@@ -4837,6 +5959,19 @@ if (!gotTheLock) {
     catch (err) { console.warn("Clawd: discord presence startup failed:", err && err.message); }
     queueFeishuApprovalSync("startup");
     createWindow();
+    try { recapRuntime.start(); }
+    catch (err) { console.warn("Clawd: local recap startup failed:", err && err.code ? err.code : "storage-error"); }
+    // Reconcile the local quota binding only after the app has visible UI.
+    // initialize() reads opaque credential metadata but never decrypts the key
+    // or performs a network request, so ordinary startup cannot be held behind
+    // a Keychain/DPAPI prompt.
+    void _kimiQuotaRuntime.initialize().catch((err) => {
+      console.warn("Clawd: Kimi quota startup reconciliation failed:", err && err.message);
+    });
+    notifyPrefsAuthorityFailure();
+    if (feishuApprovalMigrationNudge) {
+      void feishuApprovalMigrationNudge.sync({ allowNotify: true });
+    }
     void telegramMigrationInit.then((controller) => {
       if (!controller || !telegramMigrationNudge) return;
       return telegramMigrationNudge.sync({ allowNotify: true });
@@ -4909,6 +6044,7 @@ if (!gotTheLock) {
 
     // Register persistent global shortcuts from the validated prefs snapshot.
     shortcutRuntime.registerPersistentShortcutsFromSettings();
+    quotaAlertsRuntime.start();
 
     // Construct log monitors. We always instantiate them so toggling the
     // agent on/off later can call start()/stop() without paying the require
@@ -4938,6 +6074,7 @@ if (!gotTheLock) {
   });
 
   app.on("before-quit", (event) => {
+    quotaNotificationIpc.dispose();
     isQuitting = true;
     if (!appQuitDrainReady) {
       event.preventDefault();
@@ -4952,6 +6089,12 @@ if (!gotTheLock) {
     }
     if (quitCleanupStarted) return;
     quitCleanupStarted = true;
+    quotaAlertsRuntime?.dispose();
+    quotaNotifications.dispose();
+    // Cancel any live official-theme download and drop this round's `.part`.
+    if (officialThemeMain) {
+      try { officialThemeMain.cancelInstall(); } catch {}
+    }
     trayBalloonOwner.dispose();
     holidayAccessoryRuntime.dispose();
     if (systemWakeRecovery) systemWakeRecovery.dispose();
@@ -4975,6 +6118,8 @@ if (!gotTheLock) {
     _server.cleanup();
     if (_lanWss) _lanWss.cleanup();
     _updateBubble.cleanup();
+    if (displayedVisualProjection) displayedVisualProjection.dispose();
+    try { recapRuntime.dispose(); } catch {}
     _state.cleanup();
     _tick.cleanup();
     _mini.cleanup();
@@ -4989,6 +6134,7 @@ if (!gotTheLock) {
     if (!_remoteSshRuntime || typeof _remoteSshRuntime.shutdown !== "function") {
       try { _remoteSshRuntime.cleanup(); } catch {}
     }
+    _hitWindowActivationRuntime.controller.dispose();
     if (hitWin && !hitWin.isDestroyed()) hitWin.destroy();
   });
 

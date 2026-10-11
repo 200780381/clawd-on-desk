@@ -79,7 +79,7 @@ describe("floating-window-runtime", () => {
     const runtime = createFloatingWindowRuntime({
       getPendingPermissions: () => [{ bubble: live }, { bubble: destroyed }, { bubble: null }],
       keepOutOfTaskbar: (win) => calls.push(["taskbar", win === live ? "live" : "other"]),
-      syncUpdateBubbleVisibility: () => calls.push(["syncUpdate"]),
+      syncUpdateBubbleVisibility: (hidden) => calls.push(["syncUpdate", hidden]),
     });
 
     runtime.showFloatingSurfacesForPet();
@@ -87,24 +87,66 @@ describe("floating-window-runtime", () => {
     assert.deepStrictEqual(calls, [
       ["show", "live"],
       ["taskbar", "live"],
-      ["syncUpdate"],
+      ["syncUpdate", false],
     ]);
   });
 
-  it("hides live permission bubbles and the update bubble when the pet is hidden", () => {
+  it("hides live permission bubbles and suspends the update bubble when the pet is hidden", () => {
     const calls = [];
     const live = makeWindow("live", calls);
     const destroyed = makeWindow("destroyed", calls, true);
     const runtime = createFloatingWindowRuntime({
       getPendingPermissions: () => [{ bubble: live }, { bubble: destroyed }, { bubble: null }],
-      hideUpdateBubble: () => calls.push(["hideUpdate"]),
+      suspendUpdateBubbleForPet: () => calls.push(["suspendUpdate"]),
     });
 
     runtime.hideFloatingSurfacesForPet();
 
     assert.deepStrictEqual(calls, [
       ["hide", "live"],
-      ["hideUpdate"],
+      ["suspendUpdate"],
+    ]);
+  });
+
+  it("delegates pet hide/show to the permission presentation owner when provided", () => {
+    const calls = [];
+    const live = makeWindow("legacy", calls);
+    const runtime = createFloatingWindowRuntime({
+      getPendingPermissions: () => [{ bubble: live }],
+      showPermissionSurfacesForPet: () => calls.push(["permission", "show"]),
+      hidePermissionSurfacesForPet: () => calls.push(["permission", "hide"]),
+      syncUpdateBubbleVisibility: (hidden) => calls.push(["syncUpdate", hidden]),
+      suspendUpdateBubbleForPet: () => calls.push(["suspendUpdate"]),
+    });
+
+    runtime.hideFloatingSurfacesForPet();
+    runtime.showFloatingSurfacesForPet();
+
+    assert.deepStrictEqual(calls, [
+      ["permission", "hide"],
+      ["suspendUpdate"],
+      ["permission", "show"],
+      ["syncUpdate", false],
+    ]);
+  });
+
+  it("coordinates fullscreen suppression without dismissing floating content", () => {
+    const calls = [];
+    const runtime = createFloatingWindowRuntime({
+      setPermissionSurfacesFullscreenSuppressed: (value) => calls.push(["permission", value]),
+      suspendUpdateBubbleForFullscreen: () => calls.push(["update", "suspend"]),
+      resumeUpdateBubbleFromFullscreen: () => calls.push(["update", "resume"]),
+      hideUpdateBubble: () => calls.push(["update", "dismiss"]),
+    });
+
+    runtime.setFullscreenSuppressedForPet(true);
+    runtime.setFullscreenSuppressedForPet(false);
+
+    assert.deepStrictEqual(calls, [
+      ["permission", true],
+      ["update", "suspend"],
+      ["permission", false],
+      ["update", "resume"],
     ]);
   });
 });

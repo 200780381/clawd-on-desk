@@ -17,11 +17,16 @@ function getBackgroundTasksCompletionDebounceMs(headless, env = process.env) {
 
 function getClaudeStopDisposition(options = {}) {
   const backgroundTasksCount = Number(options.backgroundTasksCount) || 0;
+  const backgroundSubagentsCount = Number.isSafeInteger(options.backgroundSubagentsCount)
+    && options.backgroundSubagentsCount >= 0
+    ? options.backgroundSubagentsCount
+    : 0;
   const sessionCronsCount = Number(options.sessionCronsCount) || 0;
   const stopHookActive = options.stopHookActive === true;
   const hasFinalAssistantText = options.hasFinalAssistantText === true;
   const headless = options.headless === true;
-  const hardLiveWork = sessionCronsCount > 0
+  const hardLiveWork = backgroundSubagentsCount > 0
+    || sessionCronsCount > 0
     || stopHookActive
     || (backgroundTasksCount > 0 && !hasFinalAssistantText);
   if (hardLiveWork) return { kind: "hold", debounceMs: 0 };

@@ -2,6 +2,8 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
   listIdleVisualOptions,
@@ -23,6 +25,23 @@ function makeTheme(overrides = {}) {
 }
 
 describe("listIdleVisualOptions", () => {
+  it("keeps every shipped theme's candidate list unchanged without the new field", () => {
+    const expected = {
+      calico: ["calico-idle-follow.svg", "calico-idle.apng"],
+      clawd: ["clawd-idle-follow.svg", "clawd-idle-look.svg", "clawd-idle-bubble.svg", "clawd-idle-reading.svg"],
+      cloudling: ["cloudling-idle.svg", "cloudling-idle-reading.svg"],
+      template: ["idle-follow.svg", "idle-look.gif"],
+    };
+    const themesDir = path.join(__dirname, "..", "themes");
+    assert.deepStrictEqual(fs.readdirSync(themesDir).filter((id) =>
+      fs.existsSync(path.join(themesDir, id, "theme.json"))).sort(), Object.keys(expected).sort());
+    for (const [id, files] of Object.entries(expected)) {
+      const theme = JSON.parse(fs.readFileSync(path.join(themesDir, id, "theme.json"), "utf8"));
+      assert.strictEqual(Object.hasOwn(theme, "idleVisualOptions"), false, id);
+      assert.deepStrictEqual(listIdleVisualOptions(theme).map((entry) => entry.file), files, id);
+    }
+  });
+
   it("lists the theme default first, then idle pool entries", () => {
     const options = listIdleVisualOptions(makeTheme());
     assert.deepStrictEqual(options, [
@@ -42,6 +61,21 @@ describe("listIdleVisualOptions", () => {
     assert.deepStrictEqual(options.map((o) => o.isThemeDefault), [true, false, false]);
   });
 
+  it("appends selectable-only files after idle animations and dedupes all sources", () => {
+    const theme = makeTheme({
+      states: { idle: ["a.svg", "b.svg"] },
+      idleAnimations: [{ file: "b.svg" }, { file: "c.svg" }],
+      idleVisualOptions: [{ file: "c.svg" }, { file: "pool.apng" }, { file: "a.svg" }],
+    });
+    assert.deepStrictEqual(listIdleVisualOptions(theme), [
+      { file: "a.svg", isThemeDefault: true },
+      { file: "b.svg", isThemeDefault: false },
+      { file: "c.svg", isThemeDefault: false },
+      { file: "pool.apng", isThemeDefault: false },
+    ]);
+    assert.strictEqual(resolveIdleVisualChoice(theme, { clawd: "pool.apng" }), "pool.apng");
+  });
+
   it("skips malformed entries and tolerates missing collections", () => {
     assert.deepStrictEqual(listIdleVisualOptions(null), []);
     assert.deepStrictEqual(listIdleVisualOptions({}), []);
@@ -49,6 +83,19 @@ describe("listIdleVisualOptions", () => {
       idleAnimations: [null, { file: "" }, { duration: 5 }, { file: "ok.svg" }],
     }));
     assert.deepStrictEqual(options.map((o) => o.file), ["clawd-idle-follow.svg", "ok.svg"]);
+  });
+
+  it("does not expose conditional easter eggs as persistent idle choices", () => {
+    const options = listIdleVisualOptions(makeTheme({
+      idleEasterEggs: [{
+        file: "clawd-outlaw-bender.svg",
+        duration: 15000,
+        chance: 0.05,
+        cooldownMs: 1800000,
+        requiresAccessories: { head: "cowboy-hat", mouth: "cigarette" },
+      }],
+    }));
+    assert.ok(!options.some((option) => option.file === "clawd-outlaw-bender.svg"));
   });
 });
 

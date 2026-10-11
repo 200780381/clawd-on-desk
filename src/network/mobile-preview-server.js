@@ -11,6 +11,7 @@ const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
 const WebSocket = require("ws");
+const { sessionDisplayFolder } = require("../state-session-snapshot");
 
 const PROTOCOL_VERSION = "v1";
 const DEFAULT_PORT = 23334;
@@ -42,6 +43,10 @@ const MIME = {
   ".ico": "image/x-icon",
   ".webmanifest": "application/manifest+json",
 };
+
+function isRetryablePortError(err) {
+  return !!(err && (err.code === "EADDRINUSE" || err.code === "EACCES"));
+}
 
 // ── Token persistence ──
 
@@ -99,12 +104,6 @@ function initMobilePreviewServer(ctx) {
   const tokenState = loadOrCreateTokenState(tokenPath, now, writeTokenState);
   const permissionObservation = ctx && ctx.permissionObservation;
   const log = ctx && typeof ctx.log === "function" ? ctx.log : console.log;
-  const createHttpServer = ctx && typeof ctx.createHttpServer === "function"
-    ? ctx.createHttpServer
-    : (handler) => http.createServer(handler);
-  const createWebSocketServer = ctx && typeof ctx.createWebSocketServer === "function"
-    ? ctx.createWebSocketServer
-    : (options) => new WebSocket.Server(options);
   const clients = new Set();
   const clientMeta = new Map();
   let sessionCache = new Map();
@@ -115,9 +114,7 @@ function initMobilePreviewServer(ctx) {
   let rotationTimer = null;
   let observationUnsubscribe = null;
   let startPromise = null;
-  let rejectPendingStart = null;
-  let stopPromise = null;
-  let runtimeRevision = 0;
+  let cancelPendingStart = null;
   let closed = true;
 
   function readPermissionObservationSnapshot() {
@@ -375,11 +372,42 @@ function initMobilePreviewServer(ctx) {
     });
   }
 
-  function createServers() {
-    httpServer = createHttpServer(serveStatic);
-    wss = createWebSocketServer({ server: httpServer, path: "/ws" });
+  function createHttpServer() {
+    if (ctx && typeof ctx.createHttpServer === "function") {
+      return ctx.createHttpServer(serveStatic);
+    }
+    return http.createServer(serveStatic);
+  }
 
-    wss.on("connection", (ws, req) => {
+  // Attach ws only after the HTTP server has successfully bound a port.
+  // WebSocket.Server forwards the underlying HTTP server's pre-listen
+  // EADDRINUSE as its own `error` event. When ws was attached before the port
+  // retry loop, that forwarded event had no server-level listener and crashed
+  // the process before start() could advance from 23334 to the next candidate.
+  function attachWebSocketServer(server) {
+    let socketServer;
+    if (ctx && typeof ctx.createWebSocketServer === "function") {
+      socketServer = ctx.createWebSocketServer({ server, path: "/ws" });
+    } else {
+      const WebSocketServer = ctx && ctx.WebSocketServer
+        ? ctx.WebSocketServer
+        : WebSocket.Server;
+      socketServer = new WebSocketServer({ server, path: "/ws" });
+    }
+    wss = socketServer;
+    // A post-listen server error is still surfaced by ws. Keep it observable
+    // without letting an EventEmitter `error` event terminate the desktop app.
+    socketServer.on("error", (err) => {
+      try {
+        if (ctx && typeof ctx.onWebSocketError === "function") {
+          ctx.onWebSocketError(err);
+        } else {
+          console.error("[mobile-preview] WebSocket server error:", err && err.message ? err.message : err);
+        }
+      } catch {}
+    });
+
+    socketServer.on("connection", (ws, req) => {
       if (closed) { ws.close(1001, "Server shutting down"); return; }
 
       let url;
@@ -467,26 +495,27 @@ function initMobilePreviewServer(ctx) {
         if (!meta) return;
         const nowMs = Date.now();
         if (nowMs - meta.windowStart > RATE_WINDOW_MS) { meta.messageCount = 0; meta.windowStart = nowMs; }
-      if (++meta.messageCount > RATE_MAX) { ws.close(1008, "Rate limit"); return; }
-      // Handle token_rotate_ack — purely informational, no state change
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed && parsed.type === "token_rotate_ack") {
-          meta.pendingRotationAcks = 0;
-          console.log(`[mobile-preview] token_rotate_ack from ${meta.ip}`);
-          return;
-        }
-      } catch {}
-      // M1: read-only — ignore all other client messages (rate-limit still applies above)
-    });
+        if (++meta.messageCount > RATE_MAX) { ws.close(1008, "Rate limit"); return; }
+        // Handle token_rotate_ack — purely informational, no state change
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.type === "token_rotate_ack") {
+            meta.pendingRotationAcks = 0;
+            console.log(`[mobile-preview] token_rotate_ack from ${meta.ip}`);
+            return;
+          }
+        } catch {}
+        // M1: read-only — ignore all other client messages (rate-limit still applies above)
+      });
 
-    ws.on("close", () => {
-      clients.delete(ws);
-      clientMeta.delete(ws);
-      if (clients.size === 0) stopHeartbeat();
+      ws.on("close", () => {
+        clients.delete(ws);
+        clientMeta.delete(ws);
+        if (clients.size === 0) stopHeartbeat();
+      });
+      ws.on("error", () => { clients.delete(ws); clientMeta.delete(ws); });
     });
-    ws.on("error", () => { clients.delete(ws); clientMeta.delete(ws); });
-  });
+    return socketServer;
   }
 
   function startHeartbeat() {
@@ -546,11 +575,17 @@ function initMobilePreviewServer(ctx) {
   function buildPayload(sid, session) {
     if (!session) return null;
     const recentEvents = Array.isArray(session.recentEvents) ? session.recentEvents.slice(-10) : [];
+    // Explicit empty displayFolder is a privacy decision made by the shared
+    // snapshot builder. Raw/legacy session maps do not carry the additive field,
+    // so derive the same safe display value through the shared helper.
+    const folderSource = Object.prototype.hasOwnProperty.call(session, "displayFolder")
+      ? session.displayFolder
+      : sessionDisplayFolder(sid, session);
     return {
       sessionId: sid,
       agentId: session.agentId || null,
       title: session.sessionTitle || null,
-      basename: session.cwd ? path.basename(session.cwd) : null,
+      basename: folderSource ? path.basename(String(folderSource)) : null,
       state: session.state || "idle",
       updatedAt: session.updatedAt || null,
       recentEvents,
@@ -607,89 +642,144 @@ function initMobilePreviewServer(ctx) {
   // ── Public API ──
 
   function start() {
-    if (stopPromise) return stopPromise.then(() => start());
-    if (!closed && activePort && httpServer && wss) return Promise.resolve(activePort);
+    if (Number.isInteger(activePort) && httpServer && httpServer.listening) {
+      return Promise.resolve(activePort);
+    }
     if (startPromise) return startPromise;
-    const revision = ++runtimeRevision;
+
     closed = false;
     attachPermissionObservation();
+    let server;
     try {
-      createServers();
+      server = createHttpServer();
+      httpServer = server;
     } catch (err) {
       closed = true;
       detachPermissionObservation();
-      sessionCache.clear();
-      stopHeartbeat();
-      if (rotationTimer) { clearTimeout(rotationTimer); rotationTimer = null; }
-      httpServer = null;
-      wss = null;
       return Promise.reject(err);
     }
-    const startingHttpServer = httpServer;
-    const startingWss = wss;
     const ports = [];
     for (let i = 0; i < PORT_RANGE; i++) ports.push(DEFAULT_PORT + i);
     let idx = 0;
+    let socketServer = null;
+    let settled = false;
+    let cancelThisStart = null;
 
-    startPromise = new Promise((resolve, reject) => {
-      rejectPendingStart = reject;
+    const ready = new Promise((resolve, reject) => {
+      const detachStartListeners = () => {
+        server.removeListener("error", onError);
+        server.removeListener("listening", onListening);
+      };
+      const closeAttempt = () => {
+        if (socketServer) { try { socketServer.close(); } catch {} }
+        // A cancelled listen can still surface its queued error after close().
+        // Keep that EventEmitter error observed while this discarded server is
+        // collected; it is no longer part of the active lifecycle.
+        server.on("error", () => {});
+        try { server.close(); } catch {}
+        if (wss === socketServer) wss = null;
+        if (httpServer === server) httpServer = null;
+        activePort = null;
+      };
+      const failStart = (err) => {
+        if (settled) return;
+        settled = true;
+        // Only the generation that still owns the runtime tears down shared
+        // state; a cancelled one was already torn down by cleanup().
+        const ownsRuntime = httpServer === server;
+        detachStartListeners();
+        closeAttempt();
+        closed = true;
+        if (ownsRuntime) {
+          detachPermissionObservation();
+          sessionCache.clear();
+          stopHeartbeat();
+          if (rotationTimer) { clearTimeout(rotationTimer); rotationTimer = null; }
+        }
+        reject(err);
+      };
       const onError = (err) => {
-        if (err.code === "EADDRINUSE" && idx < ports.length - 1) {
+        if (isRetryablePortError(err) && idx < ports.length - 1) {
           idx++;
-          startingHttpServer.listen(ports[idx], "0.0.0.0");
+          try {
+            server.listen(ports[idx], "0.0.0.0");
+          } catch (listenErr) {
+            failStart(listenErr);
+          }
           return;
         }
         console.error("[lan-ws] Server error:", err.message);
-        startingHttpServer.removeListener("error", onError);
-        startingHttpServer.removeListener("listening", onListening);
-        closed = true;
-        detachPermissionObservation();
-        sessionCache.clear();
-        stopHeartbeat();
-        if (rotationTimer) { clearTimeout(rotationTimer); rotationTimer = null; }
-        try { startingWss.close(); } catch {}
-        try { startingHttpServer.close(); } catch {}
-        if (wss === startingWss) wss = null;
-        if (httpServer === startingHttpServer) httpServer = null;
-        activePort = null;
-        reject(err);
+        failStart(err);
       };
       const onListening = () => {
-        if (closed || revision !== runtimeRevision) {
-          startingHttpServer.removeListener("error", onError);
-          startingHttpServer.removeListener("listening", onListening);
-          try { startingWss.close(); } catch {}
-          try { startingHttpServer.close(); } catch {}
-          reject(new Error("mobile preview start superseded"));
+        if (closed || httpServer !== server) {
+          const err = new Error("Mobile preview server start cancelled");
+          err.code = "ECANCELED";
+          failStart(err);
+          return;
+        }
+        try {
+          socketServer = attachWebSocketServer(server);
+        } catch (err) {
+          failStart(err);
           return;
         }
         activePort = ports[idx];
+        try {
+          pollSessions(); // Prime cache only after the listener is usable.
+          scheduleRotation(); // Failed starts must not mutate token state later.
+        } catch (err) {
+          failStart(err);
+          return;
+        }
+        settled = true;
         console.log(`[mobile-preview] started on 0.0.0.0:${activePort}`);
-        startingHttpServer.removeListener("error", onError);
-        startingHttpServer.removeListener("listening", onListening);
-        pollSessions(); // Prime only after the server is actually listening.
-        scheduleRotation(); // A failed start must not leave a token timer alive.
+        detachStartListeners();
+        if (cancelPendingStart === cancelThisStart) cancelPendingStart = null;
         resolve(activePort);
       };
-      startingHttpServer.on("error", onError);
-      startingHttpServer.on("listening", onListening);
+      cancelThisStart = () => {
+        const err = new Error("Mobile preview server start cancelled");
+        err.code = "ECANCELED";
+        failStart(err);
+      };
+      cancelPendingStart = cancelThisStart;
+      server.on("error", onError);
+      server.on("listening", onListening);
+      try {
+        server.listen(ports[0], "0.0.0.0");
+      } catch (err) {
+        failStart(err);
+      }
     });
 
-    startingHttpServer.listen(ports[0], "0.0.0.0");
-    startPromise = startPromise.finally(() => {
-      startPromise = null;
-      rejectPendingStart = null;
-    });
-    return startPromise;
+    let trackedPromise;
+    trackedPromise = ready.then(
+      (port) => {
+        if (startPromise === trackedPromise) startPromise = null;
+        return port;
+      },
+      (err) => {
+        if (startPromise === trackedPromise) startPromise = null;
+        // cleanup() deliberately allows a same-tick replacement start. The
+        // cancelled generation's rejection continuation must not clear the
+        // replacement generation's cancel handle.
+        if (cancelPendingStart === cancelThisStart) cancelPendingStart = null;
+        throw err;
+      },
+    );
+    startPromise = trackedPromise;
+    return trackedPromise;
   }
 
   function cleanup() {
-    if (stopPromise) return stopPromise;
     closed = true;
-    runtimeRevision++;
-    if (typeof rejectPendingStart === "function") {
-      rejectPendingStart(new Error("mobile preview start stopped"));
-    }
+    const cancel = cancelPendingStart;
+    cancelPendingStart = null;
+    if (cancel) cancel();
+    // A same-tick disable → enable transition must create a fresh listener,
+    // not inherit the cancelled promise until its rejection microtask runs.
+    startPromise = null;
     detachPermissionObservation();
     sessionCache.clear();
     stopHeartbeat();
@@ -703,6 +793,11 @@ function initMobilePreviewServer(ctx) {
     wss = null;
     httpServer = null;
     activePort = null;
+
+    // Teardown above is synchronous so a same-tick re-enable starts fresh.
+    // The returned promise additionally lets callers (the settings reconcile
+    // queue) wait until the old listener is actually gone, force-closing
+    // clients that ignore the close handshake.
     const waits = [];
     if (closingWss) {
       waits.push(new Promise((resolve) => {
@@ -724,13 +819,11 @@ function initMobilePreviewServer(ctx) {
         resolve();
       }, SHUTDOWN_FORCE_CLOSE_MS);
     });
-    stopPromise = Promise.race([Promise.all(waits), forceClose])
+    return Promise.race([Promise.all(waits), forceClose])
       .then(() => undefined)
       .finally(() => {
         if (forceCloseTimer) clearTimeout(forceCloseTimer);
-        stopPromise = null;
       });
-    return stopPromise;
   }
 
   function onSnapshot() {
@@ -752,4 +845,4 @@ function initMobilePreviewServer(ctx) {
   };
 }
 
-module.exports = { initMobilePreviewServer, PROTOCOL_VERSION };
+module.exports = { initMobilePreviewServer, isRetryablePortError, PROTOCOL_VERSION };

@@ -13,6 +13,7 @@ const { registerSettingsIpc } = require("../src/settings-ipc");
 const {
   listPetTintOptions,
   listPetAccessoryOptions,
+  listPetMouthAccessoryOptions,
 } = require("../src/pet-customization-catalog");
 const prefs = require("../src/prefs");
 const { createSettingsController } = require("../src/settings-controller");
@@ -217,11 +218,14 @@ function createHarness(overrides = {}) {
     fs: overrides.fs || fs,
     path: overrides.path || path,
     settingsController,
+    recapRuntime: overrides.recapRuntime,
     themeLoader,
     codexPetMain,
+    officialThemeMain: overrides.officialThemeMain,
     getSettingsWindow: () => settingsWindow,
     getActiveTheme: () => activeTheme,
     getLang: overrides.getLang || (() => "en"),
+    getSizeContext: overrides.getSizeContext,
     roamFenceSettings,
     roamFencePicker,
     settingsSizePreviewSession,
@@ -236,6 +240,11 @@ function createHarness(overrides = {}) {
     getQuotaSourceCount: overrides.getQuotaSourceCount,
     kimiQuotaRuntime: overrides.kimiQuotaRuntime,
     detectAgentInstallations: overrides.detectAgentInstallations,
+    readDshNotices: overrides.readDshNotices,
+    acknowledgeDshNotice: overrides.acknowledgeDshNotice,
+    platform: overrides.platform,
+    refreshDshDesktopDiscovery: overrides.refreshDshDesktopDiscovery,
+    refreshWslDetection: overrides.refreshWslDetection,
     checkForUpdates: overrides.checkForUpdates || ((manual) => {
       calls.push(["checkForUpdates", manual]);
       return { state: "up-to-date", version: "1.2.3" };
@@ -260,6 +269,12 @@ function createHarness(overrides = {}) {
   });
   return { ipcMain, runtime, calls, activeTheme, settingsWindow };
 }
+
+test("settings IPC returns the current pet size slider context", async () => {
+  const expected = { ui: 70, overMax: false, synced: false };
+  const { ipcMain } = createHarness({ getSizeContext: () => expected });
+  assert.deepStrictEqual(await ipcMain.invoke("settings:get-size-context"), expected);
+});
 
 test("Kimi quota IPC is trusted-window-only and bypasses generic settings commands", async () => {
   const runtimeCalls = [];
@@ -310,9 +325,12 @@ test("settings IPC registers owned channels and leaves animation override channe
   const { ipcMain, runtime } = createHarness();
 
   assert.ok(ipcMain.handlers.has("settings:get-snapshot"));
+  assert.ok(ipcMain.handlers.has("settings:recap-query"));
+  assert.ok(ipcMain.handlers.has("settings:recap-clear"));
   assert.ok(ipcMain.handlers.has("settings:get-quota-source-count"));
   assert.ok(ipcMain.handlers.has("settings:get-pet-tint-options"));
   assert.ok(ipcMain.handlers.has("settings:get-pet-accessory-options"));
+  assert.ok(ipcMain.handlers.has("settings:get-pet-mouth-accessory-options"));
   assert.ok(ipcMain.handlers.has("settings:get-roam-fence"));
   assert.ok(ipcMain.handlers.has("settings:select-roam-fence"));
   assert.ok(ipcMain.handlers.has("settings:clear-roam-fence"));
@@ -339,6 +357,44 @@ test("settings IPC registers owned channels and leaves animation override channe
 
   assert.strictEqual(ipcMain.handlers.size, 0);
   assert.strictEqual(ipcMain.listeners.size, 0);
+});
+
+test("recap IPC exposes only bounded queries and explicit clear to the trusted Settings window", async () => {
+  const calls = [];
+  const harness = createHarness({
+    recapRuntime: {
+      query(period) {
+        calls.push(["query", period]);
+        return { status: "ready", period, days: [] };
+      },
+      clear() {
+        calls.push(["clear"]);
+        return true;
+      },
+    },
+  });
+  assert.deepStrictEqual(await harness.ipcMain.invoke("settings:recap-query", "year"), {
+    status: "ready",
+    period: "year",
+    days: [],
+  });
+  assert.deepStrictEqual(await harness.ipcMain.invoke("settings:recap-query", "arbitrary"), {
+    status: "error",
+    reason: "invalid-period",
+  });
+  assert.deepStrictEqual(await harness.ipcMain.invoke("settings:recap-clear"), { status: "ok" });
+  assert.deepStrictEqual(calls, [["query", "year"], ["clear"]]);
+
+  harness.ipcMain.invokeEvent = { sender: {}, senderFrame: null };
+  assert.deepStrictEqual(await harness.ipcMain.invoke("settings:recap-query", "today"), {
+    status: "error",
+    message: "untrusted settings sender",
+  });
+  assert.deepStrictEqual(await harness.ipcMain.invoke("settings:recap-clear"), {
+    status: "error",
+    message: "untrusted settings sender",
+  });
+  assert.equal(calls.length, 2);
 });
 
 test("settings IPC reads, selects, and clears the shared roam fence", async () => {
@@ -750,6 +806,10 @@ test("settings IPC delegates controller and size preview handlers", async () => 
     listPetAccessoryOptions()
   );
   assert.deepStrictEqual(
+    await ipcMain.invoke("settings:get-pet-mouth-accessory-options"),
+    listPetMouthAccessoryOptions()
+  );
+  assert.deepStrictEqual(
     await ipcMain.invoke("settings:update", null),
     { status: "error", message: "settings:update payload must be { key, value }" }
   );
@@ -1047,6 +1107,124 @@ test("settings IPC imports Clawd user theme zip packages", async () => {
   }
 });
 
+test("settings IPC rejects user theme zips carrying the reserved official ownership marker before extraction", async () => {
+  for (const markerPath of [
+    "pixel-cat/.clawd-official-theme.json",
+    "pixel-cat/nested/.CLAWD-OFFICIAL-THEME.JSON",
+    "pixel-cat\\nested\\.clawd-official-theme.json",
+    "pixel-cat/.clawd-official-theme.json.",
+    "pixel-cat/nested/.clawd-official-theme.json ",
+    "pixel-cat/.clawd-official-theme.json::$DATA",
+  ]) {
+    const root = makeTempDir();
+    try {
+      const userThemesDir = path.join(root, "user-themes");
+      const zipPath = path.join(root, "pixel-cat.zip");
+      const themeJson = {
+        schemaVersion: 1,
+        name: "Pixel Cat",
+        version: "1.0.0",
+        sleepSequence: { mode: "direct" },
+        viewBox: { x: 0, y: 0, width: 16, height: 16 },
+        states: {
+          idle: ["idle.svg"],
+          working: ["working.gif"],
+          thinking: ["thinking.png"],
+          sleeping: { fallbackTo: "idle" },
+        },
+      };
+      fs.writeFileSync(zipPath, makeZip([
+        { name: "pixel-cat/theme.json", data: JSON.stringify(themeJson), method: 8 },
+        { name: "pixel-cat/assets/idle.svg", data: "<svg></svg>", method: 8 },
+        { name: "pixel-cat/assets/working.gif", data: "gif", method: 8 },
+        { name: "pixel-cat/assets/thinking.png", data: "png", method: 8 },
+        { name: markerPath, data: JSON.stringify({ managedBy: "clawd" }), method: 8 },
+      ]));
+
+      const { ipcMain } = createHarness({
+        dialog: {
+          showOpenDialog: async () => ({ canceled: false, filePaths: [zipPath] }),
+          showMessageBox: async () => ({ response: 1 }),
+        },
+        themeLoader: {
+          getPreviewSoundUrl: () => null,
+          getSoundOverridesDir: () => null,
+          getSoundUrl: () => null,
+          listThemesWithMetadata: () => [],
+          getThemeMetadata: () => null,
+          ensureUserThemesDir: () => userThemesDir,
+        },
+      });
+
+      const result = await ipcMain.invoke("settings:import-user-theme-zip");
+      assert.strictEqual(result.status, "error");
+      assert.match(result.message, /official theme ownership marker/i);
+      assert.strictEqual(fs.existsSync(path.join(userThemesDir, "pixel-cat")), false);
+      assert.deepStrictEqual(fs.existsSync(userThemesDir) ? fs.readdirSync(userThemesDir) : [], []);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("settings IPC rejects Windows DOS device names in user theme zip paths", async () => {
+  for (const devicePath of [
+    "pixel-cat/CON",
+    "pixel-cat/assets/LPT1.txt",
+    "pixel-cat/assets/conout$.log",
+    "pixel-cat/assets/COM¹.svg",
+    "pixel-cat/assets/CON .txt",
+  ]) {
+    const root = makeTempDir();
+    try {
+      const userThemesDir = path.join(root, "user-themes");
+      const zipPath = path.join(root, "pixel-cat.zip");
+      const themeJson = {
+        schemaVersion: 1,
+        name: "Pixel Cat",
+        version: "1.0.0",
+        sleepSequence: { mode: "direct" },
+        viewBox: { x: 0, y: 0, width: 16, height: 16 },
+        states: {
+          idle: ["idle.svg"],
+          working: ["working.gif"],
+          thinking: ["thinking.png"],
+          sleeping: { fallbackTo: "idle" },
+        },
+      };
+      fs.writeFileSync(zipPath, makeZip([
+        { name: "pixel-cat/theme.json", data: JSON.stringify(themeJson), method: 8 },
+        { name: "pixel-cat/assets/idle.svg", data: "<svg></svg>", method: 8 },
+        { name: "pixel-cat/assets/working.gif", data: "gif", method: 8 },
+        { name: "pixel-cat/assets/thinking.png", data: "png", method: 8 },
+        { name: devicePath, data: "device", method: 8 },
+      ]));
+
+      const { ipcMain } = createHarness({
+        dialog: {
+          showOpenDialog: async () => ({ canceled: false, filePaths: [zipPath] }),
+          showMessageBox: async () => ({ response: 1 }),
+        },
+        themeLoader: {
+          getPreviewSoundUrl: () => null,
+          getSoundOverridesDir: () => null,
+          getSoundUrl: () => null,
+          listThemesWithMetadata: () => [],
+          getThemeMetadata: () => null,
+          ensureUserThemesDir: () => userThemesDir,
+        },
+      });
+
+      const result = await ipcMain.invoke("settings:import-user-theme-zip");
+      assert.strictEqual(result.status, "error");
+      assert.match(result.message, /Windows device name/i);
+      assert.deepStrictEqual(fs.existsSync(userThemesDir) ? fs.readdirSync(userThemesDir) : [], []);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("settings IPC copies sound overrides, removes stale siblings, and invalidates renderer cache", async () => {
   const root = makeTempDir();
   try {
@@ -1168,6 +1346,8 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
       },
       getAllAgents: () => [
         { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
+        { id: "claude-code", name: "Claude Code", eventSource: "hook", capabilities: {} },
+        { id: "qwen-code", name: "Qwen Code", eventSource: "hook", capabilities: {} },
       ],
       getHookServerPort: () => 23335,
       getRecentHookEvents: ({ agentId }) => [{
@@ -1196,7 +1376,32 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
 
     assert.strictEqual(await ipcMain.invoke("settings:get-preview-sound-url"), "file:///preview.mp3");
     assert.deepStrictEqual(await ipcMain.invoke("settings:list-agents"), [
-      { id: "codex", name: "Codex", eventSource: "hook", capabilities: { permission: true } },
+      // #895: cleanupSuggestionExempt is derived from prefs' complete default-
+      // integration list. Both defaults must ship true, while a non-default
+      // agent must ship an explicit false before the renderer may propose
+      // removing its hooks. This three-way contract kills all-true, all-false,
+      // and Codex-only producer mutations.
+      {
+        id: "codex",
+        name: "Codex",
+        eventSource: "hook",
+        capabilities: { permission: true },
+        cleanupSuggestionExempt: true,
+      },
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        eventSource: "hook",
+        capabilities: {},
+        cleanupSuggestionExempt: true,
+      },
+      {
+        id: "qwen-code",
+        name: "Qwen Code",
+        eventSource: "hook",
+        capabilities: {},
+        cleanupSuggestionExempt: false,
+      },
       {
         id: "custom-nova-ai-0123456789ab",
         name: "Nova AI",
@@ -1298,7 +1503,7 @@ test("settings IPC exposes read-only agent installation detection", async () => 
       return {
         checkedAt: options.now(),
         agents: [{ agentId: "qwen-code", detectedInstalled: true }],
-        skippedAgentIds: ["claude-code", "codex"],
+        skippedAgentIds: ["claude-code"],
       };
     },
   });
@@ -1306,10 +1511,261 @@ test("settings IPC exposes read-only agent installation detection", async () => 
   assert.deepStrictEqual(await ipcMain.invoke("settings:detect-agent-installations"), {
     checkedAt: 777,
     agents: [{ agentId: "qwen-code", detectedInstalled: true }],
-    skippedAgentIds: ["claude-code", "codex"],
+    skippedAgentIds: ["claude-code"],
   });
   assert.strictEqual(sawFs, true);
   assert.strictEqual(sawPath, true);
 
   runtime.dispose();
+});
+
+// #895 T11d: asserted through the real detector against a throwaway home, so it
+// pins the behaviour the Settings page depends on rather than which option keys
+// happen to be passed. Codex must reach the Agents tab; Claude must not, because
+// Clawd's own sync creates ~/.claude and its presence proves nothing. Settings
+// previously withheld both, and the catalog then labelled the ones it had never
+// examined as "not detected locally".
+test("settings IPC scan examines Codex locally and still withholds Claude", async () => {
+  const { detectAgentInstallations: realDetect } = require("../src/agent-installation-detector");
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-ipc-detect-"));
+  fs.mkdirSync(path.join(homeDir, ".codex"));
+  const { ipcMain, runtime } = createHarness({
+    detectAgentInstallations: (options) => realDetect({ ...options, homeDir, platform: "darwin", env: {} }),
+  });
+
+  try {
+    const report = await ipcMain.invoke("settings:detect-agent-installations");
+    const ids = report.agents.map((entry) => entry.agentId);
+
+    assert.ok(ids.includes("codex"), "Codex must be examined by the Settings scan");
+    assert.ok(!ids.includes("claude-code"), "Claude stays withheld");
+    assert.deepStrictEqual(report.skippedAgentIds, ["claude-code"]);
+
+    const codex = report.agents.find((entry) => entry.agentId === "codex");
+    assert.strictEqual(codex.detectedInstalled, true);
+    assert.strictEqual(codex.reason, "parent-dir");
+  } finally {
+    runtime.dispose();
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("the Agents scan preheats DSH desktop discovery only with refreshWsl on Windows", async () => {
+  const calls = [];
+  const harness = createHarness({
+    platform: "win32",
+    refreshWslDetection: async () => { calls.push("wsl"); },
+    refreshDshDesktopDiscovery: async () => { calls.push("dsh"); },
+    detectAgentInstallations: () => ({ checkedAt: 1, agents: [], skippedAgentIds: [] }),
+  });
+
+  await harness.ipcMain.invoke("settings:detect-agent-installations", { refreshWsl: true });
+  assert.deepStrictEqual(calls, ["wsl", "dsh"]);
+
+  calls.length = 0;
+  await harness.ipcMain.invoke("settings:detect-agent-installations", {});
+  assert.deepStrictEqual(calls, []);
+
+  harness.runtime.dispose();
+});
+
+test("DSH notices IPC returns only unacknowledged render fields in priority order", async () => {
+  const harness = createHarness({
+    readDshNotices: async () => ({
+      web: [
+        { id: "w-first", profile: "web", kind: "first-install", payload: {}, acknowledged: false },
+        { id: "w-manual", profile: "web", kind: "manual-command", payload: { commands: ["a", "b"] }, acknowledged: false },
+        {
+          id: "w-fail",
+          profile: "web",
+          kind: "failed-target",
+          payload: { operation: "install", reason: "r", message: "m", residuePath: "/private/x", lockPath: "/private/y" },
+          acknowledged: false,
+        },
+        { id: "w-ack", profile: "web", kind: "failed-target", payload: { operation: "install", reason: "done" }, acknowledged: true },
+      ],
+      desktop: [
+        { id: "d-restart", profile: "desktop", kind: "restart-required", payload: {}, acknowledged: false },
+        { id: "d-fail", profile: "desktop", kind: "failed-target", payload: { operation: "uninstall", reason: "r2", message: "m2" }, acknowledged: false },
+      ],
+    }),
+  });
+
+  const result = await harness.ipcMain.invoke("settings:dsh-notices");
+
+  assert.deepStrictEqual(result.notices.map((entry) => entry.id), [
+    "d-restart",
+    "w-fail",
+    "d-fail",
+    "w-manual",
+    "w-first",
+  ]);
+  assert.deepStrictEqual(result.notices.find((entry) => entry.id === "w-manual"), {
+    id: "w-manual",
+    profile: "web",
+    kind: "manual-command",
+    commands: ["a", "b"],
+  });
+  assert.deepStrictEqual(result.notices.find((entry) => entry.id === "w-fail"), {
+    id: "w-fail",
+    profile: "web",
+    kind: "failed-target",
+    operation: "install",
+    reason: "r",
+    message: "m",
+  });
+  harness.runtime.dispose();
+});
+
+test("DSH notices IPC keeps the other profile when one file is unreadable", async () => {
+  const warned = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => { warned.push(args.map(String).join(" ")); };
+  try {
+    const harness = createHarness({
+      readDshNotices: async () => ({
+        web: [{ id: "w", profile: "web", kind: "first-install", payload: {}, acknowledged: false }],
+        desktop: [],
+        errors: { web: null, desktop: "notices-invalid:/private/notices-desktop.json" },
+      }),
+    });
+    const result = await harness.ipcMain.invoke("settings:dsh-notices");
+    assert.deepStrictEqual(result.notices.map((entry) => entry.id), ["w"]);
+    assert.ok(warned.some((line) => line.includes("desktop")), "main process should warn about the broken profile");
+    harness.runtime.dispose();
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("DSH notice acknowledge validates its input before calling through", async () => {
+  const calls = [];
+  const harness = createHarness({
+    acknowledgeDshNotice: async (options, { profile, id }) => {
+      calls.push({ options, profile, id });
+      return { found: true };
+    },
+  });
+
+  assert.strictEqual((await harness.ipcMain.invoke("settings:dsh-notice-ack", { profile: "nope", id: "x" })).status, "error");
+  assert.strictEqual((await harness.ipcMain.invoke("settings:dsh-notice-ack", { profile: "web", id: "" })).status, "error");
+  assert.strictEqual((await harness.ipcMain.invoke("settings:dsh-notice-ack", { profile: "web", id: "x".repeat(201) })).status, "error");
+  assert.strictEqual((await harness.ipcMain.invoke("settings:dsh-notice-ack", { profile: "web", id: 5 })).status, "error");
+  assert.strictEqual(calls.length, 0, "invalid input must not reach the acknowledge call");
+
+  const ok = await harness.ipcMain.invoke("settings:dsh-notice-ack", { profile: "desktop", id: "abc" });
+  assert.deepStrictEqual(ok, { status: "ok", found: true });
+  assert.deepStrictEqual(calls, [{ options: {}, profile: "desktop", id: "abc" }]);
+  harness.runtime.dispose();
+});
+
+test("official theme IPC is owner-gated and never reachable through settings:command", async () => {
+  const calls = [];
+  const officialThemeMain = {
+    refreshCatalog: async () => { calls.push(["refreshCatalog"]); return "ok"; },
+    listOfficialThemes: async (options) => {
+      calls.push(["listOfficialThemes", options]);
+      return { status: "ok", catalogStatus: "ok", catalogVersion: 1, themes: [{ id: "hash-sage" }] };
+    },
+    installTheme: async (themeId) => { calls.push(["install", themeId]); return { status: "ok" }; },
+    cancelInstall: () => { calls.push(["cancel"]); return { status: "ok", cancelled: true }; },
+    decorateThemeMetadata: (theme) => ({ ...theme, officialTheme: true }),
+    isManagedTheme: () => false,
+  };
+  const harness = createHarness({ officialThemeMain });
+
+  const listing = await harness.ipcMain.invoke("settings:list-official-themes");
+  assert.strictEqual(listing.status, "ok");
+  assert.deepStrictEqual(calls[0], ["refreshCatalog"]);
+  // refreshCatalog already ran, so the list must not trigger a second fetch.
+  assert.deepStrictEqual(
+    calls.find((call) => call[0] === "listOfficialThemes")[1],
+    { catalogReady: true },
+  );
+
+  assert.deepStrictEqual(await harness.ipcMain.invoke("settings:install-official-theme", "hash-sage"), { status: "ok" });
+  assert.deepStrictEqual(calls.find((c) => c[0] === "install"), ["install", "hash-sage"]);
+  assert.strictEqual((await harness.ipcMain.invoke("settings:install-official-theme", "../evil")).status, "error");
+  await harness.ipcMain.invoke("settings:cancel-official-theme-install");
+  assert.ok(calls.some((c) => c[0] === "cancel"));
+  await harness.ipcMain.invoke("settings:uninstall-official-theme", "hash-sage");
+  assert.ok(harness.calls.some((c) => c[0] === "applyCommand"));
+
+  const internal = await harness.ipcMain.invoke("settings:command", { action: "officialTheme.uninstall", payload: { themeId: "hash-sage" } });
+  assert.strictEqual(internal.status, "error");
+  assert.match(internal.message, /internal/);
+  const internalCommit = await harness.ipcMain.invoke("settings:command", { action: "officialTheme.commitInstall", payload: {} });
+  assert.strictEqual(internalCommit.status, "error");
+
+  // An untrusted sender must not reach the download manager through ANY
+  // dedicated official-theme handler.
+  const trustedEvent = harness.ipcMain.invokeEvent;
+  const callsBefore = calls.length;
+  const harnessCallsBefore = harness.calls.length;
+  harness.ipcMain.invokeEvent = { sender: "someone-else", senderFrame: null };
+  try {
+    const channels = [
+      ["settings:list-official-themes"],
+      ["settings:install-official-theme", "hash-sage"],
+      ["settings:cancel-official-theme-install"],
+      ["settings:uninstall-official-theme", "hash-sage"],
+      ["settings:confirm-uninstall-official-theme", "hash-sage"],
+    ];
+    for (const [channel, arg] of channels) {
+      const rejected = arg === undefined
+        ? await harness.ipcMain.invoke(channel)
+        : await harness.ipcMain.invoke(channel, arg);
+      assert.strictEqual(rejected.status, "error", `${channel} should reject`);
+      assert.match(rejected.message, /untrusted/, `${channel} message`);
+    }
+    // The manager/controller must not have been touched by the untrusted calls.
+    assert.strictEqual(calls.length, callsBefore);
+    assert.strictEqual(harness.calls.length, harnessCallsBefore);
+  } finally {
+    harness.ipcMain.invokeEvent = trustedEvent;
+  }
+});
+
+test("official theme uninstall reports unpacked space and labels archive-only fallback as download size", async () => {
+  const dialogs = [];
+  let card = {
+    id: "hash-sage",
+    officialThemeName: "Hash Sage",
+    officialThemeBytes: 2 * 1024 * 1024,
+    officialThemeUnpackedBytes: 9 * 1024 * 1024,
+  };
+  const harness = createHarness({
+    getLang: () => "en",
+    officialThemeMain: {
+      listOfficialThemes: async () => ({ themes: [card] }),
+    },
+    dialog: {
+      showOpenDialog: async () => ({ canceled: true }),
+      showMessageBox: async (_parent, options) => {
+        dialogs.push(options);
+        return { response: 1 };
+      },
+    },
+  });
+
+  await harness.ipcMain.invoke("settings:confirm-uninstall-official-theme", "hash-sage");
+  assert.match(dialogs[0].detail, /frees about 9 MB/);
+  assert.doesNotMatch(dialogs[0].detail, /2 MB/);
+
+  card = { ...card, officialThemeUnpackedBytes: null };
+  await harness.ipcMain.invoke("settings:confirm-uninstall-official-theme", "hash-sage");
+  assert.match(dialogs[1].detail, /download package is about 2 MB/i);
+  assert.match(dialogs[1].detail, /installed theme may use more disk space/i);
+  assert.doesNotMatch(dialogs[1].detail, /frees about 2 MB/i);
+
+  card = {
+    ...card,
+    officialThemeBytes: null,
+    officialThemeUnpackedBytes: null,
+  };
+  await harness.ipcMain.invoke("settings:confirm-uninstall-official-theme", "hash-sage");
+  assert.match(dialogs[2].detail, /installed size is unavailable/i);
+  assert.doesNotMatch(dialogs[2].detail, /\?\s*MB|frees about/i);
+
+  harness.runtime.dispose();
 });

@@ -6,7 +6,7 @@
 
 const { postStateToRunningServer, readHostPrefix, applyWslSourceFields } = require("./server-config");
 const { createPidResolver, readStdinJson, getPlatformConfig, applyOrcaPaneKey } = require("./shared-process");
-const { processNames: kimiProcessNames } = require("../agents/kimi-cli");
+const { KIMI_PROCESS_NAMES: kimiProcessNames, isKimiAgentCommandLine } = require("./kimi-process-names");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -394,6 +394,7 @@ const EVENT_TO_LIFECYCLE = {
 function buildStateBody(event, payload, resolve) {
   const state = EVENT_TO_STATE[event];
   if (!state) return null;
+  const originalEvent = event;
 
   // Kimi currently emits string session_ids; we still coerce defensively so a
   // future payload shape drift (e.g. numeric ids) doesn't throw from
@@ -421,6 +422,14 @@ function buildStateBody(event, payload, resolve) {
 
   const body = { state: resolvedState, session_id: sessionId, event };
   body.agent_id = "kimi-cli";
+  // Legacy Kimi may rewrite a real PreToolUse into PermissionRequest for its
+  // passive approval cue. Preserve the closed recap boundary and the verified
+  // per-call id without teaching the main process about Kimi's raw payload.
+  if (originalEvent === "PreToolUse") {
+    const toolCallId = readToolCallId(payload);
+    if (toolCallId) body.tool_use_id = toolCallId;
+    if (classification === "immediate") body.recap_boundary = "tool-call";
+  }
   if (permissionSuspect) body.permission_suspect = true;
   if (cwd) body.cwd = cwd;
 
@@ -529,6 +538,22 @@ function buildStateBody(event, payload, resolve) {
   return body;
 }
 
+// How the pid resolver recognizes the Kimi process: the names from
+// kimi-process-names.js, plus the package-directory check for a node-named
+// process. Exported so the wiring is checked on every platform, not only where
+// the real-process tests can run.
+function buildResolverOptions(platformConfig) {
+  return {
+    agentNames: {
+      mac: new Set(kimiProcessNames.mac || []),
+      linux: new Set(kimiProcessNames.linux || []),
+      win: new Set(kimiProcessNames.win || []),
+    },
+    agentCmdlineCheck: isKimiAgentCommandLine,
+    platformConfig,
+  };
+}
+
 function main() {
   const parsedArgv = parseHookArgv(process.argv.slice(2));
   if (parsedArgv.mode) setArgvPermissionMode(parsedArgv.mode);
@@ -537,17 +562,7 @@ function main() {
   }
   const eventFromArgv = parsedArgv.event;
 
-  const config = getPlatformConfig();
-  const agentNames = {
-    mac: new Set(kimiProcessNames.mac || []),
-    linux: new Set(kimiProcessNames.linux || []),
-    win: new Set(kimiProcessNames.win || []),
-  };
-  const resolve = createPidResolver({
-    agentNames,
-    agentCmdlineCheck: (cmd) => cmd.includes("kimi") || cmd.includes("kimi-cli"),
-    platformConfig: config,
-  });
+  const resolve = createPidResolver(buildResolverOptions(getPlatformConfig()));
 
   readStdinJson().then((payload) => {
     // Kimi CLI passes event via stdin JSON (not argv), so resolve it here.
@@ -583,6 +598,7 @@ function main() {
 if (require.main === module) main();
 module.exports = {
   buildStateBody,
+  buildResolverOptions,
   extractPermissionToolInput,
   readToolCallId,
   isGatedPostEvent,

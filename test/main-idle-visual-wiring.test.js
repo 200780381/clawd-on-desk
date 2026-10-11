@@ -26,12 +26,20 @@ describe("main default idle visual wiring", () => {
     const tickCtx = sectionBetween(mainSource, "const _tickCtx = {", 'const _tick = require("./tick")');
     assert.ok(stateCtx.includes("  getIdleVisualChoice,"), "state ctx should expose the live choice");
     assert.ok(tickCtx.includes("  getIdleVisualChoice,"), "tick ctx should expose the live choice");
+    assert.ok(
+      tickCtx.includes("getEffectiveAccessoryIds: getEffectivePetAccessoryIds"),
+      "tick ctx should read canonical effective slots for conditional easter eggs"
+    );
+    assert.ok(
+      mainSource.includes("getPetAccessorySlotsSnapshot(activeTheme)"),
+      "conditional easter eggs should prefer the committed slot snapshot"
+    );
   });
 
   it("stamps pre-IPC visual choices on both renderer theme-config delivery paths", () => {
     const rendererConfig = sectionBetween(
       mainSource,
-      "function buildRendererThemeConfig()",
+      "function buildRendererThemeConfig(",
       "const _stateCtx = {"
     );
     assert.ok(rendererConfig.includes("cfg.idleDefaultVisual = getIdleVisualChoice();"));
@@ -39,33 +47,56 @@ describe("main default idle visual wiring", () => {
       mainSource,
       /cfg\.petTintPayload = resolvePetTintPayload\(tintId, activeTheme\);/
     );
-    assert.match(
-      mainSource,
-      /cfg\.accessoryPayload = resolvePetAccessoryPayload\(accessoryId, activeTheme\);/
-    );
+    assert.ok(!rendererConfig.includes("buildPetAccessorySlotsCandidate("));
+    assert.ok(rendererConfig.includes("const canonical = accessorySnapshot || getPetAccessorySlotsSnapshot(activeTheme);"));
+    assert.ok(rendererConfig.includes("cfg.accessorySlots = {"));
+    assert.ok(rendererConfig.includes("payload: canonical.payloads.head,"));
+    assert.ok(rendererConfig.includes("payload: canonical.payloads.mouth,"));
     assert.ok(mainSource.includes(
-      'sendToRenderer("pet-accessory-change", resolvePetAccessoryPayload(accessoryId, activeTheme));'
+      'sendToRenderer("pet-accessory-slots-change", candidate)'
     ));
     assert.ok(
-      mainSource.includes("themeConfig: buildRendererThemeConfig(),"),
+      mainSource.includes("themeConfig: buildRendererThemeConfig(initialAccessoryDelivery.snapshot),"),
       "createRenderWindow should carry the stamped config"
     );
     assert.ok(
-      mainSource.includes('sendToRenderer("theme-config", buildRendererThemeConfig());'),
+      mainSource.includes("deliverRendererThemeConfig();"),
       "did-finish-load re-send should carry the stamped config"
     );
+    assert.ok(mainSource.includes("finalizePetAccessorySlotsDelivery(initialAccessoryDelivery, true);"));
+    assert.ok(mainSource.includes("finalizePetAccessorySlotsDelivery(delivery, delivered)"));
     assert.ok(
       !mainSource.includes("themeConfig: themeRuntime.getRendererConfig()"),
       "an un-stamped renderer config must not reach the render window"
     );
     assert.ok(mainSource.includes("getEffectivePetAccessoryIdForTheme({"));
-    assert.ok(mainSource.includes('_settingsController.get("holidayAccessoryEnabled")'));
+    assert.ok(mainSource.includes("holidayAccessoryEnabled: snapshot.holidayAccessoryEnabled"));
   });
 
   it("starts and disposes the holiday accessory runtime with the app lifecycle", () => {
     assert.ok(mainSource.includes("const holidayAccessoryRuntime = createHolidayAccessoryRuntime({"));
     assert.ok(mainSource.includes("holidayAccessoryRuntime.start();"));
     assert.ok(mainSource.includes("holidayAccessoryRuntime.dispose();"));
+  });
+
+  it("wires hit-renderer mirror changes back into accessory geometry", () => {
+    const registration = sectionBetween(
+      mainSource,
+      "registerPetInteractionIpc({",
+      "registerPermissionIpc({"
+    );
+    assert.ok(registration.includes("setAccessoryMirror: setAccessoryMirrored,"));
+    assert.ok(registration.includes("refreshIdleVisualAfterDrag,"));
+  });
+
+  it("accepts visual settlement only from the live renderer main frame", () => {
+    const registration = sectionBetween(
+      mainSource,
+      "settleVisual: (event, payload) => {",
+      "recoverVisiblePetAfterRendererLoad:"
+    );
+    assert.ok(registration.includes("isTrustedMainFrameEvent(event, win.webContents)"));
+    assert.ok(registration.includes("displayedVisualProjection.settle(payload)"));
   });
 
   it("re-rests the pet through the effect-router hook only while idle", () => {

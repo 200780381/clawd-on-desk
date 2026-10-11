@@ -32,6 +32,9 @@ function harness(options = {}) {
   let clears = 0;
   let nextId = credential && credential.credentialId === ID_A ? ID_B : ID_A;
   const credentialStore = {
+    inspectMetadata: () => credential
+      ? { configured: true, credentialId: credential.credentialId }
+      : { configured: false },
     inspect: () => credential
       ? { configured: true, decryptable: true, credentialId: credential.credentialId }
       : { configured: false, decryptable: false },
@@ -122,6 +125,37 @@ test("startup clears persisted quota when credentialId does not match", async ()
   assert.equal(h.clears, 1);
   assert.equal(h.binding.lastQuotaCredentialId, null);
   assert.equal(h.commits.length, 0);
+});
+
+test("startup reconciles by opaque credential identity without decrypting the key", async () => {
+  let decryptInspections = 0;
+  let binding = { version: 1, lastQuotaCredentialId: ID_A, lastQuotaCapturedAt: 100 };
+  const runtime = createKimiQuotaRuntime({
+    credentialStore: {
+      inspectMetadata: () => ({ configured: true, credentialId: ID_A }),
+      inspect: () => {
+        decryptInspections += 1;
+        return { configured: true, decryptable: true, credentialId: ID_A };
+      },
+    },
+    bindingStore: {
+      read: () => ({ ...binding }),
+      write: (value) => { binding = { ...value }; return binding; },
+    },
+    client: { fetchUsage: async () => response() },
+    getSettingsSnapshot: () => ({
+      kimiQuotaCollectionEnabled: true,
+      agents: { "kimi-cli": { enabled: true } },
+    }),
+    setCollectionEnabled: async () => ({ status: "ok" }),
+    commitLocalKimiQuota: () => ({ accepted: true, persisted: true }),
+    clearLocalKimiQuota: () => ({ cleared: true, persisted: true }),
+  });
+
+  const result = await runtime.initialize();
+  assert.deepEqual(result, { status: "ok", initialized: true });
+  assert.equal(decryptInspections, 0);
+  assert.equal(binding.lastQuotaCredentialId, ID_A);
 });
 
 test("response commit rechecks the canonical enabled gate", async () => {

@@ -8,6 +8,8 @@ const vm = require("node:vm");
 
 const RENDERER = path.join(__dirname, "..", "src", "renderer.js");
 const ACCESSORY_LAYOUT = path.join(__dirname, "..", "src", "pet-accessory-layout.js");
+const ACCESSORY_MIRROR = path.join(__dirname, "..", "src", "pet-accessory-mirror.js");
+const ACCESSORY_DESCRIPTOR = path.join(__dirname, "..", "src", "pet-accessory-descriptor.js");
 const PRELOAD = path.join(__dirname, "..", "src", "preload.js");
 const MAIN = path.join(__dirname, "..", "src", "main.js");
 
@@ -40,6 +42,7 @@ function loadPreloadWithElectron() {
     : null;
 
   const ipcListeners = new Map();
+  const sentToMain = [];
   const exposed = {};
 
   require.cache[electronPath] = {
@@ -52,6 +55,7 @@ function loadPreloadWithElectron() {
       },
       ipcRenderer: {
         on: (event, handler) => { ipcListeners.set(event, handler); },
+        send: (channel, ...args) => { sentToMain.push({ channel, args }); },
       },
     },
   };
@@ -60,6 +64,7 @@ function loadPreloadWithElectron() {
 
   return {
     electronAPI: exposed.electronAPI,
+    sentToMain,
     // Simulates main.js's ipcRenderer send arriving at whatever handler
     // preload.js registered for `event` via ipcRenderer.on(event, ...).
     emitFromMain: (event, ...args) => {
@@ -210,6 +215,11 @@ function createRendererHarness(options = {}) {
   const accessory = new FakeElement("img");
   accessory.id = "clawd-accessory";
   accessory.className = "clawd-accessory";
+  const mouthAccessoryLayer = new FakeElement("div");
+  mouthAccessoryLayer.id = "pet-mouth-accessory-layer";
+  const mouthAccessory = new FakeElement("object");
+  mouthAccessory.id = "clawd-mouth-accessory";
+  mouthAccessory.className = "clawd-accessory";
   const effectStage = new FakeElement("div");
   effectStage.id = "pet-effect-stage";
   const particleLayer = new FakeElement("div");
@@ -234,8 +244,10 @@ function createRendererHarness(options = {}) {
   motionStage.appendChild(assetDirectionStage);
   assetDirectionStage.appendChild(mediaLayer);
   assetDirectionStage.appendChild(accessoryLayer);
+  assetDirectionStage.appendChild(mouthAccessoryLayer);
   mediaLayer.appendChild(clawd);
   accessoryLayer.appendChild(accessory);
+  mouthAccessoryLayer.appendChild(mouthAccessory);
   container.appendChild(effectStage);
   effectStage.appendChild(particleLayer);
 
@@ -246,10 +258,12 @@ function createRendererHarness(options = {}) {
     ["pet-asset-direction-stage", assetDirectionStage],
     ["pet-media-layer", mediaLayer],
     ["pet-accessory-layer", accessoryLayer],
+    ["pet-mouth-accessory-layer", mouthAccessoryLayer],
     ["pet-effect-stage", effectStage],
     ["pet-particle-layer", particleLayer],
     ["clawd", clawd],
     ["clawd-accessory", accessory],
+    ["clawd-mouth-accessory", mouthAccessory],
   ]);
   const documentListeners = new Map();
 
@@ -323,7 +337,9 @@ function createRendererHarness(options = {}) {
   };
   context.globalThis = context;
 
-  const source = `${readNormalized(ACCESSORY_LAYOUT)}
+const source = `${readNormalized(ACCESSORY_LAYOUT)}
+${readNormalized(ACCESSORY_MIRROR)}
+${readNormalized(ACCESSORY_DESCRIPTOR)}
 ${readNormalized(RENDERER)}
 globalThis.__rendererTest = {
   initWithConfig,
@@ -361,8 +377,11 @@ globalThis.__rendererTest = {
   get currentDragSvg() { return currentDragSvg; },
   get currentDragDirection() { return currentDragDirection; },
   get isDragReacting() { return isDragReacting; },
-  get accessoryAssetLoadTimer() { return _accessoryAssetLoadTimer; },
-  get accessoryAssetSettled() { return _accessoryAssetSettled; },
+  get isReacting() { return isReacting; },
+  get accessoryAssetLoadTimer() { return _accessorySlots.head.assetLoadTimer; },
+  get accessoryAssetSettled() { return _accessorySlots.head.assetSettled; },
+  get accessorySlots() { return _accessorySlots; },
+  get lastAccessoryGeneration() { return _lastAccessoryGeneration; },
   get lowPowerSvgPaused() { return lowPowerSvgPaused; },
   get eyeTarget() { return eyeTarget; },
 };`;
@@ -376,6 +395,7 @@ globalThis.__rendererTest = {
     accessoryLayer,
     assetDirectionStage,
     accessory,
+    mouthAccessory,
     particleLayer,
     clawd,
     timers,
@@ -793,6 +813,271 @@ describe("renderer directional drag reactions (#620)", () => {
     assert.strictEqual(harness.electronCalls.filter((call) => call.name === "pauseCursorPolling").length, 1);
     assert.strictEqual(harness.electronCalls.filter((call) => call.name === "resumeFromReaction").length, 1);
   });
+
+  it("preserves the legacy second-argument direction on same-file main re-sends", () => {
+    const harness = makeDirectionalHarness();
+    const request = {
+      themeId: "codex-pet",
+      logicalState: "idle",
+      displayState: "idle",
+      file: "drag-directional.svg",
+      source: "reaction",
+      visualGeneration: 91,
+    };
+    harness.electronHandlers.onStartDragReaction(request, "left");
+    const pending = harness.api.pendingNext;
+    const { root } = attachDirectionalSvgDocument(pending);
+    pending.listeners.get("load")();
+
+    harness.electronHandlers.onStartDragReaction(null, "right");
+
+    assert.strictEqual(harness.api.currentDragDirection, "right");
+    assert.strictEqual(root.getAttribute("data-clawd-drag-direction"), "right");
+  });
+
+  it("retargets a pending same-file drag request to the newest generation", () => {
+    const harness = makeDirectionalHarness();
+    const request = (visualGeneration) => ({
+      themeId: "codex-pet",
+      logicalState: "idle",
+      displayState: "idle",
+      file: "drag-directional.svg",
+      source: "reaction",
+      visualGeneration,
+    });
+    harness.electronHandlers.onStartDragReaction(request(92), "left");
+    const pending = harness.api.pendingNext;
+    harness.electronHandlers.onStartDragReaction(request(93), "right");
+    assert.strictEqual(harness.api.pendingNext, pending);
+    attachDirectionalSvgDocument(pending);
+    pending.listeners.get("load")();
+
+    const settlements = harness.electronCalls
+      .filter((call) => call.name === "notifyPetVisualSettled")
+      .map((call) => call.args[0]);
+    assert.deepStrictEqual(settlements.map((entry) => entry.visualGeneration), [93]);
+  });
+});
+
+describe("renderer displayed-visual settlement", () => {
+  function visualRequest(generation, file, displayState = "working") {
+    return {
+      themeId: "clawd",
+      logicalState: displayState,
+      displayState,
+      file,
+      source: "state",
+      visualGeneration: generation,
+    };
+  }
+
+  function settlements(harness) {
+    return harness.electronCalls
+      .filter((call) => call.name === "notifyPetVisualSettled")
+      .map((call) => call.args[0]);
+  }
+
+  it("ACKs a verified img swap and an already-displayed request exactly once each", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onStateChange(visualRequest(1, "working.svg"));
+    harness.api.pendingNext.listeners.get("load")();
+    harness.electronHandlers.onStateChange(visualRequest(2, "working.svg"));
+
+    assert.deepStrictEqual(settlements(harness).map((entry) => ({
+      generation: entry.visualGeneration,
+      outcome: entry.outcome,
+      actualFile: entry.actualFile,
+      verified: entry.verified,
+    })), [
+      { generation: 1, outcome: "swapped", actualFile: "working.svg", verified: true },
+      { generation: 2, outcome: "already-displayed", actualFile: "working.svg", verified: true },
+    ]);
+  });
+
+  it("retargets a same-file pending swap to the latest generation", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onStateChange(visualRequest(10, "working.svg"));
+    const pending = harness.api.pendingNext;
+    harness.electronHandlers.onStateChange(visualRequest(11, "working.svg"));
+    pending.listeners.get("load")();
+
+    assert.deepStrictEqual(settlements(harness).map((entry) => entry.visualGeneration), [11]);
+  });
+
+  for (const objectChannel of [false, true]) {
+    it(`replays the displayed compaction SVG through the ${objectChannel ? "object" : "img"} channel`, () => {
+      const harness = createRendererHarness({
+        themeConfig: objectChannel ? { rendering: { objectChannelFiles: ["sweeping.svg"] } } : {},
+      });
+      harness.electronHandlers.onStateChange(visualRequest(12, "sweeping.svg", "sweeping"));
+      const first = harness.api.pendingNext;
+      first.listeners.get("load")();
+      harness.electronHandlers.onStateChange({
+        ...visualRequest(13, "sweeping.svg", "sweeping"), restartAnimation: true,
+      });
+      const replay = harness.api.pendingNext;
+      assert.ok(replay, "completion must load a fresh animation timeline");
+      assert.notStrictEqual(replay, first);
+      assert.notStrictEqual(objectChannel ? replay.data : replay.src, objectChannel ? first.data : first.src);
+      assert.strictEqual(replay.tagName, objectChannel ? "OBJECT" : "IMG");
+      replay.listeners.get("load")();
+      assert.deepStrictEqual(settlements(harness).map(entry => entry.outcome), ["swapped", "swapped"]);
+    });
+  }
+
+  it("reports an object-to-img recovery as a verified fallback", () => {
+    const harness = createRendererHarness({
+      themeConfig: { trustedScriptedSvgFiles: ["scripted.svg"] },
+    });
+    harness.electronHandlers.onStateChange(visualRequest(20, "scripted.svg"));
+    const objectPending = harness.api.pendingNext;
+    assert.strictEqual(objectPending.tagName, "OBJECT");
+    objectPending.listeners.get("error")();
+    const imagePending = harness.api.pendingNext;
+    assert.strictEqual(imagePending.tagName, "IMG");
+    imagePending.listeners.get("load")();
+
+    assert.deepStrictEqual(settlements(harness).map((entry) => ({
+      generation: entry.visualGeneration,
+      outcome: entry.outcome,
+      channel: entry.channel,
+      verified: entry.verified,
+    })), [
+      { generation: 20, outcome: "fallback", channel: "img", verified: true },
+    ]);
+  });
+
+  it("selects the document-backed channel only for configured SVG basenames", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          svgChannel: "auto",
+          objectChannelFiles: ["bender.svg"],
+        },
+      },
+    });
+
+    harness.electronHandlers.onStateChange(visualRequest(21, "bender.svg", "working"));
+    assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
+    assert.match(harness.api.pendingNext.data, /bender\.svg\?_t=/);
+    harness.api.pendingNext.listeners.get("load")();
+
+    harness.electronHandlers.onStateChange(visualRequest(22, "ordinary.svg", "working"));
+    assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
+    assert.match(harness.api.pendingNext.src, /ordinary\.svg\?_t=/);
+  });
+
+  it("never claims an errored img request was displayed", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onStateChange(visualRequest(30, "broken.svg"));
+    harness.api.pendingNext.listeners.get("error")();
+
+    assert.deepStrictEqual(settlements(harness).map((entry) => ({
+      generation: entry.visualGeneration,
+      outcome: entry.outcome,
+      verified: entry.verified,
+    })), [
+      { generation: 30, outcome: "failed", verified: false },
+    ]);
+    assert.strictEqual(harness.api.currentDisplayedSvg, "current.svg");
+  });
+
+  it("keeps a pending notification request intact across the immediate Kimi media pulse", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onStateChange(visualRequest(31, "working.svg"));
+    const pending = harness.api.pendingNext;
+    assert.ok(pending);
+
+    harness.electronHandlers.onKimiPermissionPulse();
+    assert.strictEqual(harness.api.pendingNext, pending);
+    pending.listeners.get("load")();
+
+    assert.deepStrictEqual(settlements(harness).map((entry) => ({
+      generation: entry.visualGeneration,
+      outcome: entry.outcome,
+      verified: entry.verified,
+    })), [
+      { generation: 31, outcome: "swapped", verified: true },
+    ]);
+  });
+
+  it("cancels an older different-file pending swap before ACKing the displayed visual", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onStateChange(visualRequest(39, "notification.svg", "notification"));
+    harness.api.pendingNext.listeners.get("load")();
+
+    harness.electronHandlers.onStateChange(visualRequest(40, "working.svg"));
+    const staleWorking = harness.api.pendingNext;
+    harness.electronHandlers.onStateChange(visualRequest(41, "notification.svg", "notification"));
+
+    assert.strictEqual(harness.api.pendingNext, null);
+    harness.electronHandlers.onKimiPermissionPulse();
+    const notificationPulse = harness.api.pendingNext;
+    assert.ok(notificationPulse);
+    staleWorking.listeners.get("load")();
+    assert.strictEqual(harness.api.pendingNext, notificationPulse);
+    assert.strictEqual(harness.api.currentDisplayedSvg, "notification.svg");
+    notificationPulse.listeners.get("load")();
+
+    assert.deepStrictEqual(settlements(harness).map((entry) => ({
+      generation: entry.visualGeneration,
+      outcome: entry.outcome,
+      actualFile: entry.actualFile,
+    })), [
+      { generation: 39, outcome: "swapped", actualFile: "notification.svg" },
+      { generation: 40, outcome: "failed", actualFile: "notification.svg" },
+      { generation: 41, outcome: "already-displayed", actualFile: "notification.svg" },
+    ]);
+    assert.strictEqual(harness.api.currentDisplayedSvg, "notification.svg");
+  });
+
+  it("ignores a malformed object request instead of constructing an undefined asset URL", () => {
+    const harness = createRendererHarness();
+    const displayed = harness.api.clawdEl;
+
+    harness.electronHandlers.onStateChange({
+      themeId: "clawd",
+      logicalState: "working",
+      displayState: "working",
+      source: "state",
+    });
+
+    assert.strictEqual(harness.api.clawdEl, displayed);
+    assert.strictEqual(harness.api.pendingNext, null);
+    assert.ok(harness.warnings.some((warning) => warning.includes("malformed visual request")));
+  });
+
+  it("preload forwards only the bounded settlement contract", () => {
+    const loader = loadPreloadWithElectron();
+    try {
+      loader.electronAPI.notifyPetVisualSettled({
+        themeId: "clawd",
+        displayState: "idle",
+        requestedFile: "idle.svg",
+        actualFile: "idle.svg",
+        channel: "img",
+        verified: true,
+        visualGeneration: 4,
+        outcome: "swapped",
+        injected: "drop-me",
+      });
+      const sent = loader.sentToMain.find((entry) => entry.channel === "pet-visual-settled");
+      assert.ok(sent);
+      assert.strictEqual(sent.args[0].injected, undefined);
+      assert.deepStrictEqual(sent.args[0], {
+        themeId: "clawd",
+        displayState: "idle",
+        requestedFile: "idle.svg",
+        actualFile: "idle.svg",
+        channel: "img",
+        verified: true,
+        visualGeneration: 4,
+        outcome: "swapped",
+      });
+    } finally {
+      loader.restore();
+    }
+  });
 });
 
 describe("renderer test-result reactions", () => {
@@ -907,10 +1192,8 @@ describe("renderer low-power idle mode", () => {
     assert.ok(source.includes("function shouldSuppressPassiveTrackingForLowPower()"));
     assert.ok(source.includes("return lowPowerIdleMode && lowPowerSvgPaused && shouldPauseForLowPower();"));
     assert.ok(source.includes("function _cancelLayerAnimLoop()"));
-    assert.match(
-      source,
-      /if \(next\) \{\s+_cancelLayerAnimLoop\(\);\s+cancelAccessoryFollow\(\);\s+\} else \{\s+refreshAccessoryLayout\(\);\s+\}/
-    );
+    assert.ok(source.includes("for (const slotName of ACCESSORY_SLOT_NAMES) cancelAccessoryFollow(slotName);"));
+    assert.ok(source.includes("else {\n    refreshAccessoryLayout();\n  }"));
     assert.ok(source.includes("if (shouldSuppressPassiveTrackingForLowPower()) { _layerAnimFrame = null; return; }"));
     assert.ok(source.includes("if (shouldSuppressPassiveTrackingForLowPower()) {\n    _cancelLayerAnimLoop();\n    return;\n  }"));
     assert.ok(source.includes("if (shouldSuppressPassiveTrackingForLowPower()) return;\n  if (!shouldUseCloudlingPointerBridge"));
@@ -1279,10 +1562,10 @@ describe("renderer object-channel selection", () => {
     assert.ok(source.includes("const lowPowerStaticImageOverride = resolveLowPowerStaticImageOverride(state, requestedSvg);"));
     assert.ok(source.includes("const effectiveSvg = lowPowerStaticImageOverride || requestedSvg;"));
     assert.ok(source.includes("const desiredObjectChannel = lowPowerStaticImageOverride ? false : needsObjectChannel(state, effectiveSvg);"));
-    assert.ok(source.includes("swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined);"));
+    assert.ok(source.includes("swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined, {"));
   });
 
-  it("refreshes the current sleeping media when low-power static image mode changes", () => {
+  it("waits for main's generated visual request before changing low-power sleeping media", () => {
     const harness = createRendererHarness({
       themeConfig: {
         trustedScriptedSvgFiles: ["sleep.svg"],
@@ -1296,17 +1579,32 @@ describe("renderer object-channel selection", () => {
     const filter = "grayscale(1) brightness(1.05)";
     harness.electronHandlers.onPetTintChange({ id: "mono", filter });
 
-    harness.electronHandlers.onStateChange("sleeping", "sleep.svg");
+    const request = (generation) => ({
+      themeId: "clawd",
+      logicalState: "sleeping",
+      displayState: "sleeping",
+      file: "sleep.svg",
+      source: "state",
+      visualGeneration: generation,
+    });
+
+    harness.electronHandlers.onStateChange(request(1));
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
     assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
 
     harness.electronHandlers.onLowPowerIdleModeChange(true);
+    assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
+    assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
+    harness.electronHandlers.onStateChange(request(2));
     assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
     assert.strictEqual(harness.api.pendingSvgFile, "sleep-static.png");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
 
     harness.electronHandlers.onLowPowerIdleModeChange(false);
+    assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
+    assert.strictEqual(harness.api.pendingSvgFile, "sleep-static.png");
+    harness.electronHandlers.onStateChange(request(3));
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
     assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
@@ -1326,8 +1624,8 @@ describe("renderer object-channel selection", () => {
   it("does not hard-code click or drag reactions to the img channel", () => {
     const source = readNormalized(RENDERER);
 
-    assert.ok(source.includes("swapToFile(svgFile, null);"));
-    assert.ok(source.includes("swapToFile(dragSvg, null);"));
+    assert.ok(source.includes("swapToFile(svgFile, null, undefined, { visualRequest });"));
+    assert.ok(source.includes("swapToFile(dragSvg, null, undefined, { visualRequest });"));
     assert.ok(!source.includes("swapToFile(svgFile, null, false);"));
     assert.ok(!source.includes("swapToFile(dragSvg, null, false);"));
   });
@@ -1361,7 +1659,7 @@ describe("renderer object-channel selection", () => {
     assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
     assert.strictEqual(harness.api.pendingSvgFile, "next.svg");
     assert.strictEqual(
-      harness.container.querySelectorAll().some((el) => el.tagName === "OBJECT" && el !== harness.clawd),
+      harness.mediaLayer.querySelectorAll().some((el) => el.tagName === "OBJECT" && el !== harness.clawd),
       false
     );
   });
@@ -1539,7 +1837,7 @@ describe("renderer pet tint", () => {
 
 describe("renderer pet accessory wardrobe", () => {
   function accessoryConfig(overrides = {}) {
-    return {
+    const config = {
       viewBox: { x: 0, y: 0, width: 100, height: 100 },
       eyeTracking: { states: [] },
       idleFollowSvg: "first.svg",
@@ -1559,7 +1857,203 @@ describe("renderer pet accessory wardrobe", () => {
       },
       ...overrides,
     };
+    const attachments = config.accessoryAttachments;
+    if (attachments && attachments.default && attachments.files) {
+      for (const file of ["first.svg", "reaction.svg", "static.svg", "dynamic.svg", "working.svg"]) {
+        if (!Object.prototype.hasOwnProperty.call(attachments.files, file)) {
+          attachments.files[file] = attachments.default;
+        }
+      }
+    }
+    return config;
   }
+
+  function dualSlotConfig(overrides = {}) {
+    const descriptor = {
+      staticFrame: { cx: 50, baseY: 40, width: 20 },
+    };
+    return {
+      viewBox: { x: 0, y: 0, width: 100, height: 100 },
+      eyeTracking: { states: [] },
+      idleFollowSvg: "first.svg",
+      accessorySlots: {
+        themeId: "clawd",
+        accessoryGeneration: 5,
+        head: {
+          supported: true,
+          attachments: { files: { "first.svg": descriptor } },
+          payload: {
+            id: "cowboy-hat",
+            assetFile: "cowboy-hat.svg",
+            aspect: 16 / 7,
+            widthScale: 1,
+            offsetY: 0,
+          },
+        },
+        mouth: {
+          supported: true,
+          attachments: { files: { "first.svg": descriptor } },
+          payload: {
+            id: "cigarette",
+            assetFile: "cigarette.svg",
+            aspect: 5 / 9,
+            widthScale: 1,
+            offsetY: 0,
+          },
+        },
+      },
+      ...overrides,
+    };
+  }
+
+  it("settles both independently loaded slots before revealing the first pet visual", () => {
+    const harness = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: dualSlotConfig(),
+    });
+
+    harness.api.pendingNext.listeners.get("load")();
+    assert.ok(harness.api.pendingNext, "the pet should wait for both accessory assets");
+    assert.strictEqual(harness.mouthAccessory.style.display, "block");
+    assert.strictEqual(harness.mouthAccessory.style.visibility, "hidden");
+
+    harness.accessory.onload();
+    assert.ok(harness.api.pendingNext, "the mouth slot is still loading");
+    assert.strictEqual(harness.accessory.style.display, "none");
+
+    harness.mouthAccessory.onload();
+    assert.strictEqual(harness.api.pendingNext, null);
+    assert.strictEqual(harness.accessory.style.display, "block");
+    assert.strictEqual(harness.mouthAccessory.style.display, "block");
+    assert.strictEqual(harness.mouthAccessory.style.visibility, "visible");
+    assert.strictEqual(harness.accessory.style.filter, "none");
+    assert.strictEqual(harness.mouthAccessory.style.filter, "none");
+    assert.strictEqual(harness.accessory.tagName, "IMG");
+    assert.strictEqual(harness.accessory.src, "../assets/accessories/cowboy-hat.svg");
+    assert.strictEqual(harness.mouthAccessory.tagName, "OBJECT");
+    assert.strictEqual(harness.mouthAccessory.data, "../assets/accessories/cigarette.svg");
+  });
+
+  it("keeps a hot-selected mouth object mounted but invisible until its SVG loads", () => {
+    const config = dualSlotConfig();
+    config.accessorySlots.mouth.attachments.files["hidden.svg"] = { visibility: "hidden" };
+    config.accessorySlots.mouth.payload = {
+      id: "none",
+      assetFile: null,
+      aspect: 1,
+      widthScale: 1,
+      offsetY: 0,
+    };
+    const harness = createRendererHarness({ initialObjectData: "", themeConfig: config });
+    harness.api.pendingNext.listeners.get("load")();
+    harness.accessory.onload();
+
+    harness.electronHandlers.onPetAccessorySlotsChange({
+      themeId: "clawd",
+      accessoryGeneration: 6,
+      payloads: {
+        head: dualSlotConfig().accessorySlots.head.payload,
+        mouth: dualSlotConfig().accessorySlots.mouth.payload,
+      },
+    });
+
+    assert.strictEqual(harness.mouthAccessory.style.display, "block");
+    assert.strictEqual(harness.mouthAccessory.style.visibility, "hidden");
+    assert.strictEqual(harness.api.accessorySlots.mouth.assetReady, false);
+    assert.strictEqual(harness.api.accessorySlots.mouth.assetSettled, false);
+
+    harness.api.swapToFile("hidden.svg", "sleeping", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(
+      harness.mouthAccessory.style.display,
+      "block",
+      "a hidden pose must not unmount an object whose first load is pending"
+    );
+    assert.strictEqual(harness.mouthAccessory.style.visibility, "hidden");
+
+    attachFakeSvgDocument(harness.mouthAccessory);
+    harness.mouthAccessory.onload();
+    assert.strictEqual(harness.mouthAccessory.style.display, "none");
+
+    harness.api.swapToFile("first.svg", "idle", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.mouthAccessory.style.display, "block");
+    assert.strictEqual(harness.mouthAccessory.style.visibility, "visible");
+  });
+
+  it("rejects stale and wrong-theme slot snapshots and resets the waterline on hot theme switch", () => {
+    const harness = createRendererHarness({ themeConfig: dualSlotConfig() });
+    harness.accessory.onload();
+    harness.mouthAccessory.onload();
+
+    harness.electronHandlers.onPetAccessorySlotsChange({
+      themeId: "clawd",
+      accessoryGeneration: 7,
+      payloads: {
+        head: {
+          id: "wizard-hat",
+          assetFile: "wizard-hat.svg",
+          aspect: 15 / 16,
+          widthScale: 0.95,
+          offsetY: 0.3,
+        },
+        mouth: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+      },
+    });
+    assert.strictEqual(harness.api.lastAccessoryGeneration, 7);
+    assert.strictEqual(harness.api.accessorySlots.head.payload.id, "wizard-hat");
+    assert.strictEqual(harness.api.accessorySlots.mouth.payload.id, "none");
+
+    harness.electronHandlers.onPetAccessorySlotsChange({
+      themeId: "clawd",
+      accessoryGeneration: 6,
+      payloads: {
+        head: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+        mouth: {
+          id: "cigarette",
+          assetFile: "cigarette.svg",
+          aspect: 5 / 9,
+          widthScale: 1,
+          offsetY: 0,
+        },
+      },
+    });
+    harness.electronHandlers.onPetAccessorySlotsChange({
+      themeId: "other",
+      accessoryGeneration: 100,
+      payloads: {
+        head: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+        mouth: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+      },
+    });
+    assert.strictEqual(harness.api.lastAccessoryGeneration, 7);
+    assert.strictEqual(harness.api.accessorySlots.head.payload.id, "wizard-hat");
+    assert.strictEqual(harness.api.accessorySlots.mouth.payload.id, "none");
+
+    const nextTheme = dualSlotConfig();
+    nextTheme.accessorySlots = {
+      ...nextTheme.accessorySlots,
+      themeId: "other",
+      accessoryGeneration: 2,
+      head: { ...nextTheme.accessorySlots.head, payload: { id: "none" } },
+      mouth: { ...nextTheme.accessorySlots.mouth, payload: { id: "none" } },
+    };
+    harness.electronHandlers.onThemeConfig(nextTheme);
+    assert.strictEqual(harness.api.lastAccessoryGeneration, 2);
+    assert.strictEqual(harness.api.accessorySlots.head.payload.id, "none");
+    assert.strictEqual(harness.api.accessorySlots.mouth.payload.id, "none");
+
+    harness.electronHandlers.onPetAccessorySlotsChange({
+      themeId: "clawd",
+      accessoryGeneration: 101,
+      payloads: {
+        head: dualSlotConfig().accessorySlots.head.payload,
+        mouth: dualSlotConfig().accessorySlots.mouth.payload,
+      },
+    });
+    assert.strictEqual(harness.api.lastAccessoryGeneration, 2);
+    assert.strictEqual(harness.api.accessorySlots.head.payload.id, "none");
+  });
 
   it("primes the fixed catalog asset before the initial pet swap and reveals it after load", () => {
     const filter = "grayscale(1) brightness(1.05)";
@@ -1737,6 +2231,75 @@ describe("renderer pet accessory wardrobe", () => {
     assert.strictEqual(harness.accessory.style.display, "none");
   });
 
+  it("preserves the generated visual request when an accessory rebuilds a pending media channel", () => {
+    const attachment = {
+      staticFrame: { cx: 50, baseY: 40, width: 20 },
+      followTarget: {
+        id: "accessory-anchor",
+        frame: { cx: 8, baseY: 6, width: 4 },
+      },
+    };
+    const harness = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: accessoryConfig({
+        accessoryPayload: {
+          id: "none",
+          assetFile: null,
+          aspect: 1,
+          widthScale: 1,
+          offsetY: 0,
+        },
+        accessoryAttachments: {
+          default: { staticFrame: { cx: 50, baseY: 40, width: 20 } },
+          files: { "working.svg": attachment },
+        },
+      }),
+    });
+    harness.api.pendingNext.listeners.get("load")();
+
+    harness.electronHandlers.onStateChange({
+      themeId: "clawd",
+      logicalState: "working",
+      displayState: "working",
+      file: "working.svg",
+      source: "state",
+      visualGeneration: 41,
+    });
+    assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
+
+    harness.electronHandlers.onPetAccessoryChange({
+      id: "cowboy-hat",
+      assetFile: "cowboy-hat.svg",
+      aspect: 16 / 7,
+      widthScale: 1,
+      offsetY: 0,
+    });
+    const rebuilt = harness.api.pendingNext;
+    assert.strictEqual(rebuilt.tagName, "OBJECT");
+    rebuilt.contentDocument = {
+      getElementById(id) {
+        return id === "accessory-anchor"
+          ? { getCTM: () => ({ a: 2, b: 0, c: 0, d: 2, e: 10, f: 12 }) }
+          : null;
+      },
+    };
+    rebuilt.listeners.get("load")();
+    harness.accessory.onload();
+
+    const settlements = harness.electronCalls
+      .filter((call) => call.name === "notifyPetVisualSettled")
+      .map((call) => call.args[0]);
+    assert.deepStrictEqual(settlements.map((entry) => ({
+      visualGeneration: entry.visualGeneration,
+      outcome: entry.outcome,
+      actualFile: entry.actualFile,
+    })), [{
+      visualGeneration: 41,
+      outcome: "swapped",
+      actualFile: "working.svg",
+    }]);
+  });
+
   it("keeps the latest state swap pending when an accessory payload is rebroadcast", () => {
     const attachment = {
       staticFrame: { cx: 50, baseY: 40, width: 20 },
@@ -1847,6 +2410,34 @@ describe("renderer pet accessory wardrobe", () => {
     assert.strictEqual(harness.accessory.style.display, "block", "a late successful load should recover");
   });
 
+  it("does not let the img load deadline kill media already waiting for an accessory", () => {
+    const harness = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: accessoryConfig({ eyeTrackingStates: [] }),
+    });
+    const pendingPet = harness.api.pendingNext;
+    assert.strictEqual(pendingPet.tagName, "IMG");
+    const imageDeadline = pendingPet.__clawdImageLoadTimer;
+    assert.ok(imageDeadline, "initial img swap should own a load deadline");
+
+    pendingPet.listeners.get("load")();
+    assert.strictEqual(pendingPet.__clawdWaitingForAccessory, true);
+    imageDeadline.cleared = true;
+    imageDeadline.callback();
+    const visibilityRescue = harness.activeTimers().find((timer) => timer.ms === 3750);
+    assert.ok(visibilityRescue, "the pending swap should own a visibility rescue timer");
+    visibilityRescue.cleared = true;
+    visibilityRescue.callback();
+
+    assert.strictEqual(harness.api.pendingNext, pendingPet);
+    assert.deepStrictEqual(
+      harness.electronCalls.filter((call) => call.name === "notifyPetVisualSettled"),
+      []
+    );
+    harness.accessory.onload();
+    assert.strictEqual(harness.api.pendingNext, null);
+  });
+
   it("fails open when an accessory asset reports an error", () => {
     const harness = createRendererHarness({
       initialObjectData: "",
@@ -1951,6 +2542,138 @@ describe("renderer pet accessory wardrobe", () => {
     );
   });
 
+  it("lets one mouth object fail without blocking the pet or loaded head slot", () => {
+    const errored = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: dualSlotConfig(),
+    });
+    errored.api.pendingNext.listeners.get("load")();
+    errored.accessory.onload();
+    errored.mouthAccessory.onerror();
+    assert.strictEqual(errored.api.pendingNext, null);
+    assert.strictEqual(errored.accessory.style.display, "block");
+    assert.strictEqual(errored.mouthAccessory.style.display, "none");
+
+    const timedOut = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: dualSlotConfig(),
+    });
+    timedOut.api.pendingNext.listeners.get("load")();
+    timedOut.accessory.onload();
+    const mouthDeadline = timedOut.api.accessorySlots.mouth.assetLoadTimer;
+    assert.ok(mouthDeadline);
+    mouthDeadline.cleared = true;
+    mouthDeadline.callback();
+    assert.strictEqual(timedOut.api.pendingNext, null);
+    assert.strictEqual(timedOut.accessory.style.display, "block");
+    assert.strictEqual(timedOut.mouthAccessory.style.display, "none");
+  });
+
+  it("refreshes both accessory layouts when resize supplies a browser Event", () => {
+    const harness = createRendererHarness({
+      initialObjectData: "",
+      themeConfig: dualSlotConfig(),
+    });
+    harness.api.pendingNext.listeners.get("load")();
+    harness.accessory.onload();
+    harness.mouthAccessory.onload();
+    const initialHeadTransform = harness.accessory.style.transform;
+    const initialMouthTransform = harness.mouthAccessory.style.transform;
+
+    harness.api.clawdEl.offsetLeft += 17;
+    harness.windowListeners.get("resize")({ type: "resize" });
+
+    assert.notStrictEqual(harness.accessory.style.transform, initialHeadTransform);
+    assert.notStrictEqual(harness.mouthAccessory.style.transform, initialMouthTransform);
+  });
+
+  it("pauses and clears an object-backed mouth SVG with the pet low-power timeline", () => {
+    const harness = createRendererHarness({ themeConfig: dualSlotConfig() });
+    const petSvg = attachFakeSvgDocument(harness.clawd);
+    const mouthSvg = attachFakeSvgDocument(harness.mouthAccessory);
+    harness.accessory.onload();
+    harness.mouthAccessory.onload();
+
+    harness.api.setCurrentState("idle");
+    harness.api.setLowPowerIdleMode(true);
+    harness.api.pauseCurrentSvgForLowPower();
+
+    assert.strictEqual(petSvg.root.pauseCalls, 1);
+    assert.strictEqual(mouthSvg.root.pauseCalls, 1);
+    assert.ok(mouthSvg.svgDoc.getElementById("clawd-low-power-pause-svg"));
+
+    harness.electronHandlers.onPetAccessorySlotsChange({
+      themeId: "clawd",
+      accessoryGeneration: 6,
+      payloads: {
+        head: dualSlotConfig().accessorySlots.head.payload,
+        mouth: { id: "none", assetFile: null, aspect: 1, widthScale: 1, offsetY: 0 },
+      },
+    });
+
+    assert.strictEqual(mouthSvg.root.unpauseCalls, 1);
+    assert.strictEqual(mouthSvg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
+    assert.strictEqual(harness.mouthAccessory.data, "");
+  });
+
+  it("immediately pauses a mouth object that finishes loading after low-power pause", () => {
+    const config = dualSlotConfig();
+    config.accessorySlots.mouth.attachments.files["current.svg"] = {
+      staticFrame: { cx: 50, baseY: 40, width: 20 },
+    };
+    const harness = createRendererHarness({ themeConfig: config });
+    attachFakeSvgDocument(harness.clawd);
+    harness.api.setCurrentState("idle");
+    harness.api.setLowPowerIdleMode(true);
+    harness.api.pauseCurrentSvgForLowPower();
+
+    const mouthSvg = attachFakeSvgDocument(harness.mouthAccessory);
+    harness.mouthAccessory.onload();
+
+    assert.strictEqual(mouthSvg.root.pauseCalls, 1);
+    assert.ok(mouthSvg.svgDoc.getElementById("clawd-low-power-pause-svg"));
+
+    harness.api.setLowPowerIdleMode(false);
+    assert.strictEqual(mouthSvg.root.unpauseCalls, 1);
+    assert.strictEqual(mouthSvg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
+  });
+
+  it("pauses a hidden mouth document and resumes it when a later sprite shows the slot", () => {
+    const config = dualSlotConfig();
+    const visible = { staticFrame: { cx: 50, baseY: 40, width: 20 } };
+    config.accessorySlots.head.attachments.files["sleep.svg"] = { visibility: "hidden" };
+    config.accessorySlots.head.attachments.files["reaction.svg"] = visible;
+    config.accessorySlots.mouth.attachments.files["sleep.svg"] = { visibility: "hidden" };
+    config.accessorySlots.mouth.attachments.files["reaction.svg"] = visible;
+    const harness = createRendererHarness({ initialObjectData: "", themeConfig: config });
+    const mouthSvg = attachFakeSvgDocument(harness.mouthAccessory);
+    harness.api.pendingNext.listeners.get("load")();
+    harness.accessory.onload();
+    harness.mouthAccessory.onload();
+    const pauseBefore = mouthSvg.root.pauseCalls;
+    const unpauseBefore = mouthSvg.root.unpauseCalls;
+
+    harness.api.swapToFile("sleep.svg", "sleeping", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.mouthAccessory.style.display, "none");
+    assert.strictEqual(mouthSvg.root.pauseCalls, pauseBefore + 1);
+
+    harness.api.setCurrentState("sleeping");
+    harness.api.setLowPowerIdleMode(true);
+    harness.api.pauseCurrentSvgForLowPower();
+    harness.api.setLowPowerIdleMode(false);
+    assert.strictEqual(
+      mouthSvg.root.unpauseCalls,
+      unpauseBefore,
+      "leaving global low-power must not resume a still-hidden mouth document"
+    );
+
+    harness.api.swapToFile("reaction.svg", null, false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.mouthAccessory.style.display, "block");
+    assert.strictEqual(mouthSvg.root.unpauseCalls, unpauseBefore + 1);
+  });
+
   it("keeps sibling objects outside tint and pet-media swap cleanup", () => {
     const harness = createRendererHarness({
       initialObjectData: "",
@@ -1991,9 +2714,19 @@ describe("renderer pet accessory wardrobe", () => {
     const preload = readNormalized(PRELOAD);
 
     assert.ok(html.indexOf('id="pet-media-layer"') < html.indexOf('id="pet-accessory-layer"'));
+    assert.ok(html.indexOf('id="pet-accessory-layer"') < html.indexOf('id="pet-mouth-accessory-layer"'));
     assert.ok(html.includes('<div id="pet-effect-stage">'));
     assert.ok(html.includes('<div id="pet-particle-layer"></div>'));
     assert.ok(html.indexOf('src="pet-accessory-layout.js"') < html.indexOf('src="renderer.js"'));
+    for (const dependency of [
+      "pet-accessory-mirror.js",
+      "pet-accessory-descriptor.js",
+      "pet-visual-swap-policy.js",
+    ]) {
+      const dependencyIndex = html.indexOf(`src="${dependency}"`);
+      assert.notStrictEqual(dependencyIndex, -1, `${dependency} must be loaded by index.html`);
+      assert.ok(dependencyIndex < html.indexOf('src="renderer.js"'), `${dependency} must load before renderer.js`);
+    }
     assert.match(
       css,
       /#pet-effect-stage,\s*#pet-particle-layer\s*\{[^}]*pointer-events: none;[^}]*transform: none;[^}]*translate: none;[^}]*scale: none;[^}]*rotate: none;[^}]*\}/
@@ -2007,6 +2740,9 @@ describe("renderer pet accessory wardrobe", () => {
     assert.ok(renderer.includes('assetDirectionStage.style.scale = activeFlip ? "-1 1" : "none";'));
     assert.ok(preload.includes(
       'onPetAccessoryChange: (cb) => ipcRenderer.on("pet-accessory-change", (_, payload) => cb(payload))'
+    ));
+    assert.ok(preload.includes(
+      'onPetAccessorySlotsChange: (cb) => ipcRenderer.on("pet-accessory-slots-change", (_, snapshot) => cb(snapshot))'
     ));
   });
 });
@@ -2303,14 +3039,119 @@ describe("renderer glyph flip compensation", () => {
     assert.strictEqual(roam.style.transformOrigin, "73px 50%");
   });
 
-  it("flips reverse-drawn mini crabwalk assets during pre-entry without entering mini layout", () => {
-    const source = fs.readFileSync(RENDERER, "utf8");
+  it("preload forwards the accessory facing to main as a plain boolean", () => {
+    // The renderer harness stubs electronAPI with a Proxy, so it cannot prove
+    // this boundary — only the real preload can.
+    const harness = loadPreloadWithElectron();
+    try {
+      harness.electronAPI.reportAccessoryMirror(true);
+      harness.electronAPI.reportAccessoryMirror(0);
+      assert.deepStrictEqual(
+        harness.sentToMain
+          .filter((sent) => sent.channel === "accessory-mirror")
+          .map((sent) => sent.args[0]),
+        [true, false]
+      );
+    } finally {
+      harness.restore();
+    }
+  });
 
-    assert.ok(source.includes("let _miniPreEntryMode = false;"));
-    assert.ok(source.includes("_miniPreEntryMode = !!enabled && preEntry;"));
-    assert.ok(source.includes("_miniPreEntryMode && state === \"mini-crabwalk\""));
-    assert.ok(source.includes("_inMiniMode = !!enabled && !preEntry;"));
-    assert.ok(source.includes("applyMiniFlip(next, commitState);"));
+  it("updates idle orientation and accessory facing when the same resting file crosses sides", () => {
+    const harness = createRendererHarness({ themeConfig: { rightSideMirrorFiles: ["bubble.svg"] } });
+    harness.electronHandlers.onPetScreenSide(false);
+    harness.electronHandlers.onStateChange("idle", "bubble.svg");
+    harness.api.pendingNext.listeners.get("load")();
+    const displayed = harness.api.clawdEl;
+    harness.electronHandlers.onPetScreenSide(true);
+    harness.electronHandlers.onStateChange("idle", "bubble.svg");
+    assert.strictEqual(harness.api.pendingNext, null);
+    assert.strictEqual(harness.api.clawdEl, displayed);
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "-1 1");
+    const report = () => harness.electronCalls.filter((call) => call.name === "reportAccessoryMirror").at(-1).args[0];
+    assert.strictEqual(report(), true);
+    harness.electronHandlers.onPetScreenSide(false);
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "none");
+    assert.strictEqual(report(), false);
+  });
+
+  it("keeps idle glyph variants mirrored when side arrives during an image load", () => {
+    const harness = createRendererHarness({
+      themeConfig: { rightSideMirrorFiles: ["bubble.svg", "bubble-left.svg"] },
+    });
+    harness.electronHandlers.onStateChange("idle", "bubble-left.svg");
+    const pending = harness.api.pendingNext;
+    harness.electronHandlers.onPetScreenSide(true);
+    pending.listeners.get("load")();
+    assert.strictEqual(harness.api.currentDisplayedSvg, "bubble-left.svg");
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "-1 1");
+    harness.electronHandlers.onStateChange("idle", "current.svg");
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "none");
+  });
+
+  it("tells main which way the accessory ended up facing", () => {
+    // Main sizes the native hit window from this. Without the report it keeps
+    // its startup default of "upright" forever and the hat is drawn on one
+    // side while it stays draggable on the other.
+    const harness = createRendererHarness({ themeConfig: { hasRoamVisual: true } });
+    const reported = () => harness.electronCalls
+      .filter((call) => call.name === "reportAccessoryMirror")
+      .map((call) => call.args[0]);
+
+    harness.electronHandlers.onRoamHeading(true);
+    harness.api.swapToFile("roam.svg", "roam", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "-1 1");
+    assert.strictEqual(reported().at(-1), true, "a left-heading walk mirrors the accessory");
+
+    harness.electronHandlers.onRoamHeading(false);
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "none");
+    assert.strictEqual(reported().at(-1), false, "reversing the walk reports the change");
+
+    // Edge-triggered: redundant recomputes must not spam main.
+    const before = reported().length;
+    harness.electronHandlers.onRoamHeading(false);
+    assert.strictEqual(reported().length, before, "an unchanged facing must not re-report");
+  });
+
+  it("reports the two mirror stages composed, not just one of them", () => {
+    const harness = createRendererHarness({ themeConfig: { miniFlipAssets: true } });
+    const lastReported = () => {
+      const calls = harness.electronCalls.filter((call) => call.name === "reportAccessoryMirror");
+      return calls.length ? calls[calls.length - 1].args[0] : null;
+    };
+
+    // Edge-left flips the facing stage while a non-mini visual is on screen.
+    harness.electronHandlers.onMiniModeChange(true, "left", {});
+    assert.strictEqual(lastReported(), true, "mini-left alone mirrors the accessory");
+
+    // A mini visual adds the asset-direction flip; the two cancel out.
+    harness.api.swapToFile("mini-idle.svg", "mini-idle", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(lastReported(), false, "both stages flipped means upright again");
+  });
+
+  it("flips reverse-drawn mini crabwalk assets during pre-entry without entering mini layout", () => {
+    const harness = createRendererHarness({ themeConfig: { miniFlipAssets: true } });
+
+    // Pre-entry: the walk-in starts before mini mode is really on, and the
+    // walk-in visual has to face the right way for the whole walk.
+    harness.electronHandlers.onMiniModeChange(true, "right", { preEntry: true });
+    harness.api.swapToFile("crabwalk.svg", "mini-crabwalk", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "-1 1");
+
+    // Other mini visuals keep their orientation until the mini swap happens.
+    harness.api.swapToFile("mini-idle.svg", "mini-idle", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "none");
+
+    // Once mini mode is actually active they all flip.
+    harness.electronHandlers.onMiniModeChange(true, "right", {});
+    harness.api.swapToFile("mini-peek.svg", "mini-peek", false);
+    harness.api.pendingNext.listeners.get("load")();
+    assert.strictEqual(harness.assetDirectionStage.style.scale, "-1 1");
   });
 
   it("notifies object-channel SVGs when mini-left glyph compensation changes", () => {
@@ -2508,5 +3349,100 @@ describe("renderer viewport offset X (#690)", () => {
     } finally {
       loader.restore();
     }
+  });
+});
+
+describe("renderer reaction preview lifecycle", () => {
+  it("clears a pending reaction timer before the next reaction starts", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onPlayClickReaction("react-drag.apng", 5600);
+    const first = harness.timers.find((timer) => timer.ms === 5600);
+    harness.electronHandlers.onPlayClickReaction("react-surprise.apng", 4600);
+    const second = harness.timers.find((timer) => timer.ms === 4600);
+
+    assert.ok(first, "first reaction timer");
+    assert.ok(second, "second reaction timer");
+    // Without the clear, the first timer would fire mid-clip and end the
+    // second reaction early — settings previews now last as long as the clip.
+    assert.strictEqual(first.cleared, true);
+    assert.strictEqual(second.cleared, false);
+    assert.strictEqual(
+      harness.electronCalls.filter((call) => call.name === "resumeFromReaction").length,
+      0
+    );
+  });
+
+  it("cancels a reaction preview and resumes cursor polling when settings asks", () => {
+    const harness = createRendererHarness();
+    harness.electronHandlers.onPlayClickReaction("react-drag.apng", 5600, { settingsPreview: true });
+    const timer = harness.timers.find((entry) => entry.ms === 5600);
+    harness.electronHandlers.onCancelClickReaction();
+
+    assert.ok(timer);
+    assert.strictEqual(timer.cleared, true);
+    assert.strictEqual(
+      harness.electronCalls.filter((call) => call.name === "resumeFromReaction").length,
+      1
+    );
+  });
+});
+
+describe("renderer reaction pause ownership", () => {
+  it("keeps the pause a drag reaction holds when a click preview is cancelled", () => {
+    const harness = createRendererHarness({
+      themeConfig: { dragSvgs: { left: "drag-left.svg", right: "drag-right.svg" } },
+    });
+    harness.electronHandlers.onStartDragReaction("right");
+    assert.strictEqual(harness.api.isDragReacting, true);
+    harness.electronHandlers.onPlayClickReaction("react-surprise.apng", 4600, { settingsPreview: true });
+    harness.electronHandlers.onCancelClickReaction();
+
+    // The drag is still running and still wants the cursor polling paused.
+    assert.strictEqual(
+      harness.electronCalls.filter((call) => call.name === "resumeFromReaction").length,
+      0
+    );
+
+    harness.electronHandlers.onEndDragReaction();
+    assert.strictEqual(
+      harness.electronCalls.filter((call) => call.name === "resumeFromReaction").length,
+      1
+    );
+  });
+});
+
+describe("renderer reaction preview scope", () => {
+  const resumes = (harness) =>
+    harness.electronCalls.filter((call) => call.name === "resumeFromReaction").length;
+
+  it("leaves a reaction the user started alone when settings cancels its preview", () => {
+    const harness = createRendererHarness();
+    // No settingsPreview marker: this is a click on the pet, on the same channel.
+    harness.electronHandlers.onPlayClickReaction("react-surprise.apng", 4600);
+    const timer = harness.timers.find((entry) => entry.ms === 4600);
+    harness.electronHandlers.onCancelClickReaction();
+
+    assert.ok(timer);
+    assert.strictEqual(timer.cleared, false);
+    assert.strictEqual(harness.api.isReacting, true);
+    assert.strictEqual(resumes(harness), 0);
+
+    timer.callback();
+    assert.strictEqual(resumes(harness), 1);
+  });
+
+  it("leaves the pause to a click reaction when the drag ends first", () => {
+    const harness = createRendererHarness({
+      themeConfig: { dragSvgs: { left: "drag-left.svg", right: "drag-right.svg" } },
+    });
+    harness.electronHandlers.onStartDragReaction("right");
+    harness.electronHandlers.onPlayClickReaction("react-surprise.apng", 4600, { settingsPreview: true });
+    harness.electronHandlers.onEndDragReaction();
+
+    // The click reaction is still running and still wants polling paused.
+    assert.strictEqual(resumes(harness), 0);
+
+    harness.timers.find((entry) => entry.ms === 4600).callback();
+    assert.strictEqual(resumes(harness), 1);
   });
 });

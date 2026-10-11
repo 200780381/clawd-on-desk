@@ -3,10 +3,14 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const {
-  APPIMAGE_HOOK_MARKER_FILE,
+  CODEX_WINDOWS_STABLE_ARG,
   CODEX_WSL_INTEROP_ARG,
   resolveNodeBin,
 } = require("./server-config");
+const {
+  collectRelativeHookClosure,
+  materializeAppImageHookScript,
+} = require("./appimage-hook-materializer");
 const {
   readJsonFile,
   writeJsonAtomic,
@@ -31,7 +35,11 @@ const CODEX_HOOK_EVENTS = [
   "PreToolUse",
   "PermissionRequest",
   "PostToolUse",
+  "PreCompact",
+  "PostCompact",
   "Stop",
+  "Interrupt",
+  "SessionEnd",
 ];
 const CODEX_HOOKS_FEATURE_KEY = "hooks";
 const LEGACY_CODEX_HOOKS_FEATURE_KEY = "codex_hooks";
@@ -59,8 +67,10 @@ function stableCodexHookPaths(codexDir, options = {}) {
     posixLauncherPath,
     windowsManifestPath,
     posixManifestPath,
-    // Windows executes a fixed inline PowerShell dispatcher that reads a data
-    // sidecar. POSIX still needs a tiny /bin/sh launcher.
+    // Windows stable entries use a direct call-operator command; the data
+    // sidecar is read by codex-hook.js itself (Defender ML false positive on
+    // the old inline dispatcher, clawd-on-desk#986). POSIX still needs a
+    // tiny /bin/sh launcher.
     launcherPath: platform === "win32" ? windowsRunPath : posixLauncherPath,
     manifestPath: platform === "win32" ? windowsManifestPath : posixManifestPath,
   };
@@ -458,6 +468,14 @@ function materializeStableCodexHookLauncher(entryPath, options = {}) {
 
 function buildStableCodexHookCommand(launcherPath, platform = process.platform) {
   if (platform === "win32") {
+    // NOTE (2026-09-04): the local stable Windows path no longer uses this
+    // inline dispatcher — Windows Defender's ML heuristic flags the
+    // "ReadAllLines + FromBase64String + SetEnvironmentVariable + & $n $t"
+    // shape as Trojan:Win32/Commando.A!ml on every Codex PowerShell launch
+    // (clawd-on-desk#986). Production registers the direct call-operator form
+    // (desiredCommandWindows / buildCodexHookCommand) and codex-hook.js reads
+    // the sidecar itself. This branch remains only for recognizing/removing
+    // legacy entries and for non-executing compatibility tests.
     const runFile = quotePowerShellLiteral(launcherPath);
     const signature = quotePowerShellLiteral(CODEX_STABLE_WINDOWS_RUN_SIGNATURE);
     // Codex already evaluates commandWindows in PowerShell. Read the mutable
@@ -499,7 +517,18 @@ function extractStableCodexHookLauncherPath(command, platform = process.platform
 function inspectStableCodexHookCommand(command, options = {}) {
   const platform = options.platform || process.platform;
   const fsApi = options.fs || fs;
-  const launcherPath = extractStableCodexHookLauncherPath(command, platform);
+  let launcherPath = extractStableCodexHookLauncherPath(command, platform);
+  let directWindowsCommand = false;
+  if (
+    !launcherPath
+    && platform === "win32"
+    && options.codexDir
+    && String(command || "").trim().endsWith(` ${CODEX_WINDOWS_STABLE_ARG}`)
+  ) {
+    const paths = stableCodexHookPaths(options.codexDir, { ...options, platform });
+    launcherPath = paths.windowsRunPath;
+    directWindowsCommand = true;
+  }
   if (!launcherPath) return { matched: false };
   const manifestPath = platform === "win32"
     ? path.join(path.dirname(launcherPath), "codex-hook.windows.json")
@@ -543,6 +572,22 @@ function inspectStableCodexHookCommand(command, options = {}) {
         manifestPath,
       };
     }
+    if (
+      directWindowsCommand
+      && command !== `${buildCodexHookCommand(
+        manifest.record.nodeBin,
+        manifest.record.target,
+        "win32"
+      )} ${CODEX_WINDOWS_STABLE_ARG}`
+    ) {
+      return {
+        matched: true,
+        ok: false,
+        issue: "stable-launcher-stale",
+        launcherPath,
+        manifestPath,
+      };
+    }
     return {
       matched: true,
       ok: true,
@@ -551,6 +596,7 @@ function inspectStableCodexHookCommand(command, options = {}) {
       nodeBin: manifest.record.nodeBin,
       scriptPath: manifest.record.target,
       mode: manifest.record.mode,
+      directWindowsCommand,
     };
   }
   let source;
@@ -650,7 +696,10 @@ function removeStableCodexHookLauncher(options = {}) {
 }
 
 function timeoutForCodexEvent(event) {
-  return event === "PermissionRequest" ? 600 : 30;
+  if (event === "PermissionRequest") return 600;
+  // Upstream caps teardown/interruption hooks at three seconds.
+  if (event === "SessionEnd" || event === "Interrupt") return 3;
+  return 30;
 }
 
 function getCodexPaths(options = {}) {
@@ -688,7 +737,8 @@ function windowsPathToWslPath(value) {
 // binds 127.0.0.1 only) even in WSL's default NAT mode, where a Linux-side
 // process gets connection-refused. Requires WSL interop (on by default).
 // Env-var prefixes (`KEY=value node.exe ...`) do NOT cross the interop
-// boundary — never prepend env here; put env in commandWindows instead.
+// boundary — never prepend env here; keep it on the native Windows path
+// (the stable local hook imports it from its data sidecar).
 function buildCodexHookPosixInteropCommand(nodeBin, hookScript) {
   const wslNodeBin = windowsPathToWslPath(nodeBin);
   // A UNC node path (\\server\share\node.exe or //server/share/node.exe)
@@ -699,117 +749,6 @@ function buildCodexHookPosixInteropCommand(nodeBin, hookScript) {
       ? "node.exe"
       : (/\.exe$/i.test(String(nodeBin)) ? nodeBin : `${nodeBin}.exe`));
   return `${formatNodeHookCommand(posixNodeBin, hookScript, { platform: "linux" })} ${CODEX_WSL_INTEROP_ARG}`;
-}
-
-function collectRelativeHookClosure(entryPath, options = {}) {
-  const fsApi = options.fs || fs;
-  const resolvedEntry = path.resolve(entryPath);
-  const rootDir = path.dirname(resolvedEntry);
-  const extraEntryPaths = Array.isArray(options.extraEntryPaths)
-    ? options.extraEntryPaths.map((value) => path.resolve(value))
-    : [];
-  const pending = [resolvedEntry, ...extraEntryPaths];
-  const files = new Map();
-
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (files.has(current)) continue;
-    const relative = path.relative(rootDir, current);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new Error(`AppImage hook dependency escaped hooks directory: ${current}`);
-    }
-    const content = fsApi.readFileSync(current);
-    files.set(current, content);
-    const source = content.toString("utf8");
-    for (const match of source.matchAll(/require\(["'](\.\/[^"']+)["']\)/g)) {
-      const resolved = path.resolve(path.dirname(current), match[1]);
-      const candidate = path.extname(resolved) ? resolved : `${resolved}.js`;
-      const dependencyRelative = path.relative(rootDir, candidate);
-      if (dependencyRelative.startsWith("..") || path.isAbsolute(dependencyRelative)) {
-        throw new Error(`AppImage hook dependency escaped hooks directory: ${match[1]}`);
-      }
-      pending.push(candidate);
-    }
-  }
-  return { rootDir, files };
-}
-
-function materializeAppImageHookScript(entryPath, options = {}) {
-  const fsApi = options.fs || fs;
-  const appImagePath = String(options.appImagePath || "").trim();
-  if (!path.posix.isAbsolute(appImagePath)) {
-    throw new Error("AppImage hook installation requires an absolute APPIMAGE path");
-  }
-
-  const resolvedEntry = path.resolve(entryPath);
-  const { rootDir, files } = collectRelativeHookClosure(resolvedEntry, {
-    fs: fsApi,
-    extraEntryPaths: options.extraEntryPaths,
-  });
-  const ordered = [...files.entries()].sort(([a], [b]) => a.localeCompare(b));
-  const hasher = crypto.createHash("sha256");
-  hasher.update(`${appImagePath}\0`);
-  for (const [filePath, content] of ordered) {
-    hasher.update(`${path.relative(rootDir, filePath)}\0`);
-    hasher.update(content);
-    hasher.update("\0");
-  }
-
-  const materializedRoot = options.materializedRoot
-    || path.join(options.homeDir || os.homedir(), ".clawd", "appimage-hooks");
-  const versionDir = path.join(materializedRoot, hasher.digest("hex").slice(0, 20));
-  const targetEntry = path.join(versionDir, path.relative(rootDir, resolvedEntry));
-  const markerPath = path.join(versionDir, APPIMAGE_HOOK_MARKER_FILE);
-  const isComplete = () => {
-    try {
-      if (String(fsApi.readFileSync(markerPath, "utf8")).trim() !== appImagePath) return false;
-      return ordered.every(([filePath]) =>
-        fsApi.existsSync(path.join(versionDir, path.relative(rootDir, filePath))));
-    } catch {
-      return false;
-    }
-  };
-  if (isComplete()) return targetEntry;
-
-  fsApi.mkdirSync(materializedRoot, { recursive: true, mode: 0o700 });
-  const stagingDir = `${versionDir}.tmp-${process.pid}-${Date.now()}`;
-  let replacedDir = null;
-  try {
-    fsApi.mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
-    for (const [filePath, content] of ordered) {
-      const target = path.join(stagingDir, path.relative(rootDir, filePath));
-      fsApi.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-      fsApi.writeFileSync(target, content);
-    }
-    fsApi.writeFileSync(
-      path.join(stagingDir, APPIMAGE_HOOK_MARKER_FILE),
-      `${appImagePath}\n`,
-      { mode: 0o600 }
-    );
-    if (fsApi.existsSync(versionDir) && !isComplete()) {
-      replacedDir = `${versionDir}.replaced-${process.pid}-${Date.now()}`;
-      fsApi.renameSync(versionDir, replacedDir);
-    }
-    try {
-      fsApi.renameSync(stagingDir, versionDir);
-    } catch (err) {
-      // Another process may have won the same content-addressed install.
-      if (!isComplete()) {
-        if (replacedDir && !fsApi.existsSync(versionDir)) {
-          try { fsApi.renameSync(replacedDir, versionDir); } catch {}
-        }
-        throw err;
-      }
-      fsApi.rmSync(stagingDir, { recursive: true, force: true });
-    }
-    if (replacedDir) fsApi.rmSync(replacedDir, { recursive: true, force: true });
-  } catch (err) {
-    try {
-      fsApi.rmSync(stagingDir, { recursive: true, force: true });
-    } catch {}
-    throw err;
-  }
-  return targetEntry;
 }
 
 function quotePosixEnvValue(value) {
@@ -1209,6 +1148,7 @@ function registerCodexCommandHooks(options = {}) {
       appImagePath: processEnv.APPIMAGE,
       homeDir: options.homeDir,
       materializedRoot: options.materializedRoot,
+      platform: hostPlatform,
       extraEntryPaths,
     }).replace(/\\/g, "/");
   }
@@ -1268,15 +1208,27 @@ function registerCodexCommandHooks(options = {}) {
   }
   // On a Windows host, a WSL session may consume this hooks.json through a
   // shared CODEX_HOME (#544). Codex resolves `commandWindows` on Windows and
-  // `command` on POSIX, so write a stable data-sidecar dispatcher / platform
-  // wrapper command in the two fields. Node and active hook paths live in
-  // mutable managed artifacts and can change without invalidating either
-  // platform's trusted_hash. Note codex builds
-  // before openai/codex#22159 (2026-05) ignore commandWindows and would run
-  // the POSIX form on Windows.
+  // `command` on POSIX. The local *stable* Windows entry used to be a fixed
+  // inline PowerShell dispatcher that decoded the UTF-8/Base64 data sidecar
+  // (node path, hook path, env) before `& $node $target`. Windows Defender's
+  // ML heuristic flags that dispatcher's command line as
+  // Trojan:Win32/Commando.A!ml on every Codex PowerShell launch (2026-09-03,
+  // Threat ID 2147840094, clawd-on-desk#986), so the entry is now the direct
+  // call-operator form — AGENTS.md requires the PowerShell call operator; a
+  // bare `"node" "hook.js"` exits 1 — and codex-hook.js reads the same
+  // mutable sidecar itself and applies env before any hook code runs. The
+  // sidecar/manifest artifacts are still written (data-driven hook, installer
+  // recovery, Doctor validation). Remote installs never opt into the stable launcher and keep
+  // their env-prefixed direct form unchanged. Note codex builds before
+  // openai/codex#22159 (2026-05) ignore commandWindows and would run the
+  // POSIX form on Windows.
   const desiredCommandWindows = isWindowsHost
     ? (stableLauncher
-      ? buildStableCodexHookCommand(stableLauncher.windowsRunPath, "win32")
+      ? `${buildCodexHookCommand(
+        stableLauncher.nodeBin,
+        stableLauncher.target,
+        "win32"
+      )} ${CODEX_WINDOWS_STABLE_ARG}`
       : withCommandEnv(buildCodexHookCommand(nodeBin, hookScript, "win32"), commandEnv, "win32"))
     : null;
   const desiredCommand = stableLauncher
@@ -1294,7 +1246,7 @@ function registerCodexCommandHooks(options = {}) {
   // emit a false warning — repairCodexHooks escalates any warning to error.
   if (isWindowsHost && filterCommandEnvEntries(commandEnv).length) {
     warnings.push(
-      "Env vars don't cross the WSL interop boundary; they were applied to commandWindows only."
+      "Env vars don't cross the WSL interop boundary; they were applied to the native Windows hook only."
     );
   }
 
@@ -1433,6 +1385,7 @@ function unregisterCodexCommandHooks(options = {}) {
 
 module.exports = {
   CODEX_HOOK_EVENTS,
+  CODEX_WINDOWS_STABLE_ARG,
   CODEX_WSL_INTEROP_ARG,
   CODEX_HOOKS_FEATURE_KEY,
   LEGACY_CODEX_HOOKS_FEATURE_KEY,

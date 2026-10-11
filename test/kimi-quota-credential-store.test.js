@@ -78,6 +78,28 @@ test("temporary decryption failure preserves the only ciphertext", () => withTem
   assert.equal(fs.readFileSync(recordPath, "utf8"), before);
 }));
 
+test("metadata inspection never asks secure storage to decrypt", () => withTempDir((dir) => {
+  const recordPath = path.join(dir, "credential.json");
+  const writable = createKimiQuotaCredentialStore({
+    recordPath,
+    safeStorage: strongSafeStorage(),
+    randomUUID: () => "123e4567-e89b-42d3-a456-426614174000",
+    now: () => 1234,
+  });
+  writable.save("sk-kimi-secret");
+  const metadataOnly = createKimiQuotaCredentialStore({
+    recordPath,
+    safeStorage: strongSafeStorage({
+      decryptString: () => { throw new Error("must not decrypt"); },
+    }),
+  });
+  assert.deepEqual(metadataOnly.inspectMetadata(), {
+    configured: true,
+    credentialId: "123e4567-e89b-42d3-a456-426614174000",
+    updatedAt: 1234,
+  });
+}));
+
 test("a failed atomic replacement leaves the previous key readable", () => withTempDir((dir) => {
   const recordPath = path.join(dir, "credential.json");
   const safeStorage = strongSafeStorage();

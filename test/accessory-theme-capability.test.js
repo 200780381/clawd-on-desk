@@ -71,8 +71,17 @@ describe("built-in accessory capability contracts", () => {
     const usages = projectThemeVisualUsages(raw);
     const files = collectRequiredAssetFiles(raw);
 
-    assert.strictEqual(usages.length, 49);
-    assert.strictEqual(files.length, 36);
+    assert.strictEqual(usages.length, 52);
+    assert.strictEqual(files.length, 50);
+    assert.deepStrictEqual(
+      new Set(files),
+      new Set(fs.readdirSync(path.join(ROOT, "assets", "svg")).filter((file) => file.endsWith(".svg"))),
+      "every SVG exposed by the animation picker must have an audited attachment policy"
+    );
+    assert.ok(files.includes("clawd-outlaw-bender.svg"));
+    assert.ok(files.includes("clawd-working-typing-boss.svg"));
+    assert.ok(!usages.some((usage) => usage.file === "clawd-working-typing-boss.svg"));
+    assert.ok(!usages.some((usage) => usage.source === "rendering.objectChannelFiles"));
     assert.strictEqual(normalized._capabilities.accessories, true);
     assertDeclaredTargetsExist("clawd", raw);
 
@@ -86,6 +95,52 @@ describe("built-in accessory capability contracts", () => {
       assert.strictEqual(raw.customization.accessories.files[hidden].visibility, "hidden");
       assert.ok(usages.some((usage) => usage.file === hidden), `${hidden} should be reachable`);
     }
+
+    const buildingTier = raw.workingTiers.find(({ minSessions }) => minSessions === 3);
+    assert.deepStrictEqual(buildingTier, {
+      minSessions: 3,
+      file: "clawd-working-building.svg",
+    });
+    const buildingAccessory =
+      raw.customization.accessories.files[buildingTier.file];
+    assert.deepStrictEqual(
+      buildingAccessory.staticFrame,
+      { cx: 7.5, baseY: 1, width: 16 },
+      "the 3+ session accessory should sit on top of the built-in safety helmet"
+    );
+    assert.strictEqual(buildingAccessory.followTarget.id, "accessory-anchor");
+    assert.deepStrictEqual(
+      buildingAccessory.followTarget.frame,
+      buildingAccessory.staticFrame
+    );
+    const headphonesTier = raw.workingTiers.find(({ minSessions }) => minSessions === 2);
+    assert.deepStrictEqual(headphonesTier, {
+      minSessions: 2,
+      file: "clawd-headphones-groove.svg",
+    });
+    assert.deepStrictEqual(
+      raw.customization.accessories.files[headphonesTier.file],
+      { visibility: "hidden" },
+      "the headphones sprite should never add a head accessory"
+    );
+    for (const tier of raw.workingTiers.filter(({ minSessions }) => minSessions !== 2)) {
+      assert.notStrictEqual(
+        raw.customization.accessories.files[tier.file].visibility,
+        "hidden",
+        `${tier.minSessions}-session working accessories should remain visible`
+      );
+    }
+    assert.deepStrictEqual(raw.fileHitBoxes["clawd-working-typing.svg"], {
+      x: -2, y: -7, w: 20, h: 24,
+    });
+    assert.strictEqual(
+      raw.fileHitBoxes["clawd-headphones-groove.svg"],
+      undefined,
+      "the 2-session base hitbox must not reserve empty accessory space"
+    );
+    assert.deepStrictEqual(raw.fileHitBoxes["clawd-working-building.svg"], {
+      x: -1, y: -2, w: 17, h: 19,
+    });
 
     const sleeping = raw.customization.accessories.files["clawd-sleeping.svg"];
     assert.deepStrictEqual(sleeping.staticFrame, { cx: 7.5, baseY: 10, width: 16 });

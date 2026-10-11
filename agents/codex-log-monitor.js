@@ -18,7 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const CodexSubagentClassifier = require("./codex-subagent-classifier");
-const { readCodexThreadName } = require("../hooks/codex-session-index");
+const { bareCodexSessionId, readCodexThreadName, readCodexThreadNames } = require("../hooks/codex-session-index");
 const {
   clampAssistantOutputText,
   extractAssistantTextFromRecord,
@@ -29,6 +29,7 @@ const {
   isFreshCodexQuotaTimestamp,
 } = require("../hooks/codex-rate-limits");
 const { parseCodexUserInputRecord } = require("../hooks/codex-user-input");
+const { getCodexLogEventKey } = require("../hooks/codex-log-event");
 const { normalizeCodexTurnId } = require("../src/codex-turn-id");
 
 const MAX_TRACKED_FILES = 50;
@@ -64,6 +65,12 @@ const BACKFILL_GRACE_MS = 5 * 1000;
 // forward. A one-shot (attention, sweeping, …) must never be carried by
 // either: re-emitting it replays a finished turn's celebration.
 const SUSTAINED_ACTIVE_STATES = new Set(["thinking", "working"]);
+// These records prove model progress without owning a mascot state transition.
+// Quota, titles and file-mtime telemetry must never feed the activity clock.
+const MODEL_PROGRESS_EVENTS = new Set([
+  "event_msg:agent_message", "event_msg:agent_reasoning", "event_msg:agent_reasoning_raw_content",
+  "response_item:reasoning",
+]);
 // Startup recovery sweep bounds (see _recoverStalePendingUserInput). These
 // exist to keep the sweep a bounded, one-time cost — never a full readFileSync
 // of an arbitrarily large rollout file on the Electron main process.
@@ -153,6 +160,7 @@ class CodexLogMonitor {
   constructor(agentConfig, onStateChange, options = {}) {
     this._config = agentConfig;
     this._onStateChange = onStateChange;
+    this._onActivity = typeof options.onActivity === "function" ? options.onActivity : null;
     this._classifier = options.classifier || new CodexSubagentClassifier();
     this._onUserInputRequest = typeof options.onUserInputRequest === "function"
       ? options.onUserInputRequest
@@ -343,6 +351,28 @@ class CodexLogMonitor {
       this._runReadyStartupRecovery(context);
     }
     this._pruneTrackedFilesIfNeeded();
+    this._refreshSessionTitles();
+  }
+
+  _refreshSessionTitles() {
+    // Unparsed/failed replay candidates have no observed lifecycle to label.
+    const sessions = Array.from(this._tracked.values()).filter(tracked => tracked.lastState);
+    for (const [filePath, tracked] of this._retiredTracked) {
+      if (!this._tracked.has(filePath) && tracked.lastState) sessions.push(tracked);
+    }
+    const names = readCodexThreadNames(
+      sessions.map(tracked => tracked.sessionId),
+      { codexDir: this._codexDir }
+    );
+    for (const tracked of sessions) {
+      const title = names.get(bareCodexSessionId(tracked.sessionId));
+      if (!title || (title === tracked.reportedIndexTitle && title === tracked.sessionTitle)) continue;
+      tracked.sessionTitle = title;
+      tracked.reportedIndexTitle = title;
+      // An index update is metadata, including after a completed turn. Do
+      // not use _emitStateChange: it also advances lifecycle/liveness clocks.
+      this._onStateChange(tracked.sessionId, null, "session_index:title", { sessionTitle: title });
+    }
   }
 
   _insertStartupRecoveryCandidate(candidate) {
@@ -1210,6 +1240,7 @@ class CodexLogMonitor {
         fileIdentity,
         cwd: retired ? retired.cwd : "",
         sessionTitle: retired ? retired.sessionTitle : null,
+        reportedIndexTitle: retired ? retired.reportedIndexTitle || null : null,
         codexOriginator: retired ? retired.codexOriginator : null,
         codexSource: retired ? retired.codexSource : null,
         codexQuotaProviderHint: retired ? retired.codexQuotaProviderHint || null : null,
@@ -1591,11 +1622,7 @@ class CodexLogMonitor {
 
     const type = obj.type;
     const payload = obj.payload;
-    const subtype =
-      payload && typeof payload === "object" ? payload.type || "" : "";
-
-    // Build lookup key
-    const key = subtype ? type + ":" + subtype : type;
+    const key = getCodexLogEventKey(type, payload);
 
     // Turn identity is file-order bookkeeping, not a live callback. Apply it
     // before both replay guards so an old task_started seeds the active ID and
@@ -1617,7 +1644,20 @@ class CodexLogMonitor {
       tracked.activeTurnId = null;
       tracked.turnBoundaryOpen = false;
     };
-    const turnExtra = effectiveTurnId ? { turnId: effectiveTurnId } : null;
+    const parsedOccurredAt = obj && typeof obj.timestamp === "string"
+      ? Date.parse(obj.timestamp)
+      : NaN;
+    const rawToolUseId = payload && typeof payload === "object"
+      ? (payload.call_id || payload.tool_use_id || payload.id)
+      : null;
+    const turnExtra = {
+      ...(effectiveTurnId ? { turnId: effectiveTurnId, recapDedupeId: effectiveTurnId } : {}),
+      ...(Number.isFinite(parsedOccurredAt) ? { recapOccurredAt: parsedOccurredAt } : {}),
+      ...(typeof rawToolUseId === "string" && rawToolUseId ? { toolUseId: rawToolUseId } : {}),
+      ...(key === "response_item:function_call" && payload && payload.name === "web_search"
+        ? { recapIsWebSearch: true }
+        : {}),
+    };
 
     // Metadata is needed for future live writes even when the session_meta
     // record itself predates monitor start.
@@ -1635,7 +1675,7 @@ class CodexLogMonitor {
     // mtime into the "live" window even though the actual question line is
     // old. A still-open question must not be dropped just because the guard
     // saw a stale timestamp on the line that carries it.
-    if (this._processCodexUserInputRecord(obj, tracked)) return;
+    if (this._processCodexUserInputRecord(obj, tracked, turnExtra)) return;
 
     // Skip historical events that predate monitor start — prevents replay
     // storms on app restart from driving stale state transitions.
@@ -1708,10 +1748,12 @@ class CodexLogMonitor {
     const map = this._config.logEventMap;
     const state = map[key];
     if (state === undefined) {
+      this._emitLiveActivity(tracked, key, turnExtra, MODEL_PROGRESS_EVENTS.has(key) ? tracked.lastState : null);
       finishTurnTerminal();
       return; // unmapped event, skip
     }
     if (state === null) {
+      this._emitLiveActivity(tracked, key, turnExtra, MODEL_PROGRESS_EVENTS.has(key) ? tracked.lastState : null);
       finishTurnTerminal();
       return; // explicitly ignored
     }
@@ -1723,7 +1765,10 @@ class CodexLogMonitor {
       tracked.assistantLastOutput = null;
       tracked.assistantLastOutputTruncated = false;
     }
-    if (key === "response_item:function_call") {
+    const isToolBoundary = key === "response_item:function_call"
+      || key === "response_item:custom_tool_call"
+      || key === "response_item:web_search_call";
+    if (isToolBoundary) {
       tracked.hadToolUse = true;
     }
 
@@ -1737,7 +1782,7 @@ class CodexLogMonitor {
       tracked.lastState = resolved;
       // task_complete means the turn that asked is over — any question still
       // open for it is moot; Codex will not act on an answer after this.
-      this._clearPendingUserInputsForTrackedSession(tracked);
+      this._clearPendingUserInputsForTrackedSession(tracked, "turn-complete");
       if (tracked.backfilling) {
         finishTurnTerminal();
         return;
@@ -1753,7 +1798,7 @@ class CodexLogMonitor {
     // turn_aborted: same reasoning as task_complete above, just a different
     // terminal signal (the turn didn't finish, it was cut short).
     if (key === "event_msg:turn_aborted") {
-      this._clearPendingUserInputsForTrackedSession(tracked);
+      this._clearPendingUserInputsForTrackedSession(tracked, "turn-aborted");
     }
 
     // Backfill gate: first-pass replay of a file's historical content skips
@@ -1767,8 +1812,15 @@ class CodexLogMonitor {
       return;
     }
 
-    // Avoid spamming same state
-    if (state === tracked.lastState && state === "working") return;
+    // A repeated result can be real progress even when the visual state is
+    // deduplicated below or official-hook arbitration suppresses its callback.
+    this._emitLiveActivity(tracked, key, turnExtra, state);
+
+    // Avoid spamming repeated working state, except for one-shot tool
+    // boundaries. The official hook emits every PreToolUse; JSONL fallback
+    // must preserve the same counting boundary even when the pet is already
+    // visually working.
+    if (state === tracked.lastState && state === "working" && !isToolBoundary) return;
     tracked.lastState = state;
     this._emitStateChange(tracked, state, key, turnExtra);
     finishTurnTerminal();
@@ -1805,9 +1857,20 @@ class CodexLogMonitor {
   // Extract UUID from rollout filename
   // rollout-2026-03-25T15-10-51-019d23d4-f1a9-7633-b9c7-758327137228.jsonl
   _extractSessionId(fileName) {
-    // UUID v7 is the last 5 segments of the filename (before .jsonl)
-    const base = fileName.replace(".jsonl", "");
-    const parts = base.split("-");
+    // Codex Desktop can append the turn UUID to a rollout filename:
+    // rollout-<timestamp>-<thread UUID>_<turn UUID>.jsonl. The thread UUID
+    // remains the session identity; using the final five hyphen segments here
+    // would instead create a new Clawd session for every Desktop turn and
+    // bypass the official-hook suppression fence.
+    const base = String(fileName || "").replace(/\.jsonl$/i, "");
+    const uuid = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
+    const match = base.match(new RegExp(`${uuid}(?:_${uuid})?$`, "i"));
+    if (match) return match[1];
+
+    // Keep the historical permissive fallback for older/custom fixtures, but
+    // strip a UUID-shaped turn suffix before taking the final five segments.
+    const withoutTurnSuffix = base.replace(new RegExp(`_${uuid}$`, "i"), "");
+    const parts = withoutTurnSuffix.split("-");
     // UUID: last 5 parts (8-4-4-4-12 hex)
     if (parts.length < 10) return null;
     return parts.slice(-5).join("-");
@@ -1888,9 +1951,11 @@ class CodexLogMonitor {
     if (!filePath || !tracked) return;
     this._retiredTracked.delete(filePath);
     this._retiredTracked.set(filePath, {
+      sessionId: tracked.sessionId,
       offset: Number.isFinite(tracked.offset) ? tracked.offset : 0,
       cwd: tracked.cwd || "",
       sessionTitle: tracked.sessionTitle || null,
+      reportedIndexTitle: tracked.reportedIndexTitle || null,
       codexOriginator: tracked.codexOriginator || null,
       codexSource: tracked.codexSource || null,
       codexQuotaProviderHint: tracked.codexQuotaProviderHint || null,
@@ -1963,11 +2028,16 @@ class CodexLogMonitor {
     );
   }
 
-  _processCodexUserInputRecord(obj, tracked) {
+  _processCodexUserInputRecord(obj, tracked, turnExtra = {}) {
     const record = parseCodexUserInputRecord(obj);
     if (!record) return false;
     if (!(tracked.pendingUserInputs instanceof Map)) tracked.pendingUserInputs = new Map();
     if (record.phase === "request") {
+      record.activity = {
+        turnId: turnExtra.turnId || null,
+        recapOccurredAt: turnExtra.recapOccurredAt ?? null,
+        userInputReplay: this._isUserInputReplay(tracked, turnExtra),
+      };
       // #707 follow-up review round 4: the recovery sweep's own age cap only
       // protects files it actually opens (mtime outside the active window).
       // A file Codex Desktop refreshed back into the active window attaches
@@ -1990,11 +2060,25 @@ class CodexLogMonitor {
       return true;
     }
     if (!tracked.pendingUserInputs.has(record.callId)) return true;
+    const request = tracked.pendingUserInputs.get(record.callId);
     tracked.pendingUserInputs.delete(record.callId);
     if (!tracked.backfilling && !tracked.initializingUserInputs && this._onUserInputResolved) {
-      this._onUserInputResolved(tracked.sessionId, record.callId);
+      this._onUserInputResolved(tracked.sessionId, record.callId, {
+        source: "function-call-output",
+        // Correlate to the original request, not a newer active turn that may
+        // already have started before this output is drained from the file.
+        turnId: request.activity && request.activity.turnId || null,
+        recapOccurredAt: turnExtra.recapOccurredAt ?? null,
+        userInputReplay: this._isUserInputReplay(tracked, turnExtra),
+      });
     }
     return true;
+  }
+
+  _isUserInputReplay(tracked, extra) {
+    return !!(tracked.backfilling || tracked.initializingUserInputs)
+      || !Number.isSafeInteger(extra.recapOccurredAt)
+      || extra.recapOccurredAt < this._startedAtMs - 1500;
   }
 
   // Drop any request_user_input still open for this session because its
@@ -2004,12 +2088,17 @@ class CodexLogMonitor {
   // function_call_output for the same callId can't resurrect it; the
   // dismiss callback only fires for a genuinely live (non-backfill,
   // non-initializing) transition, matching every other emit in this file.
-  _clearPendingUserInputsForTrackedSession(tracked) {
+  _clearPendingUserInputsForTrackedSession(tracked, reason = "turn-terminal") {
     if (!(tracked.pendingUserInputs instanceof Map) || tracked.pendingUserInputs.size === 0) return;
     const callIds = [...tracked.pendingUserInputs.keys()];
     tracked.pendingUserInputs.clear();
     if (tracked.backfilling || tracked.initializingUserInputs || !this._onUserInputResolved) return;
-    for (const callId of callIds) this._onUserInputResolved(tracked.sessionId, callId);
+    for (const callId of callIds) {
+      this._onUserInputResolved(tracked.sessionId, callId, {
+        source: "turn-terminal",
+        reason,
+      });
+    }
   }
 
   _emitPendingUserInputRequests(tracked) {
@@ -2023,6 +2112,7 @@ class CodexLogMonitor {
     if (!this._onUserInputRequest || this._isTrackedSubagent(tracked)) return;
     const agentPid = this._resolveTrackedAgentPid(tracked);
     this._onUserInputRequest(tracked.sessionId, request, {
+      ...(request.activity || { userInputReplay: true }),
       cwd: tracked.cwd,
       sourcePid: agentPid,
       agentPid,
@@ -2084,6 +2174,7 @@ class CodexLogMonitor {
       agentPid: extra && Object.prototype.hasOwnProperty.call(extra, "agentPid")
         ? extra.agentPid
         : agentPid,
+      transcriptPath: tracked.filePath,
       sessionTitle: tracked.sessionTitle,
       codexOriginator: tracked.codexOriginator || null,
       codexSource: tracked.codexSource || null,
@@ -2091,6 +2182,17 @@ class CodexLogMonitor {
       headless: this._isTrackedSubagent(tracked)
         ? true
         : (extra && Object.prototype.hasOwnProperty.call(extra, "headless") ? extra.headless : undefined),
+    });
+  }
+
+  _emitLiveActivity(tracked, event, extra, state) {
+    if (!this._onActivity || !tracked || this._isReplayActive(tracked)
+      || !tracked.turnBoundaryOpen || !SUSTAINED_ACTIVE_STATES.has(state)
+      || !extra || !Number.isSafeInteger(extra.recapOccurredAt)) return;
+    this._onActivity(tracked.sessionId, state, event, {
+      turnId: extra.turnId || null,
+      recapOccurredAt: extra.recapOccurredAt,
+      headless: this._isTrackedSubagent(tracked),
     });
   }
 }

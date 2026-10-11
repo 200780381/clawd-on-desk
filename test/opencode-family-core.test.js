@@ -129,9 +129,13 @@ describe("opencode-family plugin factory", () => {
     assert.notStrictEqual(oc.__test._statePostTailBySession, mc.__test._statePostTailBySession);
     assert.notStrictEqual(oc.__test._sessionInstanceDirectoryById, mc.__test._sessionInstanceDirectoryById);
     assert.notStrictEqual(oc.__test._permissionTargetByRequestId, mc.__test._permissionTargetByRequestId);
+    assert.notStrictEqual(oc.__test._permissionPostTailByRequestId, mc.__test._permissionPostTailByRequestId);
     oc.__test._lastStatePerSession.set("opencode:ses_x", "working");
     assert.strictEqual(mc.__test._lastStatePerSession.size, 0);
     oc.__test._lastStatePerSession.clear();
+    oc.__test._permissionPostTailByRequestId.set("per-shared", Promise.resolve(true));
+    assert.strictEqual(mc.__test._permissionPostTailByRequestId.has("per-shared"), false);
+    oc.__test._permissionPostTailByRequestId.clear();
 
     // Port cache: live getter/setter into the closure, isolated per instance.
     assert.strictEqual(oc.__test._cachedPort, null);
@@ -370,6 +374,26 @@ describe("opencode-family registry", () => {
       assert.ok(
         DEFAULT_LOG_BASENAMES.includes(cfg.logFileName),
         `${agentId}: ${cfg.logFileName} missing from doctor-logs DEFAULT_LOG_BASENAMES`
+      );
+    }
+  });
+
+  it("every v2 entry's logFileName is in the doctor's default log allowlist", () => {
+    // The v2 entry is a separate module with its own log file; the v1-only
+    // loop above cannot see it. Read the literal from the entry instead of
+    // repeating it here so the registry and entry stay coupled.
+    // eslint-disable-next-line global-require
+    const { DEFAULT_LOG_BASENAMES } = require("../src/doctor-logs");
+    for (const [agentId, cfg] of Object.entries(OPENCODE_FAMILY)) {
+      if (!cfg.v2PluginDirName) continue;
+      const entryPath = path.join(HOOKS_DIR, cfg.v2PluginDirName, "index.mjs");
+      assert.ok(fs.existsSync(entryPath), `${agentId} v2 entry missing: ${entryPath}`);
+      const source = fs.readFileSync(entryPath, "utf8");
+      const match = source.match(/logFileName:\s*"([^"]+)"/);
+      assert.ok(match, `${entryPath} must set logFileName as a string literal`);
+      assert.ok(
+        DEFAULT_LOG_BASENAMES.includes(match[1]),
+        `${agentId} v2: ${match[1]} missing from doctor-logs DEFAULT_LOG_BASENAMES`
       );
     }
   });

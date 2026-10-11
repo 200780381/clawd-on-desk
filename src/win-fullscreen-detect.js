@@ -34,7 +34,22 @@ const MONITOR_DEFAULTTONEAREST = 2;
 // setFocusable(false) on Windows ends in Focus(false), which deactivates —
 // cancelling e.g. an in-place file rename on the desktop. Excluding the shell
 // window classes keeps "fullscreen" meaning an actual app.
-const DESKTOP_SHELL_WINDOW_CLASSES = new Set(["progman", "workerw"]);
+//
+// #1017: Windows 11 hosts more of its shell in XAML island windows that pass
+// the same geometry test: XamlExplorerHostIslandWindow (explorer's Alt-Tab
+// switcher, Task View, snap layouts) and TextInputHost's
+// Windows.UI.Core.CoreWindow (IME candidates, emoji panel, clipboard history).
+// They are borderless WS_POPUP windows with no caption and no WS_MAXIMIZE, so
+// the #871 style refinement cannot rescue them either, and they are foreground
+// only for a few hundred ms, so a 1s poll landing inside that window hid the
+// pet "at random". UWP apps are NOT affected by listing CoreWindow: their
+// foreground window is the ApplicationFrameWindow host, never the CoreWindow.
+const DESKTOP_SHELL_WINDOW_CLASSES = new Set([
+  "progman",
+  "workerw",
+  "xamlexplorerhostislandwindow",
+  "windows.ui.core.corewindow",
+]);
 // Ample for real class names; matches win-foreground-terminal.js.
 const CLASS_NAME_BUF_LEN = 256;
 
@@ -80,12 +95,18 @@ function rectCoversMonitor(winRect, monitorRect, tolerance = FULLSCREEN_TOLERANC
   );
 }
 
-// Returns a function `() => boolean` that reports whether the current
-// foreground window covers its whole monitor. Never throws; degrades to a
-// constant-false probe off Windows or when the FFI cannot be loaded.
+// Returns a probe function reporting whether the current foreground window
+// covers its whole monitor. `false` when it does not; when it DOES, an opaque
+// per-window id string (#935 — the fullscreen auto-hide override binds to it
+// so it can tell "the same app again" from "the next fullscreen app"), or
+// plain `true` if koffi cannot supply an address. Every verdict-only consumer
+// keeps working on truthiness. Never throws; degrades to a constant-false
+// probe off Windows or when the FFI cannot be loaded.
 function createForegroundFullscreenProbe(options = {}) {
   const isWin = options.isWin != null ? !!options.isWin : process.platform === "win32";
   const noop = () => false;
+  noop.getLastObservation = () => ({ reliable: false, foregroundId: null, fullscreenId: null });
+  noop.isWindowIdAlive = () => null;
   if (!isWin) return noop;
 
   let GetForegroundWindow;
@@ -95,8 +116,13 @@ function createForegroundFullscreenProbe(options = {}) {
   let GetClassNameW;
   let monitorInfoSize;
   let user32;
+  let addressOf = null;
   try {
     const koffi = options.koffi || require("koffi");
+    // #935: HWND -> stable numeric address for the identity above. Optional —
+    // its absence only costs identity (probe answers plain true), never the
+    // fullscreen verdict itself.
+    if (typeof koffi.address === "function") addressOf = koffi.address;
     user32 = koffi.load("user32.dll");
     // LONG is 32-bit even on Win64 (LLP64); use int32 to be unambiguous.
     koffi.struct("ClawdRECT", { left: "int32", top: "int32", right: "int32", bottom: "int32" });
@@ -117,6 +143,17 @@ function createForegroundFullscreenProbe(options = {}) {
     return noop;
   }
 
+  // Optional lifetime check for a remembered fullscreen HWND. Keeping this
+  // separate from the core bindings preserves the detector if an unusual
+  // user32 surface cannot expose IsWindow: unknown lifetime must fail open,
+  // never disable fullscreen detection.
+  let IsWindow = null;
+  try {
+    IsWindow = user32.func("bool __stdcall IsWindow(void* hWnd)");
+  } catch (err) {
+    if (typeof options.onError === "function") options.onError(err);
+  }
+
   // Bound separately (#871): GetWindowLongPtrW is a macro over GetWindowLongW on
   // 32-bit Windows, so the export can be missing. Losing it must only cost the
   // style refinement — folding it into the block above would turn a missing
@@ -130,21 +167,50 @@ function createForegroundFullscreenProbe(options = {}) {
     if (typeof options.onError === "function") options.onError(err);
   }
 
-  return function isForegroundFullscreen() {
+  let lastObservation = { reliable: false, foregroundId: null, fullscreenId: null };
+
+  function getWindowId(hwnd) {
+    if (!addressOf) return null;
+    try {
+      return String(addressOf(hwnd));
+    } catch {
+      return null;
+    }
+  }
+
+  function isWindowIdAlive(windowId) {
+    if (!IsWindow || typeof windowId !== "string" || !/^\d+$/.test(windowId)) return null;
+    try {
+      // Koffi accepts BigInt values for pointer arguments. The opaque id is
+      // the decimal form of koffi.address(HWND), so this reverses that losslessly.
+      return !!IsWindow(BigInt(windowId));
+    } catch (err) {
+      if (typeof options.onCallError === "function") options.onCallError(err);
+      return null;
+    }
+  }
+
+  function recordNotFullscreen(foregroundId, reliable = true) {
+    lastObservation = { reliable, foregroundId, fullscreenId: null };
+    return false;
+  }
+
+  function isForegroundFullscreen() {
     try {
       const hwnd = GetForegroundWindow();
-      if (!hwnd) return false;
+      if (!hwnd) return recordNotFullscreen(null, false);
+      const foregroundId = getWindowId(hwnd);
 
       const winRect = {};
-      if (!GetWindowRect(hwnd, winRect)) return false;
+      if (!GetWindowRect(hwnd, winRect)) return recordNotFullscreen(foregroundId, false);
 
       const hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-      if (!hMonitor) return false;
+      if (!hMonitor) return recordNotFullscreen(foregroundId, false);
 
       const info = { cbSize: monitorInfoSize, rcMonitor: {}, rcWork: {}, dwFlags: 0 };
-      if (!GetMonitorInfoW(hMonitor, info)) return false;
+      if (!GetMonitorInfoW(hMonitor, info)) return recordNotFullscreen(foregroundId, false);
 
-      if (!rectCoversMonitor(winRect, info.rcMonitor)) return false;
+      if (!rectCoversMonitor(winRect, info.rcMonitor)) return recordNotFullscreen(foregroundId);
 
       // Geometry matched — rule out the desktop shell (#719). Only reached in
       // the rare covers-monitor case, so the extra FFI call is off the common
@@ -155,7 +221,7 @@ function createForegroundFullscreenProbe(options = {}) {
       if (classLen > 0) {
         let className = "";
         for (let i = 0; i < classLen; i++) className += String.fromCharCode(classBuf[i]);
-        if (isDesktopShellWindowClass(className)) return false;
+        if (isDesktopShellWindowClass(className)) return recordNotFullscreen(foregroundId);
       }
 
       // #871: last, separate a merely maximized window from a real fullscreen
@@ -164,16 +230,31 @@ function createForegroundFullscreenProbe(options = {}) {
       // fallback above.
       if (GetWindowLongPtrW) {
         const style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if (isMaximizedNormalWindow(style)) return false;
+        if (isMaximizedNormalWindow(style)) return recordNotFullscreen(foregroundId);
       }
+      // Fullscreen: report the window's identity, not just the verdict (#935).
+      if (foregroundId != null) {
+        lastObservation = { reliable: true, foregroundId, fullscreenId: foregroundId };
+        return foregroundId;
+      }
+      lastObservation = { reliable: true, foregroundId: null, fullscreenId: true };
       return true;
     } catch (err) {
       // Any FFI hiccup at call time: behave as "not fullscreen" so the
       // watchdog keeps the pet visible rather than hiding it on an error.
+      lastObservation = { reliable: false, foregroundId: null, fullscreenId: null };
       if (typeof options.onCallError === "function") options.onCallError(err);
       return false;
     }
-  };
+  }
+
+  // A false fullscreen verdict used to lose the foreground HWND entirely.
+  // Keep the last reliable identity alongside the boolean-compatible return so
+  // the auto-hide override can distinguish "same HWND exited F11" from an
+  // Alt-Tab/tray foreground excursion to a different window.
+  isForegroundFullscreen.getLastObservation = () => ({ ...lastObservation });
+  isForegroundFullscreen.isWindowIdAlive = isWindowIdAlive;
+  return isForegroundFullscreen;
 }
 
 module.exports = {

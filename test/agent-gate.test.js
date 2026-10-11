@@ -2,8 +2,12 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
+  createCodexAutoStartGateEvaluator,
   createRuntimeAgentGate,
   getCodexPermissionMode,
   isAgentEnabled,
@@ -11,11 +15,13 @@ const {
   isAgentPermissionsEnabled,
   isAgentSubagentPermissionsEnabled,
   isAgentNotificationHookEnabled,
+  isCodexAutoStartEnabled,
   isCodexNativeNotificationSoundEnabled,
   isCodexPermissionInterceptEnabled,
   shouldSyncAgentIntegration,
 } = require("../src/agent-gate");
 const { commandRegistry } = require("../src/settings-actions");
+const { createSettingsController } = require("../src/settings-controller");
 const prefs = require("../src/prefs");
 
 describe("isAgentEnabled", () => {
@@ -87,6 +93,69 @@ describe("isAgentIntegrationInstalled", () => {
       shouldSyncAgentIntegration({ agents: { codex: { integrationInstalled: true, enabled: false } } }, "codex"),
       false
     );
+  });
+});
+
+describe("isCodexAutoStartEnabled", () => {
+  it("requires an explicit opt-in plus an installed and enabled Codex integration", () => {
+    const snapshot = prefs.getDefaults();
+    assert.strictEqual(snapshot.autoStartWithCodex, false);
+    assert.strictEqual(isCodexAutoStartEnabled(snapshot), false);
+
+    snapshot.autoStartWithCodex = true;
+    assert.strictEqual(isCodexAutoStartEnabled(snapshot), true);
+
+    snapshot.agents.codex.enabled = false;
+    assert.strictEqual(isCodexAutoStartEnabled(snapshot), false);
+    snapshot.agents.codex.enabled = true;
+    snapshot.agents.codex.integrationInstalled = false;
+    assert.strictEqual(isCodexAutoStartEnabled(snapshot), false);
+  });
+
+  it("fails closed for missing or malformed opt-in state", () => {
+    assert.strictEqual(isCodexAutoStartEnabled(null), false);
+    assert.strictEqual(isCodexAutoStartEnabled({ agents: { codex: { enabled: true } } }), false);
+    assert.strictEqual(isCodexAutoStartEnabled({
+      autoStartWithCodex: "true",
+      agents: { codex: { integrationInstalled: true, enabled: true } },
+    }), false);
+  });
+
+  it("fails closed when any required Codex integration shape or flag is malformed", () => {
+    const malformed = [
+      { autoStartWithCodex: true },
+      { autoStartWithCodex: true, agents: null },
+      { autoStartWithCodex: true, agents: "oops" },
+      { autoStartWithCodex: true, agents: [] },
+      { autoStartWithCodex: true, agents: {} },
+      { autoStartWithCodex: true, agents: { codex: null } },
+      { autoStartWithCodex: true, agents: { codex: [] } },
+      { autoStartWithCodex: true, agents: { codex: {} } },
+      {
+        autoStartWithCodex: true,
+        agents: { codex: { integrationInstalled: true, enabled: "yes" } },
+      },
+      {
+        autoStartWithCodex: true,
+        agents: { codex: { integrationInstalled: 1, enabled: true } },
+      },
+    ];
+
+    for (const snapshot of malformed) {
+      assert.strictEqual(isCodexAutoStartEnabled(snapshot), false);
+    }
+  });
+
+  it("keeps a lost startup authority latched until a new evaluator is created", () => {
+    const snapshot = prefs.getDefaults();
+    snapshot.autoStartWithCodex = true;
+    assert.strictEqual(isCodexAutoStartEnabled(snapshot), true);
+
+    const currentProcess = createCodexAutoStartGateEvaluator({ authorityLost: true });
+    assert.strictEqual(currentProcess(snapshot), false);
+
+    const cleanRestart = createCodexAutoStartGateEvaluator({ authorityLost: false });
+    assert.strictEqual(cleanRestart(snapshot), true);
   });
 });
 
@@ -212,10 +281,10 @@ describe("isAgentNotificationHookEnabled", () => {
 });
 
 describe("Codex permission mode gate", () => {
-  it("defaults missing Codex permissionMode to intercept", () => {
-    assert.strictEqual(getCodexPermissionMode(null), "intercept");
-    assert.strictEqual(getCodexPermissionMode({ agents: { codex: {} } }), "intercept");
-    assert.strictEqual(isCodexPermissionInterceptEnabled({ agents: { codex: {} } }), true);
+  it("defaults missing Codex permissionMode to Auto", () => {
+    assert.strictEqual(getCodexPermissionMode(null), "auto");
+    assert.strictEqual(getCodexPermissionMode({ agents: { codex: {} } }), "auto");
+    assert.strictEqual(isCodexPermissionInterceptEnabled({ agents: { codex: {} } }), false);
   });
 
   it("uses native mode only when explicitly selected", () => {
@@ -245,7 +314,7 @@ describe("createRuntimeAgentGate", () => {
     assert.strictEqual(gate.isAgentPermissionsEnabled("codex"), true);
     assert.strictEqual(gate.isAgentSubagentPermissionsEnabled("claude-code"), true);
     assert.strictEqual(gate.isAgentNotificationHookEnabled("codex"), true);
-    assert.strictEqual(gate.isCodexPermissionInterceptEnabled(), true);
+    assert.strictEqual(gate.isCodexPermissionInterceptEnabled(), false);
     assert.strictEqual(gate.hasAnyEnabledAgent(), true);
   });
 
@@ -266,6 +335,33 @@ describe("createRuntimeAgentGate", () => {
     assert.strictEqual(gate.isCodexNativeNotificationSoundEnabled(), false);
     assert.strictEqual(gate.isCodexPermissionInterceptEnabled(), false);
     assert.strictEqual(gate.hasAnyEnabledAgent(), false);
+  });
+
+  it("keeps a real malformed-prefs recovery non-authoritative until restart", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-agent-gate-recovered-"));
+    const prefsPath = path.join(dir, "clawd-prefs.json");
+    try {
+      fs.writeFileSync(prefsPath, '{"version":15,"agents":', "utf8");
+      const loaded = prefs.load(prefsPath);
+      assert.strictEqual(loaded.recovered, true);
+      assert.strictEqual(loaded.locked, false);
+      assert.strictEqual(fs.readFileSync(`${prefsPath}.bak`, "utf8"), '{"version":15,"agents":');
+      const controller = createSettingsController({ prefsPath, loadResult: loaded });
+      const initialRecovered = loaded.recovered === true;
+      const gate = createRuntimeAgentGate({
+        getSnapshot: () => controller.getSnapshot(),
+        isAuthoritative: () => !initialRecovered && !controller.hasReadFailure(),
+      });
+      assert.strictEqual(controller.hasReadFailure(), false);
+      assert.strictEqual(gate.isAuthoritative(), false);
+      assert.strictEqual(gate.isAgentEnabled("claude-code"), false);
+      assert.strictEqual(gate.isAgentEnabled("codex"), false);
+      assert.strictEqual(gate.shouldSyncAgentIntegration("codex"), false);
+      assert.strictEqual(gate.isAgentPermissionsEnabled("codex"), false);
+      controller.dispose();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("fails closed if the authority probe throws", () => {
@@ -694,69 +790,49 @@ describe("setAgentFlag command", () => {
     assert.strictEqual(calls.clearSessionsByAgent.length, 0);
     assert.strictEqual(calls.dismissPermissionsByAgent.length, 0);
     assert.strictEqual(r.commit.agents.codex.nativeNotificationSoundEnabled, true);
-    assert.strictEqual(r.commit.agents.codex.permissionMode, "intercept");
+    assert.strictEqual(r.commit.agents.codex.permissionMode, "auto");
   });
 });
 
 describe("setAgentPermissionMode command", () => {
   function makeDeps(overrides = {}) {
     const calls = { dismissPermissionsByAgent: [] };
-    return {
-      calls,
-      deps: {
-        snapshot: prefs.getDefaults(),
-        dismissPermissionsByAgent: (id) => calls.dismissPermissionsByAgent.push(id),
-        ...overrides,
-      },
-    };
+    return { calls, deps: { snapshot: prefs.getDefaults(),
+      dismissPermissionsByAgent: (id) => calls.dismissPermissionsByAgent.push(id), ...overrides } };
   }
-
-  it("treats switching Codex to the default intercept mode as a noop", () => {
+  it("keeps the default Auto mode without modifying pending requests", () => {
     const { deps, calls } = makeDeps();
-    const r = commandRegistry.setAgentPermissionMode(
-      { agentId: "codex", mode: "intercept" },
-      deps
-    );
-    assert.strictEqual(r.status, "ok");
-    assert.strictEqual(r.noop, true);
+    const r = commandRegistry.setAgentPermissionMode({ agentId: "codex", mode: "auto" }, deps);
+    assert.strictEqual(r.status, "ok"); assert.strictEqual(r.noop, true);
     assert.deepStrictEqual(calls.dismissPermissionsByAgent, []);
   });
-
-  it("switches Codex back to native mode and dismisses pending Codex bubbles", () => {
-    const seeded = prefs.getDefaults();
-    seeded.agents.codex.permissionMode = "intercept";
+  it("allows explicit Intercept without silently changing the default", () => {
+    const { deps, calls } = makeDeps();
+    const r = commandRegistry.setAgentPermissionMode({ agentId: "codex", mode: "intercept" }, deps);
+    assert.strictEqual(r.commit.agents.codex.permissionMode, "intercept");
+    assert.deepStrictEqual(calls.dismissPermissionsByAgent, []);
+  });
+  it("hands pending requests back without deciding when switching to Auto", () => {
+    const seeded = prefs.getDefaults(); seeded.agents.codex.permissionMode = "intercept";
     const { deps, calls } = makeDeps({ snapshot: seeded });
-    const r = commandRegistry.setAgentPermissionMode(
-      { agentId: "codex", mode: "native" },
-      deps
-    );
+    const r = commandRegistry.setAgentPermissionMode({ agentId: "codex", mode: "auto" }, deps);
     assert.strictEqual(r.status, "ok");
-    assert.strictEqual(r.commit.agents.codex.permissionMode, "native");
+    assert.strictEqual(r.commit.agents.codex.permissionMode, "auto");
     assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["codex"]);
   });
-
-  it("treats missing Codex permissionMode as intercept when switching to native", () => {
-    const seeded = prefs.getDefaults();
-    delete seeded.agents.codex.permissionMode;
-    const { deps, calls } = makeDeps({ snapshot: seeded });
-    const r = commandRegistry.setAgentPermissionMode(
-      { agentId: "codex", mode: "native" },
-      deps
-    );
-    assert.strictEqual(r.status, "ok");
-    assert.strictEqual(r.commit.agents.codex.permissionMode, "native");
-    assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["codex"]);
+  it("treats legacy Native and missing values as Auto", () => {
+    for (const mode of [undefined, "native"]) {
+      const seeded = prefs.getDefaults(); seeded.agents.codex.permissionMode = mode;
+      const { deps } = makeDeps({ snapshot: seeded });
+      assert.strictEqual(commandRegistry.setAgentPermissionMode(
+        { agentId: "codex", mode: "auto" }, deps).noop, true);
+    }
   });
-
   it("rejects unsupported agents and modes", () => {
     const { deps } = makeDeps();
-    assert.strictEqual(
-      commandRegistry.setAgentPermissionMode({ agentId: "claude-code", mode: "native" }, deps).status,
-      "error"
-    );
-    assert.strictEqual(
-      commandRegistry.setAgentPermissionMode({ agentId: "codex", mode: "auto" }, deps).status,
-      "error"
-    );
+    assert.strictEqual(commandRegistry.setAgentPermissionMode(
+      { agentId: "claude-code", mode: "auto" }, deps).status, "error");
+    assert.strictEqual(commandRegistry.setAgentPermissionMode(
+      { agentId: "codex", mode: "invalid" }, deps).status, "error");
   });
 });

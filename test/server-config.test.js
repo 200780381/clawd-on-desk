@@ -276,6 +276,12 @@ describe("runtime.json identity (#681)", () => {
       assert.strictEqual(JSON.parse(fs.readFileSync(file, "utf8")).ownerPid, process.pid);
     });
 
+    it("writes an owner-only runtime identity on POSIX", { skip: process.platform === "win32" }, () => {
+      const file = path.join(makeTempHome(), "runtime.json");
+      assert.strictEqual(serverConfig.writeRuntimeConfig(23333, { runtimeConfigPath: file }), true);
+      assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600);
+    });
+
     it("round-trips a valid Windows process-chain capability and drops an invalid one", () => {
       const validFile = path.join(makeTempHome(), "valid", "runtime.json");
       assert.strictEqual(serverConfig.writeRuntimeConfig(23333, {

@@ -352,9 +352,9 @@
     const hasAny = ag.active.length || ag.install.length || ag.cleanup.length;
     if (!hasAny) {
       wrap.appendChild(el("div", { class: "empty-note" },
-        i18n("tutorialAgentsEmpty", "No agents detected yet. You can connect them anytime in Settings → Agents.")));
+        i18n("tutorialAgentsEmpty", "No agents detected yet. You can connect them anytime in Settings → AI Coding Tools.")));
       wrap.appendChild(el("div", { style: "margin-top:12px" },
-        inlineLink(i18n("tutorialAgentsOpenSettings", "Open Settings → Agents"),
+        inlineLink(i18n("tutorialAgentsOpenSettings", "Open Settings → AI Coding Tools"),
           () => api.openSettingsTab && api.openSettingsTab("agents"))));
       return wrap;
     }
@@ -613,7 +613,13 @@
       tone = shortcutFeedback.tone;
     }
 
-    const isDefault = item.accelerator === item.defaultAccelerator;
+    const isDefault = shortcutActions.acceleratorsConflict
+      ? shortcutActions.acceleratorsConflict(
+        item.accelerator,
+        item.defaultAccelerator,
+        { isMac: isMac() }
+      )
+      : item.accelerator === item.defaultAccelerator;
     return el("div", {
       class: "sc-row editable" + (isRecording ? " recording" : ""),
       "data-shortcut-action-id": actionId,

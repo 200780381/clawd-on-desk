@@ -161,6 +161,19 @@ function createKimiQuotaCredentialStore(options = {}) {
     }
   }
 
+  // Startup binding reconciliation needs only the opaque credential identity.
+  // Keep this path free of safeStorage so an ordinary app launch never blocks
+  // on Keychain/DPAPI merely because a reusable Kimi key is present.
+  function inspectMetadata() {
+    const record = readRecord();
+    if (!record) return { configured: false };
+    return {
+      configured: true,
+      credentialId: record.credentialId,
+      updatedAt: record.updatedAt,
+    };
+  }
+
   function load() {
     const record = readRecord();
     if (!record) return null;
@@ -218,7 +231,7 @@ function createKimiQuotaCredentialStore(options = {}) {
     }
   }
 
-  return { inspect, load, save, forget, recordPath };
+  return { inspect, inspectMetadata, load, save, forget, recordPath };
 }
 
 module.exports = {

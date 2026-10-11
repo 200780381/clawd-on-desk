@@ -51,6 +51,27 @@ function profile(over = {}) {
   };
 }
 
+test("main startup defers Remote SSH installation identity until IPC use", () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  const readyStart = mainSource.indexOf("app.whenReady().then(async () => {");
+  const beforeQuit = mainSource.indexOf('app.on("before-quit"', readyStart);
+  assert.notEqual(readyStart, -1);
+  assert.notEqual(beforeQuit, -1);
+  assert.doesNotMatch(
+    mainSource.slice(readyStart, beforeQuit),
+    /(?:initialize|ensure)RemoteSshInstallationIdentity\s*\(/,
+  );
+  assert.equal(
+    (mainSource.match(/ensureRemoteSshInstallationIdentity\s*\(/g) || []).length,
+    1,
+    "the function declaration must be the only direct call-shaped occurrence; runtime access stays lazy"
+  );
+  assert.match(
+    mainSource,
+    /getInstallationIdentity:\s*ensureRemoteSshInstallationIdentity/,
+  );
+});
+
 test("installation binding is separate from prefs and derives a stable public install id", () => {
   withTempDir((userDataDir) => {
     const first = loadOrCreateInstallationIdentity({

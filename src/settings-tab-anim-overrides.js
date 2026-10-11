@@ -20,6 +20,8 @@
   let i18n = null;
   let readers = null;
   let mountedSubtabBody = null;
+  let mountedSubtabs = null;
+  let mountedHost = null;
 
   function t(key) {
     return helpers.t(key);
@@ -902,9 +904,11 @@
       case "mini-enter-sleep": return "Mini enter sleep";
       case "mini-crabwalk": return "Mini crabwalk";
       case "mini-peek": return "Mini peek";
+      case "mini-peek-hold": return "Mini peek hold";
       case "mini-alert": return "Mini alert";
       case "mini-happy": return "Mini happy";
       case "mini-sleep": return "Mini sleep";
+      case "mini-sleep-peek": return "Mini sleep peek";
       case "dragReaction": return t("animReactionDrag");
       case "clickLeftReaction": return t("animReactionClickLeft");
       case "clickRightReaction": return t("animReactionClickRight");
@@ -942,7 +946,7 @@
   }
 
   // #509: default idle visual picker — which look the pet rests in while
-  // idle. Options come from the active theme (states.idle + idleAnimations);
+  // idle. Options come from states.idle, idleAnimations, and idleVisualOptions;
   // selection applies live, so the pet itself is the preview.
   function buildIdleVisualPickerRow() {
     const info = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
@@ -953,152 +957,51 @@
     wrap.className = "anim-idle-visual-row";
     const row = document.createElement("div");
     row.className = "row";
-    row.innerHTML =
-      `<div class="row-text">` +
-        `<span class="row-label"></span>` +
-        `<span class="row-desc"></span>` +
-      `</div>` +
-      `<div class="row-control">` +
-        `<div class="language-picker">` +
-          `<button type="button" class="language-picker-trigger" aria-haspopup="listbox" aria-expanded="false">` +
-            `<span class="language-picker-value"></span>` +
-            `<span class="language-picker-chevron" aria-hidden="true"></span>` +
-          `</button>` +
-          `<div class="language-picker-menu" role="listbox" aria-hidden="true"></div>` +
-        `</div>` +
-      `</div>`;
-    row.querySelector(".row-label").textContent = t("animIdleVisualLabel");
-    row.querySelector(".row-desc").textContent = t("animIdleVisualDesc");
-    const picker = row.querySelector(".language-picker");
-    const trigger = row.querySelector(".language-picker-trigger");
-    const valueEl = row.querySelector(".language-picker-value");
-    const menu = row.querySelector(".language-picker-menu");
-    trigger.setAttribute("aria-label", t("animIdleVisualLabel"));
-
     const getLabel = (option) => (option.isThemeDefault ? t("animIdleVisualThemeDefault") : option.label || option.file);
     const currentFile = info.selectedFile || defaultOption.file;
-    let activeFile = currentFile;
-    const options = [];
-    for (const optionInfo of info.options) {
-      const option = document.createElement("button");
-      option.type = "button";
-      option.className = "language-picker-option";
-      option.setAttribute("role", "option");
-      option.setAttribute("data-file", optionInfo.file);
-      option.setAttribute("aria-selected", optionInfo.file === currentFile ? "true" : "false");
-      option.textContent = getLabel(optionInfo);
-      menu.appendChild(option);
-      options.push(option);
-    }
-    function getOption(file) {
-      return options.find((option) => option.dataset.file === file) || options[0] || null;
-    }
-    function syncDisplay(file) {
-      const selected = info.options.some((option) => option.file === file) ? file : defaultOption.file;
-      activeFile = selected;
-      const selectedInfo = info.options.find((option) => option.file === selected) || defaultOption;
-      valueEl.textContent = getLabel(selectedInfo);
-      const open = picker.classList.contains("open");
-      for (const option of options) {
-        const isSelected = option.dataset.file === selected;
-        option.classList.toggle("selected", isSelected);
-        option.setAttribute("aria-selected", isSelected ? "true" : "false");
-        option.tabIndex = open && isSelected ? 0 : -1;
-      }
-    }
-    function setOpen(open) {
-      picker.classList.toggle("open", open);
-      trigger.setAttribute("aria-expanded", open ? "true" : "false");
-      menu.setAttribute("aria-hidden", open ? "false" : "true");
-      syncDisplay(activeFile);
-      if (!open) return;
-      const option = getOption(activeFile);
-      if (option && typeof option.focus === "function") option.focus();
-    }
-    function chooseIdleVisual(next) {
-      if (next === activeFile) {
-        setOpen(false);
-        return;
-      }
-      syncDisplay(next);
-      setOpen(false);
-      const revertIfStillPending = () => {
-        const latest = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
-        if (activeFile === next) syncDisplay((latest && latest.selectedFile) || defaultOption.file);
-      };
-      // Success needs no explicit refresh: the idleVisual broadcast lands in
-      // patchInPlace, which updates the cached selection and re-syncs this row.
-      window.settingsAPI.command("setIdleVisual", { themeId: info.themeId, file: next }).then((result) => {
-        if (!result || result.status !== "ok") {
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("animIdleVisualLabel");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t("animIdleVisualDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+
+    const control = helpers.buildSettingsSelect({
+      value: currentFile,
+      options: info.options.map((option) => ({ value: option.file, label: getLabel(option) })),
+      ariaLabel: t("animIdleVisualLabel"),
+      onChange(next) {
+        // Success needs no explicit refresh: the idleVisual broadcast lands in
+        // patchInPlace, which updates the cached selection and re-syncs this row.
+        return window.settingsAPI.command("setIdleVisual", { themeId: info.themeId, file: next }).then((result) => {
+          if (result && result.status === "ok") return true;
           const msg = (result && result.message) || "unknown error";
           ops.showToast(t("toastSaveFailed") + msg, { error: true });
-          revertIfStillPending();
-        }
-      }).catch((err) => {
-        ops.showToast(t("toastSaveFailed") + ((err && err.message) || "unknown error"), { error: true });
-        revertIfStillPending();
-      });
-    }
-    trigger.addEventListener("click", () => {
-      setOpen(!picker.classList.contains("open"));
+          return false;
+        }).catch((err) => {
+          ops.showToast(t("toastSaveFailed") + ((err && err.message) || "unknown error"), { error: true });
+          return false;
+        });
+      },
     });
-    trigger.addEventListener("keydown", (event) => {
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        setOpen(true);
-      }
-    });
-    for (const option of options) {
-      option.addEventListener("click", () => chooseIdleVisual(option.dataset.file));
-      option.addEventListener("keydown", (event) => {
-        const index = options.indexOf(option);
-        if (event.key === "Escape") {
-          event.preventDefault();
-          setOpen(false);
-          if (typeof trigger.focus === "function") trigger.focus();
-          return;
-        }
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          chooseIdleVisual(option.dataset.file);
-          return;
-        }
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-          event.preventDefault();
-          const delta = event.key === "ArrowDown" ? 1 : -1;
-          const nextOption = options[(index + delta + options.length) % options.length];
-          if (nextOption && typeof nextOption.focus === "function") nextOption.focus();
-        }
-      });
-    }
-    const closeOnOutsideClick = (event) => {
-      if (!picker.classList.contains("open")) return;
-      if (picker.contains(event.target)) return;
-      setOpen(false);
+    const rowControl = document.createElement("div");
+    rowControl.className = "row-control";
+    rowControl.appendChild(control.element);
+    row.appendChild(text);
+    row.appendChild(rowControl);
+
+    state.mountedControls.idleVisualPicker = {
+      syncFromData: () => {
+        if (!document.body || !document.body.contains(row)) return;
+        const latest = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
+        control.setValue((latest && latest.selectedFile) || defaultOption.file);
+      },
+      dispose: () => control.dispose(),
     };
-    const closeOnEscape = (event) => {
-      if (event.key !== "Escape" || !picker.classList.contains("open")) return;
-      event.preventDefault();
-      setOpen(false);
-    };
-    if (document && typeof document.addEventListener === "function") {
-      document.addEventListener("click", closeOnOutsideClick);
-      document.addEventListener("keydown", closeOnEscape);
-      state.mountedControls.idleVisualPicker = {
-        syncFromData: () => {
-          if (!document.body || !document.body.contains(row)) return;
-          const latest = runtime.animationOverridesData && runtime.animationOverridesData.idleDefaultVisual;
-          syncDisplay((latest && latest.selectedFile) || defaultOption.file);
-        },
-        dispose: () => {
-          if (typeof document.removeEventListener === "function") {
-            document.removeEventListener("click", closeOnOutsideClick);
-            document.removeEventListener("keydown", closeOnEscape);
-          }
-        },
-      };
-    }
-    syncDisplay(currentFile);
     wrap.appendChild(row);
     return wrap;
   }
@@ -1165,15 +1068,6 @@
     return value === "sounds" ? "sounds" : value === "map" ? "map" : "animations";
   }
 
-  function restoreSubtabScroll(scroller, subtab) {
-    if (!scroller) return;
-    const saved = Number(getSubtabScrollPositions()[subtab]);
-    requestAnimationFrame(() => {
-      if (state.activeTab !== "animOverrides" || normalizeSubtab() !== subtab) return;
-      scroller.scrollTop = Number.isFinite(saved) && saved > 0 ? saved : 0;
-    });
-  }
-
   function clearSubtabControls() {
     if (typeof ops.clearMountedControls === "function") {
       ops.clearMountedControls();
@@ -1216,9 +1110,9 @@
         if (state.activeTab !== "animOverrides" || mountedSubtabBody !== body) return;
         if (normalizeSubtab() !== subtab) return;
         if (runtime.animationOverridesData === null) return;
-        clearSubtabControls();
-        renderSubtabBody(body);
-        restoreSubtabScroll(document.getElementById("content"), subtab);
+        mountedHost.render(body, renderSubtabBody, {
+          scrollTop: getSubtabScrollPositions()[subtab] || 0,
+        });
       });
       return;
     }
@@ -1245,9 +1139,7 @@
     const scroller = document.getElementById("content");
     const subtab = normalizeSubtab();
     if (scroller) getSubtabScrollPositions()[subtab] = scroller.scrollTop;
-    clearSubtabControls();
-    renderSubtabBody(mountedSubtabBody);
-    restoreSubtabScroll(scroller, subtab);
+    mountedHost.render(mountedSubtabBody, renderSubtabBody);
     return true;
   }
 
@@ -1260,21 +1152,25 @@
     subtitle.className = "subtitle";
     subtitle.textContent = t("animOverridesSubtitle");
     parent.appendChild(subtitle);
+    if (mountedSubtabs) mountedSubtabs.dispose();
+    if (mountedHost) mountedHost.dispose();
+    mountedHost = helpers.createSubpageHost({ disposeBody: clearSubtabControls });
     const switcher = buildSubtabSwitcher();
-    parent.appendChild(switcher);
-    const body = document.createElement("div");
-    body.className = "anim-override-subtab-body";
-    parent.appendChild(body);
-    renderSubtabBody(body);
-    restoreSubtabScroll(document.getElementById("content"), normalizeSubtab());
+    mountedSubtabs = switcher.control;
+    parent.appendChild(switcher.wrap);
+    for (const panel of mountedSubtabs.panels.values()) {
+      panel.className = "anim-override-subtab-body";
+      parent.appendChild(panel);
+    }
+    const body = mountedSubtabs.panels.get(normalizeSubtab());
+    mountedHost.render(body, renderSubtabBody, {
+      scrollTop: getSubtabScrollPositions()[normalizeSubtab()] || 0,
+    });
   }
 
   function buildSubtabSwitcher() {
     const wrap = document.createElement("div");
     wrap.className = "anim-override-subtabs";
-    const group = document.createElement("div");
-    group.className = "segmented";
-    group.setAttribute("role", "tablist");
 
     const current = runtime.animOverridesSubtab === "sounds" ? "sounds"
       : runtime.animOverridesSubtab === "map" ? "map" : "animations";
@@ -1283,34 +1179,25 @@
       { key: "animations", label: t("animOverridesSubtabAnimations") },
       { key: "sounds", label: t("animOverridesSubtabSounds") },
     ];
-    for (const entry of entries) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = entry.label;
-      btn.dataset.animOverridesSubtab = entry.key;
-      if (entry.key === current) btn.classList.add("active");
-      btn.addEventListener("click", () => {
-        if (runtime.animOverridesSubtab === entry.key) return;
+    const control = helpers.buildTabs({
+      id: "settings-animations",
+      ariaLabel: t("animOverridesTitle"),
+      value: current,
+      options: entries.map((entry) => ({ value: entry.key, label: entry.label })),
+      renderLabel(button, option) { button.dataset.animOverridesSubtab = option.value; },
+      onBeforeChange(_value, previousSubtab) {
         const scroller = document.getElementById("content");
-        const previousSubtab = normalizeSubtab();
         if (scroller) getSubtabScrollPositions()[previousSubtab] = scroller.scrollTop;
-        runtime.animOverridesSubtab = entry.key;
-        for (const candidate of group.querySelectorAll("button")) {
-          candidate.classList.toggle("active", candidate.dataset.animOverridesSubtab === entry.key);
-        }
-        clearSubtabControls();
-        renderSubtabBody(mountedSubtabBody);
-        restoreSubtabScroll(scroller, entry.key);
-        requestAnimationFrame(() => {
-          if (typeof btn.focus === "function") {
-            try { btn.focus({ preventScroll: true }); } catch (_) { btn.focus(); }
-          }
+      },
+      onChange(value) {
+        runtime.animOverridesSubtab = value;
+        mountedHost.render(control.panels.get(value), renderSubtabBody, {
+          scrollTop: getSubtabScrollPositions()[value] || 0,
         });
-      });
-      group.appendChild(btn);
-    }
-    wrap.appendChild(group);
-    return wrap;
+      },
+    });
+    wrap.appendChild(control.element);
+    return { wrap, control };
   }
 
   function getSoundOverrideLabel(slot) {
@@ -1635,18 +1522,31 @@
 
   function buildAnimOverrideRow(card) {
     card = applyPendingAnimOverrideCard(card);
-    const row = document.createElement("details");
+    const row = document.createElement("div");
     row.className = "anim-override-row";
     if (card.fallbackTargetState) row.classList.add("inherited");
     row.dataset.rowId = card.id;
-    if (runtime.expandedOverrideRowIds.has(card.id)) row.open = true;
-    row.addEventListener("toggle", () => {
-      if (row.open) runtime.expandedOverrideRowIds.add(card.id);
-      else runtime.expandedOverrideRowIds.delete(card.id);
-    });
 
-    row.appendChild(buildAnimOverrideSummary(card));
-    row.appendChild(buildAnimOverrideDrawer(card));
+    const summary = buildAnimOverrideSummary(card);
+    const body = document.createElement("div");
+    body.className = "anim-override-body settings-disclosure-body";
+    const bodyInner = document.createElement("div");
+    bodyInner.className = "anim-override-body-inner settings-disclosure-body-inner";
+    bodyInner.appendChild(buildAnimOverrideDrawer(card));
+    body.appendChild(bodyInner);
+    row.appendChild(summary);
+    row.appendChild(body);
+
+    helpers.registerMountedDisposable(helpers.attachSettingsDisclosure({
+      root: row,
+      trigger: summary,
+      body,
+      expanded: runtime.expandedOverrideRowIds.has(card.id),
+      onExpandedChange(nextExpanded) {
+        if (nextExpanded) runtime.expandedOverrideRowIds.add(card.id);
+        else runtime.expandedOverrideRowIds.delete(card.id);
+      },
+    }), { scope: "animation-overrides" });
     if (card && card.id) {
       const controls = getMountedOverrideStatusControls();
       const current = controls.get(card.id) || { cardId: card.id };
@@ -1656,7 +1556,8 @@
   }
 
   function buildAnimOverrideSummary(card) {
-    const summary = document.createElement("summary");
+    const summary = document.createElement("div");
+    summary.className = "anim-override-summary";
 
     const chevron = helpers.createDisclosureChevron("anim-override-chevron");
     summary.appendChild(chevron);
@@ -2387,6 +2288,10 @@
     const scroller = document.getElementById("content");
     if (scroller) getSubtabScrollPositions()[normalizeSubtab()] = scroller.scrollTop;
     mountedSubtabBody = null;
+    if (mountedSubtabs) mountedSubtabs.dispose();
+    mountedSubtabs = null;
+    if (mountedHost) mountedHost.dispose();
+    mountedHost = null;
     ops.closeAssetPicker();
   }
 

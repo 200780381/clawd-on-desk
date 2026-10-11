@@ -12,6 +12,15 @@ const { pathToFileURL } = require("node:url");
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-family-session-cwd-"));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME;
+const runtimeDir = path.join(TMP_HOME, ".clawd");
+fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+const runtimePath = path.join(runtimeDir, "runtime.json");
+fs.writeFileSync(runtimePath, JSON.stringify({
+  app: "clawd-on-desk",
+  port: 23333,
+  ownerPid: process.pid,
+}), { mode: 0o600 });
+if (process.platform !== "win32") fs.chmodSync(runtimePath, 0o600);
 
 const OPENCODE_CONFIG = Object.freeze({
   agentId: "opencode",
@@ -70,10 +79,10 @@ before(async () => {
   ({ createOpencodeFamilyPlugin } = await import(pathToFileURL(modulePath).href));
 });
 
-after(() => {
+after(async () => {
   delete globalThis.fetch;
   delete globalThis.Bun;
-  fs.rmSync(TMP_HOME, { recursive: true, force: true });
+  await fs.promises.rm(TMP_HOME, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 });
 
 describe("opencode-family session directory ownership (#796)", () => {
@@ -436,7 +445,7 @@ describe("opencode-family session title (#829)", () => {
     assert.strictEqual(plugin.__test._sessionTitleById.get("opencode:ses_t"), "轻松问候");
     const metaPost = fetchCalls.find((c) => c.url.endsWith("/state") && c.body && c.body.metadata_only === true);
     assert.ok(metaPost, "expected a metadata-only POST for the title change");
-    // postToClawd enriches every POST with process-tree fields. Split those
+    // snapshotPost enriches every POST with process-tree fields. Split those
     // off and deepStrictEqual the rest against the EXACT title-push contract
     // so the complete metadata-only body is covered: a missing field or an
     // unexpected extra one both fail (#841 review).

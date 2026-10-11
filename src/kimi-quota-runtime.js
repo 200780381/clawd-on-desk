@@ -134,6 +134,21 @@ function createKimiQuotaRuntime(options = {}) {
     }
   }
 
+  function inspectCredentialMetadata() {
+    try {
+      if (typeof credentialStore.inspectMetadata === "function") {
+        return credentialStore.inspectMetadata();
+      }
+      const credential = inspectCredential();
+      return {
+        configured: credential.configured === true,
+        credentialId: credential.credentialId || null,
+      };
+    } catch {
+      return { configured: true, credentialId: null, unreadable: true };
+    }
+  }
+
   function getStatus() {
     const gate = settingsGate();
     const credential = inspectCredential();
@@ -240,18 +255,17 @@ function createKimiQuotaRuntime(options = {}) {
     return queue(async () => {
       invalidateRequests();
       const gate = settingsGate();
-      const credential = inspectCredential();
+      const credential = inspectCredentialMetadata();
       const binding = bindingStore.read();
       const mismatched = binding.lastQuotaCredentialId !== null
         && (!credential.configured
-          || !credential.decryptable
           || binding.lastQuotaCredentialId !== credential.credentialId);
       if (!gate.ok || mismatched || (binding.lastQuotaCredentialId === null && credential.configured)) {
         const cleared = clearQuotaAndBinding();
         if (cleared.status !== "ok") return cleared;
       }
       transient = { state: "idle", reason: null, lastAttemptAt: null };
-      return getStatus();
+      return { status: "ok", initialized: true };
     });
   }
 

@@ -1,5 +1,7 @@
 "use strict";
 
+const { resolveCodexApprovalRoute } = require("./codex-approval-routing");
+
 const {
   CLAWD_SERVER_HEADER,
   CLAWD_SERVER_ID,
@@ -12,6 +14,8 @@ const {
   buildShadowComparison,
   processMetadataForState,
 } = require("./server-windows-process-metadata");
+const { isWslSourced, stripRemoteProcessMetadata } = require("./remote-process-metadata");
+const { resolveDshCarrier } = require("./dsh-carrier");
 const {
   CODEX_OFFICIAL_HOOK_SOURCE,
   CODEX_SESSION_ROLE_SUBAGENT,
@@ -22,15 +26,22 @@ const {
 } = require("../hooks/codex-originator");
 const {
   truncateDeep,
+  preparePermissionDetail,
   normalizePermissionSuggestions,
   prepareElicitationToolInput,
   normalizeHookToolUseId,
   normalizeCodexPermissionToolInput,
   buildToolInputFingerprint,
 } = require("./server-permission-utils");
+const { preparePermissionReminder, NOT_INSPECTED_TAG } = require("./permission-reminder");
+const { shouldScanIrreversibleCommand } = require("./bubble-format");
 const { resolveHookAgentId } = require("./server-agent-id");
 const { getAgent } = require("../agents/registry");
-const { isOpencodeFamily } = require("../agents/opencode-family");
+const { isOpencodeFamily, getFamilyConfig } = require("../agents/opencode-family");
+const {
+  normalizeOpencodeFamilyBridgeUrl,
+  isValidOpencodeFamilyBridgeToken,
+} = require("./opencode-family-bridge-url");
 const { resolveSessionIdentity } = require("./session-key");
 const {
   assessSessionAutomationIdentity,
@@ -39,6 +50,7 @@ const {
   INTERACTION_INTENT,
   classifyPermissionInteraction,
   isDecisionInteraction,
+  isValidInteraction,
 } = require("./permission-automation-policy");
 const { sanitizeShadowRecord } = require("./windows-process-chain-shadow-log");
 
@@ -46,6 +58,27 @@ const MAX_PERMISSION_BODY_BYTES = 524288;
 const CLIENT_DISCONNECTED_OPTIONS = Object.freeze({
   disposition: Object.freeze({ reason: "agent_gone", decided: false }),
 });
+
+// opencode v2 sends a single shell command as tool_input.resource
+// (hooks/opencode-family-plugin/core.mjs buildV2PermissionBody), while the
+// destructive-action reminder scans command-carrying fields only. Alias a
+// shell `resource` or string `resources` to `command` for the detail/reminder view so a v2
+// `rm -rf` is held for a human under permission automation and the bubble
+// shows the destructive hint. The raw resource field stays in place for
+// display; the stored toolInput keeps the original payload.
+function mapOpencodeV2ShellResource(toolName, rawInput) {
+  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) return rawInput;
+  if (typeof rawInput.command === "string" && rawInput.command) return rawInput;
+  if (!shouldScanIrreversibleCommand(toolName)) return rawInput;
+  if (typeof rawInput.resource === "string" && rawInput.resource) {
+    return { ...rawInput, command: rawInput.resource };
+  }
+  if (Array.isArray(rawInput.resources) && rawInput.resources.length > 0
+    && rawInput.resources.every((resource) => typeof resource === "string")) {
+    return { ...rawInput, command: rawInput.resources.join("\n") };
+  }
+  return rawInput;
+}
 
 // ExitPlanMode (Plan Review) and AskUserQuestion (elicitation) happen to
 // travel through /permission, but they're UX flows — not approvals the
@@ -116,9 +149,17 @@ function shouldBypassDshBubble(ctx) {
   return !ctx.isAgentPermissionsEnabled("deepseek-harness");
 }
 
-function shouldInterceptCodexPermission(ctx) {
-  if (typeof ctx.isCodexPermissionInterceptEnabled !== "function") return true;
-  return ctx.isCodexPermissionInterceptEnabled();
+function shouldInterceptCodexPermission(ctx, data) {
+  if (typeof ctx.getCodexPermissionMode === "function") {
+    const mode = ctx.getCodexPermissionMode();
+    if (mode === "intercept") return true;
+    if (mode !== "auto") return false;
+    return resolveCodexApprovalRoute(data).owner === "clawd";
+  }
+  // Old callers can still supply the explicit interception gate. With no
+  // authoritative settings reader, preserve Codex ownership.
+  return typeof ctx.isCodexPermissionInterceptEnabled === "function"
+    && ctx.isCodexPermissionInterceptEnabled();
 }
 
 function shouldMuteCodexNativeNotificationSound(ctx) {
@@ -178,6 +219,22 @@ function normalizeString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function boundedPermissionLogValue(value) {
+  if (typeof value !== "string") return "(invalid)";
+  const clean = value.replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").trim();
+  if (!clean) return "(empty)";
+  return clean.length > 120 ? `${clean.slice(0, 119)}…` : clean;
+}
+
+function normalizeOpencodeFamilySessionId(agentId, value) {
+  const config = getFamilyConfig(agentId);
+  if (!config || typeof value !== "string" || !value.trim()) return null;
+  const raw = value.trim();
+  return raw.startsWith(config.sessionIdPrefix)
+    ? raw
+    : `${config.sessionIdPrefix}${raw}`;
+}
+
 const DSH_REASON_MAX_CHARS = 500;
 
 function normalizeDshReason(value) {
@@ -228,7 +285,13 @@ function applyTerminalSessionOptions(options, data) {
   if (orcaPaneKey) options.orcaPaneKey = orcaPaneKey;
 }
 
-function buildCodexPermissionSessionOptions(data) {
+// Every build*PermissionSessionOptions below takes `remoteProfile` and
+// `wslSourced` for one reason: their result is spread straight into
+// ctx.updateSession (and into the permEntry that focus/liveness reads), so this
+// is the single choke point where a PID from the Remote SSH ingress or from a
+// WSL hook would otherwise become local session state. See
+// remote-process-metadata.js for why `orcaPaneKey`/`cwd`/`host` survive.
+function buildCodexPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
   const agentPid = normalizePositiveInteger(rawAgentPid);
@@ -266,10 +329,10 @@ function buildCodexPermissionSessionOptions(data) {
   if (codexAgentNickname) options.codexAgentNickname = codexAgentNickname;
   if (codexAgentRole) options.codexAgentRole = codexAgentRole;
   if (codexParentThreadId) options.codexParentThreadId = codexParentThreadId;
-  return options;
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildQwenCodePermissionSessionOptions(data) {
+function buildQwenCodePermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const rawAgentPid = data.agent_pid ?? data.claude_pid ?? data.cursor_pid;
   const agentPid = normalizePositiveInteger(rawAgentPid);
@@ -290,10 +353,10 @@ function buildQwenCodePermissionSessionOptions(data) {
   if (host) options.host = host;
   if (platform) options.platform = platform;
   if (model) options.model = model;
-  return options;
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildCopilotPermissionSessionOptions(data) {
+function buildCopilotPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -309,10 +372,10 @@ function buildCopilotPermissionSessionOptions(data) {
   const host = normalizeString(data.host);
   if (cwd) options.cwd = cwd;
   if (host) options.host = host;
-  return options;
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildHermesPermissionSessionOptions(data) {
+function buildHermesPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -328,10 +391,31 @@ function buildHermesPermissionSessionOptions(data) {
   if (cwd) options.cwd = cwd;
   const editor = normalizeString(data.editor);
   if (editor) options.editor = editor;
-  return options;
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
-function buildDshPermissionSessionOptions(data) {
+function buildZcodePermissionSessionOptions(data, remoteProfile, wslSourced) {
+  const sourcePid = normalizePositiveInteger(data.source_pid);
+  const agentPid = normalizePositiveInteger(data.agent_pid);
+  const pidChain = Array.isArray(data.pid_chain)
+    ? data.pid_chain.filter((n) => Number.isFinite(n) && n > 0).map((n) => Math.floor(n))
+    : null;
+  const options = { agentId: "zcode" };
+
+  if (sourcePid) options.sourcePid = sourcePid;
+  if (agentPid) options.agentPid = agentPid;
+  if (pidChain && pidChain.length) options.pidChain = pidChain;
+  applyTerminalSessionOptions(options, data);
+  const cwd = normalizeString(data.cwd);
+  const host = normalizeString(data.host);
+  const model = normalizeString(data.model);
+  if (cwd) options.cwd = cwd;
+  if (host) options.host = host;
+  if (model) options.model = model;
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
+}
+
+function buildDshPermissionSessionOptions(data, remoteProfile, wslSourced) {
   const sourcePid = normalizePositiveInteger(data.source_pid);
   const agentPid = normalizePositiveInteger(data.agent_pid);
   const pidChain = Array.isArray(data.pid_chain)
@@ -344,10 +428,28 @@ function buildDshPermissionSessionOptions(data) {
   applyTerminalSessionOptions(options, data);
   const cwd = normalizeString(data.cwd);
   if (cwd) options.cwd = cwd;
-  return options;
+  // The permission card may arrive before any session lifecycle event, so the
+  // desktop carrier has to land on the permission record itself. That record
+  // is what `buildPermissionFocusEntry` copies into the fallback focus entry.
+  const carrier = resolveDshCarrier({
+    agentId: "deepseek-harness",
+    hookSource: normalizeString(data.hook_source),
+    value: data.dsh_carrier,
+    remoteProfile,
+    wslSourced,
+  });
+  if (carrier) options.dshCarrier = carrier;
+  return stripRemoteProcessMetadata(options, remoteProfile, wslSourced);
 }
 
 function sendCodexPermissionNoDecision(res) {
+  res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+  res.end();
+}
+
+// opencode v2 (issue #1039): the evaluate hook treats 204 as "no decision"
+// and leaves the permission effect untouched — native ask UI takes over.
+function sendOpencodeV2PermissionNoDecision(res) {
   res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
   res.end();
 }
@@ -358,6 +460,11 @@ function sendQwenCodePermissionNoDecision(res) {
 }
 
 function sendCopilotPermissionNoDecision(res) {
+  res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+  res.end();
+}
+
+function sendZcodePermissionNoDecision(res) {
   res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
   res.end();
 }
@@ -466,13 +573,34 @@ function tryRemoteOnlyApproval(ctx, fields) {
   // way, so the pet's PermissionRequest notification animation has something
   // to announce. Playing it before the `started` check meant a no-op flash
   // when Telegram wasn't available and the caller fell back to res.destroy().
-  ctx.updateSession(fields.sessionId, "notification", "PermissionRequest", {
-    agentId: fields.agentId,
-    profileId: fields.profileId,
-    rawSessionId: fields.rawSessionId,
-    ...(fields.host ? { host: fields.host } : {}),
-    sessionAutomationIdentity: fields.sessionAutomationIdentity,
-  });
+  try {
+    ctx.updateSession(fields.sessionId, "notification", "PermissionRequest", {
+      agentId: fields.agentId,
+      profileId: fields.profileId,
+      rawSessionId: fields.rawSessionId,
+      ...(fields.host ? { host: fields.host } : {}),
+      sessionAutomationIdentity: fields.sessionAutomationIdentity,
+    });
+  } catch (err) {
+    // The remote client has already accepted the request, so an uncaught
+    // session-update error would leave a pending entry and a stale remote card
+    // while the outer route emits 500. Resolve through the normal no-decision
+    // path so the remote channel is cancelled and the agent regains control.
+    ctx.permLog(`remote-only session update failed: ${err && err.message ? err.message : err}`);
+    try {
+      ctx.resolvePermissionEntry(
+        permEntry,
+        "no-decision",
+        "Remote-only permission session update failed"
+      );
+    } catch (resolveErr) {
+      ctx.permLog(`remote-only rollback failed: ${resolveErr && resolveErr.message ? resolveErr.message : resolveErr}`);
+      removePendingPermission(ctx, permEntry, "remote-only-session-update-failed");
+      res.removeListener("close", abortHandler);
+      try { res.destroy(); } catch {}
+    }
+    return { handled: true, resolution: "session-update-failed" };
+  }
   if (typeof ctx.syncPermissionShortcuts === "function") {
     try { ctx.syncPermissionShortcuts(); } catch {}
   }
@@ -495,6 +623,16 @@ function startRemoteApproval(ctx, permEntry) {
 }
 
 function addPendingPermission(ctx, permEntry) {
+  // Safety net for the destructive-action reminder: every path above derives a
+  // view from the accepted request, and a runtime test asserts that none of them
+  // land here without one. If a path added later does, it must fail toward the
+  // human -- an absent view is "not inspected", never "unmatched".
+  if (permEntry && permEntry.permissionReminder === undefined) {
+    permEntry.permissionReminder = { hold: true, tag: NOT_INSPECTED_TAG };
+    if (typeof ctx.permLog === "function") {
+      ctx.permLog(`destructive reminder: no view derived for tool=${permEntry.toolName || "(missing)"} agent=${permEntry.agentId || "unknown"} — treating as not inspected`);
+    }
+  }
   if (typeof ctx.addPendingPermission === "function") {
     return ctx.addPendingPermission(permEntry);
   }
@@ -531,8 +669,13 @@ function handlePermissionPost(req, res, options) {
   });
   req.on("end", () => {
     if (tooLarge) {
-      ctx.permLog("SKIPPED: permission payload too large");
-      ctx.sendPermissionResponse(res, "deny", "Permission request too large for Clawd bubble; answer in terminal");
+      // Never forge a user deny on a transport-level rejection: the agent id
+      // is not even parsed yet, and qwen/zcode hooks would pass a
+      // hookSpecificOutput deny straight into the agent as a real decision.
+      // Destroy the socket instead — CC/CodeBuddy fall back to their chat
+      // prompt, qwen/zcode emit "{}" and their native permission flow runs.
+      ctx.permLog("SKIPPED: permission payload too large -> connection closed, native fallback");
+      try { res.destroy(); } catch {}
       return;
     }
 
@@ -547,10 +690,24 @@ function handlePermissionPost(req, res, options) {
     const requestHeaders = req && req.headers && typeof req.headers === "object"
       ? req.headers
       : {};
+    const hasPermissionEventDiscriminator = !!data
+      && typeof data === "object"
+      && Object.prototype.hasOwnProperty.call(data, "permission_event");
     const hookIdentity = resolveHookAgentId(data, {
       customAgentIds: typeof ctx.getCustomAgentIds === "function" ? ctx.getCustomAgentIds() : [],
     });
-    const recordRequestHookEvent = createRequestHookRecorder(hookIdentity, data, "permission");
+    // Lifecycle cleanup is not a new PermissionRequest. Do not even construct a
+    // request recorder for it, otherwise a no-op completion can appear in the
+    // hook-event ring as user-facing permission activity.
+    const recordRequestHookEvent = hasPermissionEventDiscriminator
+      ? {
+        accepted() {},
+        droppedByDisabled() {},
+        droppedByDnd() {},
+        droppedInvalidAgent() {},
+        droppedUnsupported() {},
+      }
+      : createRequestHookRecorder(hookIdentity, data, "permission");
     if (hookIdentity.rejected) {
       recordRequestHookEvent.droppedInvalidAgent();
       sendGenericPermissionNoDecision(res);
@@ -562,12 +719,29 @@ function handlePermissionPost(req, res, options) {
       return;
     }
     const { agentId } = hookIdentity;
+    if (hasPermissionEventDiscriminator && !isOpencodeFamily(agentId)) {
+      res.writeHead(200, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
+      res.end("ok");
+      ctx.permLog(`permission lifecycle no-op: unsupported agent=${agentId || "unknown"}`);
+      return;
+    }
     const trustedProfileId = remoteProfile && typeof remoteProfile.profileId === "string"
       ? remoteProfile.profileId
       : "local";
     const trustedDisplayHost = remoteProfile && typeof remoteProfile.displayHost === "string"
       ? remoteProfile.displayHost
       : null;
+    // A WSL hook reports Linux PIDs that can alias live processes on this
+    // Windows host, so they are stripped exactly like Remote SSH metadata.
+    const wslSourced = isWslSourced({ wslDistro: data.wsl_distro, host: data.host });
+    // Intentional exception to the WSL PID strip: per-session automation
+    // eligibility only strips Remote SSH, never WSL, to preserve the pre-fix
+    // user-visible automation. Its trust therefore ends on session timeout,
+    // not process exit (known gap, tracked).
+    const automationAgentPid = stripRemoteProcessMetadata(
+      { agentPid: normalizePositiveInteger(data.agent_pid) },
+      remoteProfile
+    ).agentPid;
     const sessionAutomationIdentity = assessSessionAutomationIdentity({
       agentId,
       channel: "permission",
@@ -579,7 +753,7 @@ function handlePermissionPost(req, res, options) {
       hookSource: data.hook_source,
       codexOriginator: data.codex_originator,
       codexSource: data.codex_source,
-      agentPid: normalizePositiveInteger(data.agent_pid),
+      agentPid: automationAgentPid,
     });
     const resolvePermissionSession = (value, fallback) =>
       resolveSessionIdentity(value, trustedProfileId, fallback);
@@ -606,8 +780,190 @@ function handlePermissionPost(req, res, options) {
       // leave the TUI hanging until timeout. Instead we route DND
       // through the same reverse bridge the plugin uses for replies.
       if (isOpencodeFamily(agentId)) {
+        // ── opencode v2 blocking sub-branch (issue #1039) ──
+        // The v2 plugin (hooks/opencode-plugin-v2/, `plugins` config key) no
+        // longer uses the reverse bridge: its permission evaluate hook blocks
+        // on this very request, and the decision IS the response body
+        // ({ decision: "allow" | "always" | "deny" }). Every "Clawd stays out"
+        // path answers 204 no-decision — the hook leaves the effect untouched
+        // and opencode's native ask UI takes over. DND therefore needs no
+        // special bridge routing here (unlike the v1 fire-and-forget flow
+        // below): a 204 IS the no-decision fallback.
+        if (data.hook_source === "opencode-plugin-v2") {
+          if (hasPermissionEventDiscriminator) {
+            // v2 has no lifecycle posts (the evaluate hook resolves inline).
+            recordRequestHookEvent.accepted();
+            ctx.permLog(`${agentId} v2 permission lifecycle no-op: unsupported event`);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+
+          const toolName = typeof data.tool_name === "string" && data.tool_name ? data.tool_name : "unknown";
+          const interaction = classifyPermissionInteraction({
+            agentId,
+            eventKind: "permission",
+            toolName,
+          });
+
+          if (typeof ctx.isAgentEnabled === "function" && !ctx.isAgentEnabled(agentId)) {
+            recordRequestHookEvent.droppedByDisabled();
+            ctx.permLog(`${agentId} disabled -> no decision, native prompt fallback (tool=${toolName})`);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+
+          const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
+          const toolInput = truncateDeep(rawInput);
+          const viewInput = mapOpencodeV2ShellResource(toolName, rawInput);
+          const permissionDetail = preparePermissionDetail(toolName, viewInput);
+          const permissionReminder = preparePermissionReminder(toolName, viewInput);
+          const sessionIdentity = resolvePermissionSession(data.session_id, "default");
+          const sessionId = sessionIdentity.sessionId;
+          const requestId = typeof data.request_id === "string" ? data.request_id : null;
+          const alwaysCandidates = Array.isArray(data.always) ? data.always : [];
+
+          ctx.permLog(`${agentId} v2 perm (blocking): tool=${toolName} session=${sessionId} req=${requestId} always=${alwaysCandidates.length}`);
+
+          if (ctx.doNotDisturb) {
+            recordRequestHookEvent.droppedByDnd();
+            ctx.permLog(`${agentId} v2 DND -> no decision, native prompt fallback — request=${requestId}`);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+
+          if (isHeadlessPermissionRequest(ctx, sessionId, data, agentId)) {
+            recordRequestHookEvent.accepted();
+            ctx.permLog(`${agentId} v2 headless session=${sessionId} -> no decision, native prompt fallback — request=${requestId}`);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+
+          // Per-family sub-gate (e.g. permissionsEnabled=false for opencode)
+          // keeps Clawd fully out of the loop, including remote channels.
+          const v2SubGateBypass = shouldBypassFamilyBubble(ctx, agentId);
+          if (v2SubGateBypass) {
+            recordRequestHookEvent.accepted();
+            ctx.permLog(`${agentId} v2 bubble hidden (subGateBypass) -> no decision, native prompt fallback (tool=${toolName})`);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+
+          // Global bubble switch only means "no desktop window": Telegram /
+          // Feishu remote-only approval stays alive (same contract as zcode).
+          if (!arePermissionBubblesEnabled(ctx)) {
+            recordRequestHookEvent.accepted();
+            const remoteOnlyResult = tryRemoteOnlyApproval(ctx, {
+              res, sessionId, toolName, toolInput,
+              agentId, isOpencodeV2: true, interaction, sessionAutomationIdentity,
+              cwd: typeof data.cwd === "string" ? data.cwd : "",
+              ...trustedSessionFields(sessionIdentity),
+              ...permissionReminder,
+            });
+            if (remoteOnlyResult.handled) return;
+            ctx.permLog(`${agentId} v2 permission bubbles disabled, no remote approval -> no decision, native prompt fallback (tool=${toolName})`);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+
+          const permEntry = {
+            res,
+            abortHandler: null,
+            suggestions: [],
+            sessionId,
+            ...trustedSessionFields(sessionIdentity),
+            bubble: null,
+            hideTimer: null,
+            toolName,
+            toolInput,
+            ...permissionDetail,
+            ...permissionReminder,
+            resolvedSuggestion: null,
+            createdAt: Date.now(),
+            interaction,
+            sessionAutomationIdentity,
+            agentId,
+            isOpencodeV2: true,
+            familyRequestId: requestId,
+            familyAlwaysCandidates: alwaysCandidates,
+            familyPatterns: [],
+            // v2 runs inside the shared background service: the plugin sends
+            // no process-tree fields, so terminal focus degrades gracefully.
+            cwd: typeof data.cwd === "string" ? data.cwd : "",
+            agentPid: Number.isInteger(data.agent_pid) ? data.agent_pid : null,
+          };
+          const abortHandler = () => {
+            if (res.writableFinished) return;
+            ctx.permLog("abortHandler fired (opencode-v2)");
+            ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          };
+          permEntry.abortHandler = abortHandler;
+          res.on("close", abortHandler);
+
+          addPendingPermission(ctx, permEntry);
+          ctx.updateSession(sessionId, "notification", "PermissionRequest", {
+            agentId,
+            sessionAutomationIdentity,
+            ...trustedSessionFields(sessionIdentity),
+          });
+
+          ctx.permLog(`${agentId} v2 showing bubble: tool=${toolName} session=${sessionId} stack=${ctx.pendingPermissions.length}`);
+          recordRequestHookEvent.accepted();
+          try {
+            ctx.showPermissionBubble(permEntry);
+          } catch (bubbleErr) {
+            ctx.permLog(`${agentId} v2 bubble failed: ${bubbleErr && bubbleErr.message} -> no decision`);
+            removePendingPermission(ctx, permEntry, "opencode-v2-bubble-failed");
+            if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
+            sendOpencodeV2PermissionNoDecision(res);
+            return;
+          }
+          startRemoteApproval(ctx, permEntry);
+          return;
+        }
+
         res.writeHead(200, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
         res.end("ok");
+
+        if (hasPermissionEventDiscriminator) {
+          if (data.permission_event !== "replied") {
+            ctx.permLog(`${agentId} permission lifecycle no-op: unsupported event`);
+            return;
+          }
+
+          const rawSessionId = normalizeOpencodeFamilySessionId(agentId, data.session_id);
+          const requestId = typeof data.request_id === "string" && data.request_id
+            ? data.request_id
+            : null;
+          const bridgeUrl = normalizeOpencodeFamilyBridgeUrl(data.lifecycle_bridge_url);
+          const bridgeToken = isValidOpencodeFamilyBridgeToken(data.lifecycle_bridge_token)
+            ? data.lifecycle_bridge_token
+            : null;
+          if (!rawSessionId || !requestId || !bridgeUrl || !bridgeToken) {
+            const reason = !rawSessionId
+              ? "missing session_id"
+              : !requestId
+                ? "missing request_id"
+                : !bridgeUrl
+                  ? "invalid lifecycle_bridge_url"
+                  : "invalid lifecycle_bridge_token";
+            ctx.permLog(`${agentId} permission lifecycle no-op: ${reason}`);
+            return;
+          }
+
+          const sessionIdentity = resolvePermissionSession(rawSessionId, rawSessionId);
+          const dismissed = typeof ctx.dismissOpencodeFamilyPermissionResolvedExternally === "function"
+            ? ctx.dismissOpencodeFamilyPermissionResolvedExternally({
+              agentId,
+              requestId,
+              sessionId: sessionIdentity.sessionId,
+              bridgeUrl,
+              bridgeToken,
+            })
+            : 0;
+          ctx.permLog(`${agentId} permission lifecycle replied: request=${boundedPermissionLogValue(requestId)} matched=${dismissed}`);
+          return;
+        }
+
         const toolName = typeof data.tool_name === "string" && data.tool_name ? data.tool_name : "unknown";
         const interaction = classifyPermissionInteraction({
           agentId,
@@ -626,11 +982,15 @@ function handlePermissionPost(req, res, options) {
 
         const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
         const toolInput = truncateDeep(rawInput);
+        const permissionDetail = preparePermissionDetail(toolName, rawInput);
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionIdentity = resolvePermissionSession(data.session_id, "default");
         const sessionId = sessionIdentity.sessionId;
         const requestId = typeof data.request_id === "string" ? data.request_id : null;
-        const bridgeUrl = typeof data.bridge_url === "string" ? data.bridge_url : "";
-        const bridgeToken = typeof data.bridge_token === "string" ? data.bridge_token : "";
+        const bridgeUrl = normalizeOpencodeFamilyBridgeUrl(data.bridge_url);
+        const bridgeToken = isValidOpencodeFamilyBridgeToken(data.bridge_token)
+          ? data.bridge_token
+          : "";
         const alwaysCandidates = Array.isArray(data.always) ? data.always : [];
         const patterns = Array.isArray(data.patterns) ? data.patterns : [];
 
@@ -641,7 +1001,7 @@ function handlePermissionPost(req, res, options) {
         // which then calls the host's in-process Hono route. Without it
         // we have no way to resolve the pending permission.
         if (!requestId || !bridgeUrl || !bridgeToken) {
-          const missing = !requestId ? "request_id" : (!bridgeUrl ? "bridge_url" : "bridge_token");
+          const missing = !requestId ? "request_id" : (!bridgeUrl ? "valid bridge_url" : "valid bridge_token");
           recordRequestHookEvent.accepted();
           ctx.permLog(`SKIPPED ${agentId} perm: missing ${missing}`);
           return;
@@ -682,6 +1042,8 @@ function handlePermissionPost(req, res, options) {
           hideTimer: null,
           toolName,
           toolInput,
+          ...permissionDetail,
+          ...permissionReminder,
           resolvedSuggestion: null,
           createdAt: Date.now(),
           interaction,
@@ -765,8 +1127,27 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_description
           : (typeof rawInput.description === "string" ? rawInput.description : "");
         const toolInput = normalizeCodexPermissionToolInput(rawInput, description);
+        const permissionDetail = preparePermissionDetail(toolName, rawInput, { description });
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionIdentity = resolvePermissionSession(data.session_id, "codex:default");
         const sessionId = sessionIdentity.sessionId;
+        // Local Codex archive lifecycle (#655): an archived task's approval is
+        // handed back to Codex's native flow BEFORE any bubble, state or
+        // automation is created. Always no-decision, never allow/deny, and only
+        // for the exact local codex/profile boundary (remote SSH and WSL are
+        // excluded even on a raw-id collision).
+        if (typeof ctx.shouldSuppressCodexArchive === "function"
+          && ctx.shouldSuppressCodexArchive(sessionIdentity.rawSessionId, {
+            agentId: "codex",
+            profileId: trustedProfileId,
+            host: trustedDisplayHost || normalizeString(data.host),
+            wslDistro: normalizeString(data.wsl_distro),
+          })) {
+          recordRequestHookEvent.droppedUnsupported();
+          ctx.permLog(`codex archived session=${sessionId} -> no decision, native prompt fallback (tool=${toolName})`);
+          sendCodexPermissionNoDecision(res);
+          return;
+        }
         const toolUseId = normalizeHookToolUseId(
           data.tool_use_id ?? data.toolUseId ?? data.toolUseID
         );
@@ -774,7 +1155,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const legacyCodexSessionOptions = {
-          ...buildCodexPermissionSessionOptions(data),
+          ...buildCodexPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -902,7 +1283,7 @@ function handlePermissionPost(req, res, options) {
           return;
         }
 
-        if (!shouldInterceptCodexPermission(ctx)) {
+        if (!shouldInterceptCodexPermission(ctx, data)) {
           codexSessionOptions = resolveCodexSessionProcessMetadata();
           const nativeSessionOptions = { ...codexSessionOptions };
           if (shouldMuteCodexNativeNotificationSound(ctx)) {
@@ -938,6 +1319,8 @@ function handlePermissionPost(req, res, options) {
           hideTimer: null,
           toolName,
           toolInput,
+          ...permissionDetail,
+          ...permissionReminder,
           toolUseId,
           toolInputFingerprint,
           resolvedSuggestion: null,
@@ -946,6 +1329,8 @@ function handlePermissionPost(req, res, options) {
           sessionAutomationIdentity,
           agentId: "codex",
           isCodex: true,
+          codexAutoManual: typeof ctx.getCodexPermissionMode === "function"
+            && ctx.getCodexPermissionMode() === "auto",
           codexInteractiveSubagent: isCodexSubagent,
           headless: data.headless === true,
           codexSessionRole: codexSessionOptions.codexSessionRole || null,
@@ -1008,6 +1393,8 @@ function handlePermissionPost(req, res, options) {
         });
         const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
         const toolInput = truncateDeep(rawInput);
+        const permissionDetail = preparePermissionDetail(toolName, rawInput);
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionIdentity = resolvePermissionSession(data.session_id, "qwen-code:default");
         const sessionId = sessionIdentity.sessionId;
         const toolUseId = normalizeHookToolUseId(
@@ -1017,7 +1404,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const qwenSessionOptions = {
-          ...buildQwenCodePermissionSessionOptions(data),
+          ...buildQwenCodePermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1063,6 +1450,8 @@ function handlePermissionPost(req, res, options) {
           hideTimer: null,
           toolName,
           toolInput,
+          ...permissionDetail,
+          ...permissionReminder,
           toolUseId,
           toolInputFingerprint,
           resolvedSuggestion: null,
@@ -1108,6 +1497,190 @@ function handlePermissionPost(req, res, options) {
         return;
       }
 
+      // ── ZCode PermissionRequest branch ──
+      // ZCode's hook runner treats "{}"/no-decision (HTTP 204 here) as "show
+      // the native permission flow" and honors hookSpecificOutput decisions
+      // (minimal union derived from ZCode 3.5.x's strict output schema;
+      // end-to-end Allow/Deny verified on macOS ZCode 3.8.1). Keep every
+      // fallback 204/no-decision so Clawd never denies tools on cleanup or
+      // disabled bubble paths (same contract as qwen).
+      if (agentId === "zcode") {
+        const toolName = typeof data.tool_name === "string" && data.tool_name ? data.tool_name : "Unknown";
+        const interaction = classifyPermissionInteraction({
+          agentId: "zcode",
+          eventKind: "permission",
+          toolName,
+        });
+        const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
+        const toolInput = truncateDeep(rawInput);
+        const permissionDetail = preparePermissionDetail(toolName, rawInput);
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
+        const sessionIdentity = resolvePermissionSession(data.session_id, "zcode:default");
+        const sessionId = sessionIdentity.sessionId;
+        const toolUseId = normalizeHookToolUseId(
+          data.tool_use_id ?? data.toolUseId ?? data.toolUseID
+        );
+        const toolInputFingerprint = typeof data.tool_input_fingerprint === "string" && data.tool_input_fingerprint
+          ? data.tool_input_fingerprint
+          : buildToolInputFingerprint(rawInput);
+        const zcodeSessionOptions = {
+          ...buildZcodePermissionSessionOptions(data, remoteProfile, wslSourced),
+          sessionAutomationIdentity,
+          ...trustedSessionFields(sessionIdentity),
+        };
+
+        if (ctx.doNotDisturb) {
+          recordRequestHookEvent.droppedByDnd();
+          ctx.permLog(`zcode DND -> no decision, native prompt fallback (tool=${toolName})`);
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+
+        if (isHeadlessPermissionRequest(ctx, sessionId, data, agentId)) {
+          recordRequestHookEvent.accepted();
+          ctx.permLog(`zcode headless session=${sessionId} -> no decision, native prompt fallback (tool=${toolName})`);
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+
+        if (typeof ctx.isAgentEnabled === "function" && !ctx.isAgentEnabled("zcode")) {
+          recordRequestHookEvent.droppedByDisabled();
+          ctx.permLog(`zcode disabled -> no decision, native prompt fallback (tool=${toolName})`);
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+
+        // No-capability interactions must not offer decisions anywhere. ZCode
+        // exposes a real ExitPlanMode (needsApproval:true); without a reviewed
+        // decision-tool contract it classifies as UNKNOWN with no
+        // allow/answer/plan capability, so neither the local bubble nor a
+        // remote card may show Allow/Deny — hand it back to ZCode's native UI.
+        // Keep this guard before the global bubble-off remote-only path: that
+        // path intentionally has no desktop window and otherwise relies on the
+        // remote transport's broader legacy actionability predicate.
+        if (
+          !isValidInteraction(interaction)
+          || (
+            interaction.capabilities.allowDeny !== true
+            && interaction.capabilities.answerQuestions !== true
+            && interaction.capabilities.planFeedback !== true
+          )
+        ) {
+          recordRequestHookEvent.accepted();
+          ctx.permLog(`zcode no-capability interaction (${interaction.intent}) -> no decision, native prompt fallback (tool=${toolName})`);
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+
+        // Split the two off-switches: "permission bubbles disabled" only means
+        // no desktop window — Telegram/Feishu remote approval must stay alive
+        // (same contract as the CC and DSH branches). "zcode bubbles disabled"
+        // (the per-agent gate) is the stronger opt-out that keeps Clawd fully
+        // out of ZCode's loop, including remote channels.
+        const agentGateOff = typeof ctx.isAgentPermissionsEnabled === "function"
+          && !ctx.isAgentPermissionsEnabled("zcode");
+        if (!agentGateOff && !arePermissionBubblesEnabled(ctx)) {
+          recordRequestHookEvent.accepted();
+          const remoteOnlyResult = tryRemoteOnlyApproval(ctx, {
+            res, sessionId, toolName, toolInput, toolUseId, toolInputFingerprint,
+            agentId: "zcode", isZcode: true, interaction, sessionAutomationIdentity,
+            cwd: zcodeSessionOptions.cwd || "",
+            host: zcodeSessionOptions.host || null,
+            model: zcodeSessionOptions.model || null,
+            ...trustedSessionFields(sessionIdentity),
+            ...permissionReminder,
+          });
+          if (remoteOnlyResult.handled) return;
+          ctx.permLog(`permission bubbles disabled, no remote approval available -> no decision, native prompt fallback (tool=${toolName})`);
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+        if (agentGateOff) {
+          recordRequestHookEvent.accepted();
+          ctx.permLog(`zcode bubbles disabled -> no decision, native prompt fallback (tool=${toolName})`);
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+
+        const permEntry = {
+          res,
+          abortHandler: null,
+          suggestions: [],
+          sessionId,
+          ...trustedSessionFields(sessionIdentity),
+          bubble: null,
+          hideTimer: null,
+          toolName,
+          toolInput,
+          ...permissionDetail,
+          ...permissionReminder,
+          toolUseId,
+          toolInputFingerprint,
+          resolvedSuggestion: null,
+          createdAt: Date.now(),
+          interaction,
+          sessionAutomationIdentity,
+          agentId: "zcode",
+          isZcode: true,
+          sourcePid: zcodeSessionOptions.sourcePid || null,
+          cwd: zcodeSessionOptions.cwd || "",
+          agentPid: zcodeSessionOptions.agentPid || null,
+          pidChain: zcodeSessionOptions.pidChain || null,
+          tmuxSocket: zcodeSessionOptions.tmuxSocket || null,
+          tmuxClient: zcodeSessionOptions.tmuxClient || null,
+          orcaPaneKey: zcodeSessionOptions.orcaPaneKey || null,
+          host: zcodeSessionOptions.host || null,
+          platform: zcodeSessionOptions.platform || null,
+          model: zcodeSessionOptions.model || null,
+        };
+        const abortHandler = () => {
+          if (res.writableFinished) return;
+          ctx.permLog("abortHandler fired (zcode)");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+        };
+        permEntry.abortHandler = abortHandler;
+        res.on("close", abortHandler);
+
+        // Transactional enqueue: a throw from updateSession or a partial
+        // bubble create must not leak a windowless pending entry — its close
+        // handler only fires on client disconnect, i.e. after the 600s hook
+        // timeout. The session update runs BEFORE the entry is queued so a
+        // failure leaves nothing behind.
+        const rollbackZcodePermission = (reason) => {
+          removePendingPermission(ctx, permEntry, reason);
+          if (permEntry.bubble) {
+            try { permEntry.bubble.destroy(); } catch {}
+          }
+          if (permEntry.hideTimer) {
+            try { clearTimeout(permEntry.hideTimer); } catch {}
+          }
+          if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
+        };
+
+        try {
+          ctx.updateSession(sessionId, "notification", "PermissionRequest", zcodeSessionOptions);
+        } catch (sessionErr) {
+          ctx.permLog(`zcode updateSession failed: ${sessionErr && sessionErr.message} -> no decision`);
+          rollbackZcodePermission("zcode-update-session-failed");
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+        addPendingPermission(ctx, permEntry);
+
+        ctx.permLog(`zcode showing bubble: tool=${toolName} session=${sessionId} stack=${ctx.pendingPermissions.length}`);
+        recordRequestHookEvent.accepted();
+        try {
+          ctx.showPermissionBubble(permEntry);
+        } catch (bubbleErr) {
+          ctx.permLog(`zcode bubble failed: ${bubbleErr && bubbleErr.message} -> no decision`);
+          rollbackZcodePermission("zcode-bubble-failed");
+          sendZcodePermissionNoDecision(res);
+          return;
+        }
+        startRemoteApproval(ctx, permEntry);
+        return;
+      }
+
       // ── Copilot CLI PermissionRequest branch ──
       // Copilot command hooks treat empty stdout + exit 0 as "no decision,
       // continue native flow" (Phase 0 §3, locked). Every Clawd path here
@@ -1130,6 +1703,8 @@ function handlePermissionPost(req, res, options) {
         });
         const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
         const toolInput = truncateDeep(rawInput);
+        const permissionDetail = preparePermissionDetail(toolName, rawInput);
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionIdentity = resolvePermissionSession(data.session_id, "copilot-cli:default");
         const sessionId = sessionIdentity.sessionId;
         const toolUseId = normalizeHookToolUseId(
@@ -1139,7 +1714,7 @@ function handlePermissionPost(req, res, options) {
           ? data.tool_input_fingerprint
           : buildToolInputFingerprint(rawInput);
         const copilotSessionOptions = {
-          ...buildCopilotPermissionSessionOptions(data),
+          ...buildCopilotPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1185,6 +1760,8 @@ function handlePermissionPost(req, res, options) {
           hideTimer: null,
           toolName,
           toolInput,
+          ...permissionDetail,
+          ...permissionReminder,
           toolUseId,
           toolInputFingerprint,
           resolvedSuggestion: null,
@@ -1311,8 +1888,11 @@ function handlePermissionPost(req, res, options) {
           data.tool_use_id ?? data.toolUseId ?? data.toolUseID
         );
         const toolInputFingerprint = buildToolInputFingerprint(rawInput);
+        // DSH exposes no tool arguments, so there is nothing in rawInput to scan.
+        // The view is still derived so that every accepted request carries one.
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionOptions = {
-          ...buildDshPermissionSessionOptions(data),
+          ...buildDshPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1333,6 +1913,7 @@ function handlePermissionPost(req, res, options) {
               sessionAutomationIdentity,
               isDsh: true,
               ...sessionOptions,
+              ...permissionReminder,
             });
             if (remoteOnlyResult.handled) return;
           }
@@ -1353,6 +1934,7 @@ function handlePermissionPost(req, res, options) {
           toolInput,
           toolUseId,
           toolInputFingerprint,
+          ...permissionReminder,
           resolvedSuggestion: null,
           createdAt: Date.now(),
           interaction,
@@ -1367,21 +1949,42 @@ function handlePermissionPost(req, res, options) {
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
+
+        const rollbackDshPermission = (reason) => {
+          removePendingPermission(ctx, permEntry, reason);
+          if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
+            try { permEntry.bubble.destroy(); } catch {}
+          }
+          permEntry.bubble = null;
+          if (permEntry.autoCloseTimer) {
+            try { clearTimeout(permEntry.autoCloseTimer); } catch {}
+            permEntry.autoCloseTimer = null;
+          }
+          if (permEntry.hideTimer) {
+            try { clearTimeout(permEntry.hideTimer); } catch {}
+            permEntry.hideTimer = null;
+          }
+          if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
+        };
+
+        // Keep enqueue transactional: an updateSession failure must not leave a
+        // windowless pending request after the DSH plugin receives its native
+        // fallback response.
+        try {
+          ctx.updateSession(sessionId, "notification", "PermissionRequest", sessionOptions);
+        } catch (sessionErr) {
+          ctx.permLog(`dsh updateSession failed: ${sessionErr && sessionErr.message} -> native fallback`);
+          rollbackDshPermission("dsh-update-session-failed");
+          sendDshPermissionNoDecision(res);
+          return;
+        }
         addPendingPermission(ctx, permEntry);
-        ctx.updateSession(sessionId, "notification", "PermissionRequest", sessionOptions);
         recordRequestHookEvent.accepted();
         try {
           ctx.showPermissionBubble(permEntry);
         } catch (bubbleErr) {
           ctx.permLog(`dsh bubble failed: ${bubbleErr && bubbleErr.message} -> native fallback`);
-          removePendingPermission(ctx, permEntry, "dsh-bubble-failed");
-          if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
-          if (permEntry.autoCloseTimer) clearTimeout(permEntry.autoCloseTimer);
-          if (permEntry.hideTimer) clearTimeout(permEntry.hideTimer);
-          if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
-            try { permEntry.bubble.destroy(); } catch {}
-          }
-          permEntry.bubble = null;
+          rollbackDshPermission("dsh-bubble-failed");
           sendDshPermissionNoDecision(res);
           return;
         }
@@ -1401,6 +2004,8 @@ function handlePermissionPost(req, res, options) {
         });
         const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
         const toolInput = truncateDeep(rawInput);
+        const permissionDetail = preparePermissionDetail(toolName, rawInput);
+        const permissionReminder = preparePermissionReminder(toolName, rawInput);
         const sessionIdentity = resolvePermissionSession(data.session_id, "hermes:default");
         const sessionId = sessionIdentity.sessionId;
         const toolUseId = normalizeHookToolUseId(
@@ -1451,7 +2056,7 @@ function handlePermissionPost(req, res, options) {
           }
           const elicitationInput = elicitation.displayInput;
           const hermesSessionOptions = {
-            ...buildHermesPermissionSessionOptions(data),
+            ...buildHermesPermissionSessionOptions(data, remoteProfile, wslSourced),
             sessionAutomationIdentity,
             ...trustedSessionFields(sessionIdentity),
           };
@@ -1468,6 +2073,8 @@ function handlePermissionPost(req, res, options) {
             hideTimer: null,
             toolName,
             toolInput: elicitationInput,
+            elicitationDetailInput: elicitation.detailDisplayInput,
+            detailTruncated: elicitation.detailTruncated,
             elicitationWireInput: elicitation.wireInput,
             toolUseId,
             toolInputFingerprint,
@@ -1519,7 +2126,7 @@ function handlePermissionPost(req, res, options) {
 
         // General permission request
         const hermesSessionOptions = {
-          ...buildHermesPermissionSessionOptions(data),
+          ...buildHermesPermissionSessionOptions(data, remoteProfile, wslSourced),
           sessionAutomationIdentity,
           ...trustedSessionFields(sessionIdentity),
         };
@@ -1536,6 +2143,8 @@ function handlePermissionPost(req, res, options) {
           hideTimer: null,
           toolName,
           toolInput,
+          ...permissionDetail,
+          ...permissionReminder,
           toolUseId,
           toolInputFingerprint,
           resolvedSuggestion: null,
@@ -1626,8 +2235,21 @@ function handlePermissionPost(req, res, options) {
         return;
       }
 
-      const rawInput = data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {};
+      const hasExactToolInput = data.tool_input !== null
+        && typeof data.tool_input === "object"
+        && !Array.isArray(data.tool_input);
+      const rawInput = hasExactToolInput ? data.tool_input : {};
       const toolInput = truncateDeep(rawInput);
+      // Claude Code's PermissionRequest contract needs updatedInput when an
+      // interactive built-in such as ExitPlanMode is allowed. Keep the exact
+      // parsed request object separate from the truncated display copy so an
+      // approval can never echo normalized, clipped, or otherwise unseen data.
+      const planReviewWireInput = interaction.intent === INTERACTION_INTENT.PLAN_REVIEW
+        && hasExactToolInput
+        ? rawInput
+        : null;
+      const permissionDetail = preparePermissionDetail(toolName, rawInput);
+      const permissionReminder = preparePermissionReminder(toolName, rawInput);
       const toolUseId = normalizeHookToolUseId(
         data.tool_use_id ?? data.toolUseId ?? data.toolUseID
       );
@@ -1686,6 +2308,7 @@ function handlePermissionPost(req, res, options) {
             agentId: permAgentId, subagentId, subagentType, suggestions, interaction,
             sessionAutomationIdentity,
             ...trustedSessionFields(sessionIdentity),
+            ...permissionReminder,
           });
           if (remoteOnlyResult.handled) return;
           ctx.permLog(`permission bubbles disabled, no remote approval available → destroy connection, chat fallback (tool=${toolName})`);
@@ -1737,6 +2360,8 @@ function handlePermissionPost(req, res, options) {
           hideTimer: null,
           toolName,
           toolInput: elicitationInput,
+          elicitationDetailInput: elicitation.detailDisplayInput,
+          detailTruncated: elicitation.detailTruncated,
           elicitationWireInput: elicitation.wireInput,
           toolUseId,
           toolInputFingerprint,
@@ -1789,6 +2414,9 @@ function handlePermissionPost(req, res, options) {
         hideTimer: null,
         toolName,
         toolInput,
+        planReviewWireInput,
+        ...permissionDetail,
+        ...permissionReminder,
         toolUseId,
         toolInputFingerprint,
         resolvedSuggestion: null,
@@ -1861,6 +2489,7 @@ function handlePermissionPost(req, res, options) {
 
 module.exports = {
   MAX_PERMISSION_BODY_BYTES,
+  mapOpencodeV2ShellResource,
   shouldBypassCCBubble,
   shouldBypassCCSubagentBubble,
   shouldBypassCodexBubble,

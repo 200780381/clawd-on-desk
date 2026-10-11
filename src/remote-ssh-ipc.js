@@ -81,6 +81,7 @@ function registerRemoteSshIpc(options = {}) {
   const BrowserWindow = requireDep(options.BrowserWindow, "BrowserWindow");
   const platform = options.platform || process.platform;
   const spawn = options.spawn || childProcess.spawn;
+  const execFile = options.execFile || childProcess.execFile;
   const log = options.log || (() => {});
   const isPackaged = !!options.isPackaged;
   const enableProfileIsolation = options.enableProfileIsolation === true;
@@ -203,7 +204,7 @@ function registerRemoteSshIpc(options = {}) {
   }
 
   async function withManagedTransport(requestedProfile, operation, policy, callback) {
-    const binding = requireVerifiedInstallationBinding();
+    const binding = await requireVerifiedInstallationBinding();
     const initialProfile = { ...requestedProfile, installId: binding.installId };
     if (!transportCoordinator) {
       if (policy && policy.disconnectOrdinary === true) {
@@ -439,8 +440,8 @@ function registerRemoteSshIpc(options = {}) {
     );
   }
 
-  function requireVerifiedInstallationBinding() {
-    const identity = getInstallationIdentity();
+  async function requireVerifiedInstallationBinding() {
+    const identity = await getInstallationIdentity();
     const snapshot = settingsController.getSnapshot();
     const expected = snapshot.remoteSsh && snapshot.remoteSsh.installId;
     if (!identity || typeof identity.installId !== "string" || identity.installId !== expected) {
@@ -544,7 +545,12 @@ function registerRemoteSshIpc(options = {}) {
       && typeof transportCoordinator.refreshProfileInspections === "function") {
       await transportCoordinator.refreshProfileInspections(listProfiles(settingsController));
     }
-    const identity = getInstallationIdentity();
+    let identity = null;
+    try {
+      identity = await getInstallationIdentity();
+    } catch (err) {
+      log("remote-ssh: installation identity unavailable:", err && err.message);
+    }
     return {
       status: "ok",
       statuses: remoteSshRuntime.listStatuses(),
@@ -601,7 +607,30 @@ function registerRemoteSshIpc(options = {}) {
       err.operation = destructiveProfileOperations.get(profile.id);
       throw err;
     }
-    const binding = requireVerifiedInstallationBinding();
+    const binding = await requireVerifiedInstallationBinding();
+    // The first lazy identity load may clone-recover Remote SSH settings and
+    // replace every profile while this Connect is awaiting Keychain access.
+    // Re-read the controller truth before checking deployment authority; the
+    // caller's snapshot may still contain routing credentials just revoked by
+    // clone recovery.
+    const currentProfile = findProfile(settingsController, profile.id);
+    if (!currentProfile) {
+      const err = new Error("Remote SSH profile disappeared before connection preparation");
+      err.reason = "profile_changed";
+      throw err;
+    }
+    if (!profileActionIsCurrent(profile.id, connectActionGeneration)) {
+      const err = new Error("Remote SSH Connect was superseded by a newer profile action");
+      err.reason = "transport_operation_busy";
+      throw err;
+    }
+    if (destructiveProfileOperations.has(profile.id)) {
+      const err = new Error("A destructive Remote SSH operation is already active for this profile");
+      err.reason = "transport_operation_busy";
+      err.operation = destructiveProfileOperations.get(profile.id);
+      throw err;
+    }
+    profile = currentProfile;
     if (profile.runtimeMode === "profile-isolated" && !enableProfileIsolation) {
       throw new Error(
         "Profile-isolated runtime is gated until the real SSH and CLI validation matrix is complete."
@@ -789,7 +818,7 @@ function registerRemoteSshIpc(options = {}) {
                   warning,
                 };
               }
-              const binding = requireVerifiedInstallationBinding();
+              const binding = await requireVerifiedInstallationBinding();
               const monitorProfile = { ...profile, installId: binding.installId };
               if (!profileActionIsCurrent(id, disconnectActionGeneration)) {
                 return {
@@ -884,7 +913,7 @@ function registerRemoteSshIpc(options = {}) {
             state,
           };
         }
-        const binding = requireVerifiedInstallationBinding();
+        const binding = await requireVerifiedInstallationBinding();
         const runtimeProfile = { ...profile, installId: binding.installId };
         const admitted = await transportCoordinator.acquireOwnedOperation(runtimeProfile, "disconnect");
         if (!admitted.ok) return coordinatorFailure(admitted);
@@ -939,7 +968,7 @@ function registerRemoteSshIpc(options = {}) {
       }
       // Best-effort cleanup of remote codex monitor if profile had it on.
       if (profile && profile.autoStartCodexMonitor === true && profile.remoteHome) {
-        const binding = requireVerifiedInstallationBinding();
+        const binding = await requireVerifiedInstallationBinding();
         stopCodexMonitorFn({
           profile: { ...profile, installId: binding.installId },
           runtime: remoteSshRuntime,
@@ -979,7 +1008,7 @@ function registerRemoteSshIpc(options = {}) {
     }
     destructiveProfileOperations.set(id, "cleanup");
     try {
-      const binding = requireVerifiedInstallationBinding();
+      const binding = await requireVerifiedInstallationBinding();
       if (profile.identityTxn && profile.identityTxn.phase !== "committed") {
         return {
           status: "error",
@@ -1005,6 +1034,7 @@ function registerRemoteSshIpc(options = {}) {
       let uninstalled = true;
       let attempted = 0;
       let shared = 0;
+      const cleanupWarnings = [];
       const orderedTargets = ownedTargets.slice().sort((a, b) =>
         remoteOwnershipDomainKey(a).localeCompare(remoteOwnershipDomainKey(b))
       );
@@ -1063,6 +1093,7 @@ function registerRemoteSshIpc(options = {}) {
           }
           const stderr = redactTransportDiagnostic(result && result.stderr, cleanupProfile);
           log("remote uninstall incomplete for", target.host, stderr.slice(0, 200));
+          if (stderr) cleanupWarnings.push(stderr);
         }
       }
       return {
@@ -1070,6 +1101,7 @@ function registerRemoteSshIpc(options = {}) {
         uninstalled,
         attempted,
         shared,
+        ...(cleanupWarnings.length ? { warnings: cleanupWarnings, message: cleanupWarnings.join("\n") } : {}),
         skipped: attempted === 0 ? "shared-owner" : undefined,
       };
     } catch (err) {
@@ -1106,7 +1138,7 @@ function registerRemoteSshIpc(options = {}) {
     }
     destructiveProfileOperations.set(id, "force-revoke");
     try {
-      requireVerifiedInstallationBinding();
+      await requireVerifiedInstallationBinding();
       await drainForDestructiveOperation(profile, "force-revoke-disconnect");
       return await withManagedTransport(
         profile,
@@ -1193,7 +1225,7 @@ function registerRemoteSshIpc(options = {}) {
     runtimeModeSwitches.add(id);
     destructiveProfileOperations.set(id, "runtime-mode-switch");
     try {
-      const binding = requireVerifiedInstallationBinding();
+      const binding = await requireVerifiedInstallationBinding();
       await drainForDestructiveOperation(profile, "runtime-mode-disconnect");
       let workingProfile = profile;
       if (!workingProfile.runtimeModeTxn) {
@@ -1417,7 +1449,6 @@ function registerRemoteSshIpc(options = {}) {
           suspendMessage: "Remote SSH is paused while hooks are deployed.",
         },
         async ({ profile, runtime, inspection, transportContext }) => {
-      const installationIdentity = requireVerifiedInstallationBinding();
       if (transportContext) transportContext.assertActive();
       const begin = await settingsController.applyCommand("remoteSsh.beginIdentityRotation", {
         id: profile.id,
@@ -1435,7 +1466,7 @@ function registerRemoteSshIpc(options = {}) {
       }
       const result = await deployFn({
         profile: deployProfile,
-        installId: installationIdentity.installId,
+        installId: profile.installId,
         identityTxn: deployProfile.identityTxn,
         legacyMigrationConfirmed,
         runtime,
@@ -1496,7 +1527,7 @@ function registerRemoteSshIpc(options = {}) {
             deployedAt: Date.now(),
             expectedTarget,
             remoteNode: result.remoteNode,
-            installId: installationIdentity.installId,
+            installId: profile.installId,
             remoteHome: result.layout && result.layout.remoteHome,
             isolation: result.isolation,
             sshTransportHint: transportHintFromInspection(inspection),
@@ -1528,8 +1559,44 @@ function registerRemoteSshIpc(options = {}) {
             message: (committed && committed.message) || "identity transaction was not committed",
           };
         }
+        // The remote deployment is now fully verified, stamped and committed.
+        // If the Hermes phase actually ran, enable Hermes locally through the
+        // SAME Settings controller command the Settings → Agents toggle uses
+        // (setAgentFlag), so the local ingress/state/permission gates accept
+        // the events the remote plugin will send. Never write the settings
+        // file directly and never add UI for it.
+        //
+        // integrationInstalled is preserved exactly: it is excluded from
+        // SETTABLE_AGENT_FLAGS, so this path cannot set it — a remote-only
+        // deployment leaves a local `false` as `false` and never claims the
+        // plugin was installed on this machine. setAgentFlag is a no-op when
+        // the flag already holds the value, so repeat deploys are idempotent.
+        //
+        // A not-applicable, failed or unknown-result deploy never reaches this
+        // line, so no local flag is touched in those cases. A failure to flip
+        // the local flag is logged, not fatal: the remote side is already
+        // verified and the user can still toggle Hermes in Settings.
+        if (result.hermes && (result.hermes.status === "ok" || result.hermes.status === "warning")) {
+          let localEnable = null;
+          try {
+            localEnable = await settingsController.applyCommand("setAgentFlag", {
+              agentId: "hermes",
+              flag: "enabled",
+              value: true,
+            });
+          } catch (err) {
+            localEnable = { status: "error", message: (err && err.message) || "setAgentFlag threw" };
+          }
+          if (transportContext) transportContext.assertActive();
+          if (!localEnable || localEnable.status !== "ok") {
+            log(
+              "remote-ssh: Hermes deployed remotely but could not be enabled locally:",
+              (localEnable && localEnable.message) || "setAgentFlag returned non-ok",
+            );
+          }
+        }
         refreshRuntimeProfile(profile.id);
-        return { status: "ok", ...(stampWarning || {}) };
+        return { status: "ok", hermes: result.hermes || null, ...(stampWarning || {}) };
       }
       return {
         status: "error",
@@ -1578,8 +1645,8 @@ function registerRemoteSshIpc(options = {}) {
   // synchronously on ENOENT — it returns a child that emits an async
   // 'error' event. If we returned `{ ok: true }` after a synchronous spawn
   // call and never listened for that error, two bad things happen:
-  //   1. The fallback chain (wt → cmd, gnome → konsole → xterm) is never
-  //      triggered when the first candidate is missing.
+  //   1. A terminal candidate fallback chain is never triggered when the
+  //      first candidate is missing.
   //   2. An EventEmitter 'error' with no listener becomes an
   //      `uncaughtException` and crashes the Electron main process.
   //
@@ -1642,21 +1709,32 @@ function registerRemoteSshIpc(options = {}) {
   }
 
   async function spawnWindowsTerminal(sshArgs) {
-    // wt.exe is preferred but not on every box (Win10 LTSC, stripped images,
-    // pre-1903 builds). cmd.exe is always present. We try wt first, fall back
-    // to cmd on real spawn failure (verified via the error event).
-    const opts = { detached: true, stdio: "ignore", windowsHide: false };
-    const wt = await tryLaunch("wt.exe", ["--", "ssh", ...sshArgs], opts);
-    if (wt.ok) return { ok: true, terminal: "wt" };
-
+    // Explicit conhost bypasses Windows Terminal's default-host / elevation
+    // handoff (#779). START gives it fresh console handles; spawning conhost
+    // with Node's redirected stdio can instead put it in unusable ConPTY mode.
+    // Keep the escaped SSH command in this child's environment: conhost parses
+    // and rebuilds argv, which would otherwise damage cmd's caret quoting.
+    // The outer cmd passes the literal variable name; only the inner cmd
+    // expands it, once. /k leaves SSH errors and the local prompt visible.
     const quoted = sshArgs.map(quoteForCmd).join(" ");
-    const cmd = await tryLaunch("cmd.exe", ["/d", "/v:off", "/s", "/k", `ssh ${quoted}`], {
-      ...opts,
-      shell: false,
-      windowsVerbatimArguments: true,
+    return new Promise((resolve) => {
+      const done = (error) => resolve(error
+        ? { ok: false, message: error.message || "could not spawn terminal" }
+        : { ok: true, terminal: "conhost" });
+      try {
+        execFile("cmd.exe", ["/d", "/v:off", "/s", "/c",
+          'start "" conhost.exe cmd.exe /d /v:off /s /k ^%CLAWD_REMOTE_SSH_COMMAND^%',
+        ], {
+          detached: true,
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+          shell: false,
+          env: { ...process.env, CLAWD_REMOTE_SSH_COMMAND: `ssh ${quoted}` },
+        }, done);
+      } catch (error) {
+        done(error);
+      }
     });
-    if (cmd.ok) return { ok: true, terminal: "cmd" };
-    return { ok: false, message: (cmd.error && cmd.error.message) || "could not spawn terminal" };
   }
 
   async function spawnMacTerminal(sshArgs) {
@@ -1717,9 +1795,26 @@ function registerRemoteSshIpc(options = {}) {
   async function connectOnLaunchProfiles() {
     const snap = settingsController.getSnapshot();
     const list = (snap.remoteSsh && Array.isArray(snap.remoteSsh.profiles)) ? snap.remoteSsh.profiles : [];
+    const initialLaunchProfiles = list.filter((profile) => profile && profile.connectOnLaunch === true);
     const started = [];
-    for (const profile of list) {
-      if (!profile || profile.connectOnLaunch !== true) continue;
+    if (!initialLaunchProfiles.length) return started;
+    try {
+      // One preflight per startup prevents several configured profiles from
+      // presenting the same Keychain prompt repeatedly after a denial.
+      await requireVerifiedInstallationBinding();
+    } catch (err) {
+      log("connect-on-launch skipped: installation identity unavailable", err && err.message);
+      return started;
+    }
+    // Identity initialization can commit clone recovery, and the user may
+    // change launch intent while Keychain access is pending. Only act on the
+    // post-initialization controller snapshot.
+    const currentSnap = settingsController.getSnapshot();
+    const currentList = (currentSnap.remoteSsh && Array.isArray(currentSnap.remoteSsh.profiles))
+      ? currentSnap.remoteSsh.profiles
+      : [];
+    const launchProfiles = currentList.filter((profile) => profile && profile.connectOnLaunch === true);
+    for (const profile of launchProfiles) {
       try {
         await connectProfile(profile);
         started.push(profile.id);

@@ -68,6 +68,7 @@ const {
 const {
   isPetTintId,
   isPetAccessoryId,
+  isPetMouthAccessoryId,
 } = require("./pet-customization-catalog");
 const { isValidDisplaySnapshot } = require("./work-area");
 const {
@@ -127,6 +128,7 @@ const {
 } = require("./settings-actions-theme-overrides");
 const {
   autoStartWithClaude,
+  autoStartWithCodex,
   createRepairDoctorIssue,
   installHooks,
   manageClaudeHooksAutomatically,
@@ -173,6 +175,9 @@ const {
   evaluateFeishuApprovalConfiguration,
   planFeishuCredentialWrite,
 } = require("./feishu-approval-settings");
+const {
+  validateSlackNotify,
+} = require("./slack-notify-settings");
 const { classifyFeishuApprovalRecipient } = require("./feishu-approval-recipient");
 const { EVENTS: TELEGRAM_MIGRATION_EVENTS } = require("./telegram-migration-state");
 
@@ -195,7 +200,9 @@ const MANAGED_CLEANUP_AGENT_IDS = Object.freeze([
   "antigravity-cli",
   "codebuddy",
   "workbuddy",
+  "grok-build",
   "kiro-cli",
+  "kirocrew",
   "kimi-cli",
   "qwen-code",
   "zcode",
@@ -203,12 +210,15 @@ const MANAGED_CLEANUP_AGENT_IDS = Object.freeze([
   "opencode",
   "mimocode",
   "pi",
+  "omp",
   "openclaw",
   "hermes",
   "qoder",
   "reasonix",
   "qoderwork",
+  "traecode",
   "qwenwork",
+  "minimax",
 ]);
 
 // ── updateRegistry ──
@@ -296,6 +306,7 @@ const updateRegistry = {
 
   // ── Pure data prefs (function-form: validator only) ──
   lang: requireEnum("lang", ["en", "zh", "zh-TW", "ko", "ja", "pt-BR", "es"]),
+  recapEnabled: requireBoolean("recapEnabled"),
   tutorialSeen: requireBoolean("tutorialSeen"),
   soundMuted: requireBoolean("soundMuted"),
   soundVolume: requireNumberInRange("soundVolume", 0, 1),
@@ -324,6 +335,7 @@ const updateRegistry = {
   codexHookHealthNotifyEnabled: requireBoolean("codexHookHealthNotifyEnabled"),
   codexHookHealthLastNotified: requireString("codexHookHealthLastNotified", { allowEmpty: true }),
   telegramMigrationLastNotified: requireString("telegramMigrationLastNotified", { allowEmpty: true }),
+  feishuApprovalMigrationLastNotified: requireString("feishuApprovalMigrationLastNotified", { allowEmpty: true }),
   lowPowerIdleMode: requireBoolean("lowPowerIdleMode"),
   keepAwakeWhileWorking: requireBoolean("keepAwakeWhileWorking"),
   petTint(value) {
@@ -362,6 +374,24 @@ const updateRegistry = {
     }
     return { status: "ok" };
   },
+  petMouthAccessory(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { status: "error", message: "petMouthAccessory must be a theme-to-accessory object" };
+    }
+    for (const [themeId, accessoryId] of Object.entries(value)) {
+      if (
+        !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(themeId)
+        || !isPetMouthAccessoryId(accessoryId)
+        || accessoryId === "none"
+      ) {
+        return {
+          status: "error",
+          message: `petMouthAccessory entry "${themeId}" must map a safe theme id to a non-default catalog accessory id`,
+        };
+      }
+    }
+    return { status: "ok" };
+  },
   holidayAccessoryEnabled(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return { status: "error", message: "holidayAccessoryEnabled must be a theme-to-boolean object" };
@@ -380,12 +410,28 @@ const updateRegistry = {
     return { status: "ok" };
   },
   bubbleFollowPet: requireBoolean("bubbleFollowPet"),
+  bubbleFollowPreference: requireEnum("bubbleFollowPreference", ["auto", "left", "right"]),
+  bubbleFixedCorner: requireEnum("bubbleFixedCorner", [
+    "top-left",
+    "top-right",
+    "bottom-left",
+    "bottom-right",
+  ]),
   sessionHudEnabled: requireBoolean("sessionHudEnabled"),
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),
   sessionHudShowElapsed: requireBoolean("sessionHudShowElapsed"),
   sessionHudShowContextUsage: requireBoolean("sessionHudShowContextUsage"),
   sessionHudShowQuota: requireBoolean("sessionHudShowQuota"),
   quotaRingDisplayMode: requireEnum("quotaRingDisplayMode", ["used", "remaining"]),
+  quotaAlertsEnabled: requireBoolean("quotaAlertsEnabled"),
+  quotaRecoveryAlertsEnabled: requireBoolean("quotaRecoveryAlertsEnabled"),
+  quotaAlertThresholds(value) {
+    return Array.isArray(value) && value.length > 0 && value.length <= 5
+      && new Set(value).size === value.length
+      && value.every((n) => Number.isInteger(n) && n >= 1 && n <= 99)
+      ? { status: "ok" }
+      : { status: "error", message: "Choose 1–5 different remaining-percent thresholds (1–99)." };
+  },
   // Shape only — the entries are provider keys, and deliberately not checked
   // against the ring's provider list here (see prefs.js: rejecting an
   // unfamiliar key would un-hide a provider behind the user's back).
@@ -425,6 +471,7 @@ const updateRegistry = {
   sessionHudPinned: requireBoolean("sessionHudPinned"),
   hideBubbles: requireBoolean("hideBubbles"),
   permissionBubblesEnabled: requireBoolean("permissionBubblesEnabled"),
+  destructiveActionReminder: requireBoolean("destructiveActionReminder"),
   // Permission automation is safety-sensitive: the command path owns its
   // warning/confirmation gate and the coupled mode + dismissal commit. Keep
   // the validators available for defensive command validation, but reject
@@ -500,13 +547,28 @@ const updateRegistry = {
     }
     return { status: "ok" };
   },
+  codexWorkingStaleMs(value) {
+    if (value === 0) return { status: "ok" };
+    return requireIntegerInRange("codexWorkingStaleMs", 30_000, 86_400_000)(value);
+  },
   detachedIdleStaleMs: requireIntegerInRange("detachedIdleStaleMs", 5_000, 300_000),
   allowEdgePinning: requireBoolean("allowEdgePinning"),
   disableMiniMode: requireBoolean("disableMiniMode"),
   freeRoam: requireBoolean("freeRoam"),
   roamConstrainAxis: requireBoolean("roamConstrainAxis"),
-  keepSizeAcrossDisplays: requireBoolean("keepSizeAcrossDisplays"),
+  keepSizeAcrossDisplays: {
+    validate: requireBoolean("keepSizeAcrossDisplays"),
+    effect(value, deps = {}) {
+      // Rebase size before this toggle commits, while the frozen pixels are
+      // still available to keep the slider and window in sync.
+      if (value === false && typeof deps.rebaseSizeToRealizedPixels === "function") {
+        deps.rebaseSizeToRealizedPixels();
+      }
+      return { status: "ok" };
+    },
+  },
   fullscreenOverlay: requireBoolean("fullscreenOverlay"),
+  fullscreenAutoHide: requireBoolean("fullscreenAutoHide"),
   mobilePreviewEnabled: {
     validate: requireBoolean("mobilePreviewEnabled"),
     lockKey: "mobilePreview",
@@ -522,6 +584,7 @@ const updateRegistry = {
 
   // ── System-backed prefs (object-form: validate + effect pre-commit gate) ──
   autoStartWithClaude,
+  autoStartWithCodex,
   manageClaudeHooksAutomatically,
   openAtLogin,
 
@@ -726,6 +789,9 @@ const updateRegistry = {
   feishuApproval: {
     validate: validateFeishuApprovalUpdate,
     commandOnly: true,
+  },
+  slackNotify(value) {
+    return validateSlackNotify(value);
   },
 
   // v0.9.0 spike: persisted migration state across restarts. Shape:
@@ -960,7 +1026,9 @@ function setBubbleCategoryEnabled(payload, deps) {
   return { status: "ok", commit: result.commit };
 }
 
-// Atomic three-key writer for the session-cleanup intervals. Lives as a
+// Atomic writer for the session-cleanup intervals. The historical command name
+// is retained for renderer/backward compatibility even though the policy now
+// includes a fourth, Codex-specific value. Lives as a
 // command (not as `applyBulk`) because applyBulk runs each single-key
 // validator against the PRE-bulk snapshot, which would reject a Reset that
 // lowers both knobs simultaneously. The controller's command path re-runs
@@ -975,7 +1043,7 @@ function setSessionCleanupTriple(payload, deps) {
 
   // Strict presence check: a present-but-wrong-type value is a programmer
   // error and must surface, not silently fall back to the snapshot.
-  function pick(key) {
+  function pick(key, fallbackDefault = null) {
     if (key in payload) {
       const v = payload[key];
       if (!Number.isInteger(v)) {
@@ -984,21 +1052,26 @@ function setSessionCleanupTriple(payload, deps) {
       return { value: v };
     }
     const fallback = Number(snapshot[key]);
-    if (!Number.isFinite(fallback)) {
-      return { error: `${key} missing from payload and not present in snapshot` };
-    }
-    return { value: fallback };
+    if (Number.isFinite(fallback)) return { value: fallback };
+    if (Number.isFinite(fallbackDefault)) return { value: fallbackDefault };
+    return { error: `${key} missing from payload and not present in snapshot` };
   }
 
   const s = pick("sessionStaleMs");
   if (s.error) return { status: "error", message: s.error };
   const w = pick("workingStaleMs");
   if (w.error) return { status: "error", message: w.error };
+  // Older controller snapshots predate the fourth value. An absent key
+  // receives the shipped default; a present malformed value still fails
+  // closed through the strict branch above.
+  const c = pick("codexWorkingStaleMs", 1_200_000);
+  if (c.error) return { status: "error", message: c.error };
   const d = pick("detachedIdleStaleMs");
   if (d.error) return { status: "error", message: d.error };
 
   const sessionStaleMs = s.value;
   const workingStaleMs = w.value;
+  const codexWorkingStaleMs = c.value;
   const detachedIdleStaleMs = d.value;
 
   if (!(sessionStaleMs === 0 || (sessionStaleMs >= 60_000 && sessionStaleMs <= 86_400_000))) {
@@ -1006,6 +1079,9 @@ function setSessionCleanupTriple(payload, deps) {
   }
   if (!(workingStaleMs >= 30_000 && workingStaleMs <= 86_400_000)) {
     return { status: "error", message: `workingStaleMs out of range: ${workingStaleMs}` };
+  }
+  if (!(codexWorkingStaleMs === 0 || (codexWorkingStaleMs >= 30_000 && codexWorkingStaleMs <= 86_400_000))) {
+    return { status: "error", message: `codexWorkingStaleMs out of range: ${codexWorkingStaleMs}` };
   }
   if (!(detachedIdleStaleMs >= 5_000 && detachedIdleStaleMs <= 300_000)) {
     return { status: "error", message: `detachedIdleStaleMs out of range: ${detachedIdleStaleMs}` };
@@ -1020,7 +1096,7 @@ function setSessionCleanupTriple(payload, deps) {
 
   return {
     status: "ok",
-    commit: { sessionStaleMs, workingStaleMs, detachedIdleStaleMs },
+    commit: { sessionStaleMs, workingStaleMs, codexWorkingStaleMs, detachedIdleStaleMs },
   };
 }
 
@@ -1095,6 +1171,50 @@ function setSessionAlias(payload, deps) {
   return { status: "ok", commit: { sessionAliases: prunedAliases } };
 }
 
+// Theme-scoped preference deletions shared by the generic removeTheme and the
+// managed official-theme uninstall. Sharing one boundary keeps the two removal
+// paths from drifting apart.
+function buildThemeScopedPrefsCommit(themeId, snapshot) {
+  const current = snapshot || {};
+  const nextCommit = {};
+  if (current.themeOverrides && current.themeOverrides[themeId]) {
+    const nextOverrides = { ...current.themeOverrides };
+    delete nextOverrides[themeId];
+    nextCommit.themeOverrides = nextOverrides;
+  }
+  if (current.themeVariant && current.themeVariant[themeId] !== undefined) {
+    const nextVariantMap = { ...current.themeVariant };
+    delete nextVariantMap[themeId];
+    nextCommit.themeVariant = nextVariantMap;
+  }
+  if (current.idleVisual && current.idleVisual[themeId] !== undefined) {
+    const nextIdleVisual = { ...current.idleVisual };
+    delete nextIdleVisual[themeId];
+    nextCommit.idleVisual = nextIdleVisual;
+  }
+  if (current.petTint && current.petTint[themeId] !== undefined) {
+    const nextPetTint = { ...current.petTint };
+    delete nextPetTint[themeId];
+    nextCommit.petTint = nextPetTint;
+  }
+  if (current.petAccessory && current.petAccessory[themeId] !== undefined) {
+    const nextPetAccessory = { ...current.petAccessory };
+    delete nextPetAccessory[themeId];
+    nextCommit.petAccessory = nextPetAccessory;
+  }
+  if (current.petMouthAccessory && current.petMouthAccessory[themeId] !== undefined) {
+    const nextPetMouthAccessory = { ...current.petMouthAccessory };
+    delete nextPetMouthAccessory[themeId];
+    nextCommit.petMouthAccessory = nextPetMouthAccessory;
+  }
+  if (current.holidayAccessoryEnabled && current.holidayAccessoryEnabled[themeId] !== undefined) {
+    const nextHoliday = { ...current.holidayAccessoryEnabled };
+    delete nextHoliday[themeId];
+    nextCommit.holidayAccessoryEnabled = nextHoliday;
+  }
+  return nextCommit;
+}
+
 const _validateRemoveThemeId = requireString("removeTheme.themeId");
 async function removeTheme(payload, deps) {
   const themeId = typeof payload === "string" ? payload : (payload && payload.themeId);
@@ -1132,6 +1252,14 @@ async function removeTheme(payload, deps) {
       message: `removeTheme: cannot delete managed Codex Pet theme "${themeId}" — remove it from Petdex instead`,
     };
   }
+  if (info.managedOfficialTheme
+    || (deps.officialThemeManager && typeof deps.officialThemeManager.isManagedTheme === "function"
+      && deps.officialThemeManager.isManagedTheme(themeId))) {
+    return {
+      status: "error",
+      message: `removeTheme: cannot delete managed official theme "${themeId}" — use Uninstall in the official themes section`,
+    };
+  }
 
   try {
     await deps.removeThemeDir(themeId);
@@ -1139,48 +1267,56 @@ async function removeTheme(payload, deps) {
     return { status: "error", message: `removeTheme: ${err && err.message}` };
   }
 
-  const snapshot = deps.snapshot || {};
-  const currentOverrides = snapshot.themeOverrides || {};
-  const currentVariantMap = snapshot.themeVariant || {};
-  const currentIdleVisual = snapshot.idleVisual || {};
-  const currentPetTint = snapshot.petTint || {};
-  const currentPetAccessory = snapshot.petAccessory || {};
-  const currentHolidayAccessoryEnabled = snapshot.holidayAccessoryEnabled || {};
-  const nextCommit = {};
-  if (currentOverrides[themeId]) {
-    const nextOverrides = { ...currentOverrides };
-    delete nextOverrides[themeId];
-    nextCommit.themeOverrides = nextOverrides;
-  }
-  if (currentVariantMap[themeId] !== undefined) {
-    const nextVariantMap = { ...currentVariantMap };
-    delete nextVariantMap[themeId];
-    nextCommit.themeVariant = nextVariantMap;
-  }
-  if (currentIdleVisual[themeId] !== undefined) {
-    const nextIdleVisual = { ...currentIdleVisual };
-    delete nextIdleVisual[themeId];
-    nextCommit.idleVisual = nextIdleVisual;
-  }
-  if (currentPetTint[themeId] !== undefined) {
-    const nextPetTint = { ...currentPetTint };
-    delete nextPetTint[themeId];
-    nextCommit.petTint = nextPetTint;
-  }
-  if (currentPetAccessory[themeId] !== undefined) {
-    const nextPetAccessory = { ...currentPetAccessory };
-    delete nextPetAccessory[themeId];
-    nextCommit.petAccessory = nextPetAccessory;
-  }
-  if (currentHolidayAccessoryEnabled[themeId] !== undefined) {
-    const nextHolidayAccessoryEnabled = { ...currentHolidayAccessoryEnabled };
-    delete nextHolidayAccessoryEnabled[themeId];
-    nextCommit.holidayAccessoryEnabled = nextHolidayAccessoryEnabled;
-  }
+  const nextCommit = buildThemeScopedPrefsCommit(themeId, deps.snapshot || {});
   if (Object.keys(nextCommit).length > 0) {
     return { status: "ok", commit: nextCommit };
   }
   return { status: "ok" };
+}
+
+// Non-recursive runtime theme selection. Called by both the `setThemeSelection`
+// command and `officialTheme.uninstall` (the latter while already holding the
+// shared `theme` lock, so it must not re-enter the controller). Activates
+// `themeId` with the resolved variant + override map, reads back the variant
+// actually applied (lenient dead-variant fallback), and reports the active
+// theme's fail-closed customization capabilities.
+function applyThemeSelection(themeId, variantIdInput, overrideMap, deps) {
+  if (!deps || typeof deps.activateTheme !== "function") {
+    return { status: "error", message: "theme selection requires activateTheme dep" };
+  }
+  const targetVariant = (typeof variantIdInput === "string" && variantIdInput) ? variantIdInput : "default";
+  const targetOverrideMap = overrideMap === undefined ? null : overrideMap;
+
+  let resolved;
+  try {
+    resolved = deps.activateTheme(themeId, targetVariant, targetOverrideMap);
+  } catch (err) {
+    return { status: "error", message: `setThemeSelection: ${err && err.message}` };
+  }
+  const resolvedVariant = (resolved && typeof resolved === "object" && typeof resolved.variantId === "string")
+    ? resolved.variantId
+    : targetVariant;
+  const activeTheme = typeof deps.getActiveTheme === "function" ? deps.getActiveTheme() : null;
+  const customizationCapabilities = (
+    activeTheme
+    && activeTheme._id === themeId
+    && activeTheme._capabilities
+    && typeof activeTheme._capabilities === "object"
+    && !Array.isArray(activeTheme._capabilities)
+  )
+    ? {
+        petTint: activeTheme._capabilities.petTint === true,
+        accessories: activeTheme._capabilities.accessories === true,
+        mouthAccessories: activeTheme._capabilities.mouthAccessories === true,
+      }
+    : null;
+
+  return {
+    status: "ok",
+    themeId,
+    variantId: resolvedVariant,
+    customizationCapabilities,
+  };
 }
 
 // Phase 3b-swap: atomic theme + variant switch.
@@ -1201,47 +1337,21 @@ function setThemeSelection(payload, deps) {
     return { status: "error", message: "setThemeSelection.variantId must be a non-empty string when provided" };
   }
 
-  if (!deps || typeof deps.activateTheme !== "function") {
-    return { status: "error", message: "setThemeSelection effect requires activateTheme dep" };
-  }
-
-  const snapshot = deps.snapshot || {};
+  const snapshot = deps && deps.snapshot ? deps.snapshot : {};
   const currentVariantMap = snapshot.themeVariant || {};
   const currentOverrides = snapshot.themeOverrides || {};
   const targetVariant = variantIdInput || currentVariantMap[themeId] || "default";
   const targetOverrideMap = currentOverrides[themeId] || null;
 
-  let resolved;
-  try {
-    resolved = deps.activateTheme(themeId, targetVariant, targetOverrideMap);
-  } catch (err) {
-    return { status: "error", message: `setThemeSelection: ${err && err.message}` };
-  }
-  // activateTheme returns { themeId, variantId } — the variantId here reflects
-  // lenient fallback (dead variant → "default"). We commit the resolved value
-  // so prefs self-heal away from stale ids.
-  const resolvedVariant = (resolved && typeof resolved === "object" && typeof resolved.variantId === "string")
-    ? resolved.variantId
-    : targetVariant;
-  const activeTheme = typeof deps.getActiveTheme === "function" ? deps.getActiveTheme() : null;
-  const customizationCapabilities = (
-    activeTheme
-    && activeTheme._id === themeId
-    && activeTheme._capabilities
-    && typeof activeTheme._capabilities === "object"
-    && !Array.isArray(activeTheme._capabilities)
-  )
-    ? {
-        petTint: activeTheme._capabilities.petTint === true,
-        accessories: activeTheme._capabilities.accessories === true,
-      }
-    : null;
+  const selection = applyThemeSelection(themeId, targetVariant, targetOverrideMap, deps);
+  if (selection.status !== "ok") return selection;
 
-  const nextVariantMap = { ...currentVariantMap, [themeId]: resolvedVariant };
+  // We commit the resolved value so prefs self-heal away from stale ids.
+  const nextVariantMap = { ...currentVariantMap, [themeId]: selection.variantId };
   return {
     status: "ok",
     commit: { theme: themeId, themeVariant: nextVariantMap },
-    customizationCapabilities,
+    customizationCapabilities: selection.customizationCapabilities,
   };
 }
 
@@ -1288,6 +1398,54 @@ function setIdleVisual(payload, deps) {
   if (nextMap[themeId] === nextFile) return { status: "ok", noop: true };
   nextMap[themeId] = nextFile;
   return { status: "ok", commit: { idleVisual: nextMap } };
+}
+
+// ── Official theme commands (internal; main-only IPC) ──
+//
+// These run under the shared `theme` domain lock. The download/extract work
+// happens outside the lock in official-theme-main; only the final fs commit and
+// the runtime switch/delete run here, re-reading catalog/target/marker inside
+// the lock so a check/delete TOCTOU cannot slip through.
+const _validateOfficialThemeId = requireString("officialTheme.themeId");
+
+async function officialThemeCommitInstall(payload, deps) {
+  const themeId = payload && payload.themeId;
+  const idCheck = _validateOfficialThemeId(themeId);
+  if (idCheck.status !== "ok") return idCheck;
+  const manager = deps && deps.officialThemeManager;
+  if (!manager || typeof manager.commitStagedInstall !== "function") {
+    return { status: "error", message: "officialTheme.commitInstall requires officialThemeManager" };
+  }
+  return manager.commitStagedInstall(payload);
+}
+
+async function officialThemeUninstall(payload, deps) {
+  const themeId = payload && payload.themeId;
+  const idCheck = _validateOfficialThemeId(themeId);
+  if (idCheck.status !== "ok") return idCheck;
+  const manager = deps && deps.officialThemeManager;
+  if (!manager || typeof manager.uninstall !== "function") {
+    return { status: "error", message: "officialTheme.uninstall requires officialThemeManager" };
+  }
+  // Reuse the exact runtime selection helper as setThemeSelection (bound to this
+  // command's deps). The uninstall runs inside the shared `theme` lock, so the
+  // helper must not re-enter the controller.
+  const selectTheme = (targetId, variantId, overrideMap) =>
+    applyThemeSelection(targetId, variantId, overrideMap, deps);
+  const result = await manager.uninstall({ themeId }, deps, { selectTheme });
+  if (!result || result.status !== "ok") {
+    return result || { status: "error", message: "officialTheme.uninstall returned no result" };
+  }
+  // The command owns the preference commit boundary. When the runtime already
+  // switched to clawd, the controller MUST still commit even if the directory
+  // deletion failed, or prefs and runtime disagree.
+  const prefsCommit = buildThemeScopedPrefsCommit(themeId, (deps && deps.snapshot) || {});
+  const commit = { ...prefsCommit, ...(result.commit || {}) };
+  const out = { status: "ok", uninstallStatus: result.uninstallStatus || "ok" };
+  if (Object.keys(commit).length > 0) out.commit = commit;
+  if (result.removed) out.removed = result.removed;
+  if (result.reason) out.reason = result.reason;
+  return out;
 }
 
 function resizePet(payload, deps) {
@@ -2295,6 +2453,44 @@ async function feishuApprovalSendTest(_payload, deps = {}) {
   return result || { status: "error", message: "Remote approval test returned no result" };
 }
 
+async function slackNotifySetSecrets(payload, deps = {}) {
+  const secrets = payload && typeof payload === "object" ? payload : {};
+  if (!deps || typeof deps.writeSlackNotifySecrets !== "function") {
+    return { status: "error", message: "slackNotify.setSecrets requires writeSlackNotifySecrets dep" };
+  }
+  // Pass the writer's result through untouched: it carries the `code` the
+  // settings page localizes and the English detail naming the real cause.
+  const result = await deps.writeSlackNotifySecrets(secrets);
+  if (!result || result.status !== "ok") {
+    return result || { status: "error", code: "write-failed", message: "Secrets write returned no result" };
+  }
+  return { status: "ok", secretsStored: true };
+}
+
+function slackNotifyStatus(_payload, deps = {}) {
+  if (!deps || typeof deps.getSlackNotifyStatus !== "function") {
+    return { status: "error", message: "slackNotify.status requires getSlackNotifyStatus dep" };
+  }
+  const status = deps.getSlackNotifyStatus();
+  return { status: "ok", state: status || { enabled: false, configured: false } };
+}
+
+function slackNotifySecretInfo(_payload, deps = {}) {
+  if (!deps || typeof deps.getSlackNotifySecretInfo !== "function") {
+    return { status: "error", message: "slackNotify.secretInfo requires getSlackNotifySecretInfo dep" };
+  }
+  const info = deps.getSlackNotifySecretInfo() || { configured: false };
+  return { status: "ok", ...info };
+}
+
+async function slackNotifySendTest(_payload, deps = {}) {
+  if (!deps || typeof deps.sendSlackNotifyTest !== "function") {
+    return { status: "error", message: "slackNotify.test requires sendSlackNotifyTest dep" };
+  }
+  const result = await deps.sendSlackNotifyTest();
+  return result || { status: "error", message: "Slack notification test returned no result" };
+}
+
 function cleanupMessage(result) {
   const summary = result && result.summary;
   if (!summary) return "Integration cleanup finished";
@@ -2336,6 +2532,8 @@ async function cleanupIntegrationsCommand(_payload, deps = {}) {
   let agents = { ...((snapshot && snapshot.agents) || {}) };
   let agentsChanged = false;
 
+  // Step 1: always disable every managed target so a failed disk cleanup can
+  // never keep receiving Clawd events or be re-synced at startup.
   for (const agentId of MANAGED_CLEANUP_AGENT_IDS) {
     const flagDeps = {
       ...deps,
@@ -2349,19 +2547,6 @@ async function cleanupIntegrationsCommand(_payload, deps = {}) {
       agents = result.commit.agents;
       agentsChanged = true;
     }
-    const currentEntry = agents[agentId] && typeof agents[agentId] === "object"
-      ? agents[agentId]
-      : {};
-    if (currentEntry.integrationInstalled !== false) {
-      agents = {
-        ...agents,
-        [agentId]: {
-          ...currentEntry,
-          integrationInstalled: false,
-        },
-      };
-      agentsChanged = true;
-    }
   }
 
   let cleanup;
@@ -2373,6 +2558,58 @@ async function cleanupIntegrationsCommand(_payload, deps = {}) {
       message: err && err.message ? err.message : String(err),
       summary: { agentsChecked: 0, agentsAffected: 0, entriesRemoved: 0, skipped: 0, failed: 1 },
     };
+  }
+
+  // Step 2: decide `integrationInstalled` from the per-agent disk result.
+  // Never mark an agent uninstalled before its actual registration was removed.
+  const diskAgents = cleanup && Array.isArray(cleanup.agents) ? cleanup.agents : null;
+  const failedCount = cleanup && cleanup.summary ? Number(cleanup.summary.failed || 0) : 0;
+  const cleanupErrored = !!(cleanup && cleanup.status === "error") || (!diskAgents && failedCount > 0);
+  const summaryWarnings = [];
+  if (cleanup && typeof cleanup.summary === "object" && cleanup.summary) {
+    if (Array.isArray(cleanup.summary.warnings)) summaryWarnings.push(...cleanup.summary.warnings);
+  }
+
+  for (const agentId of MANAGED_CLEANUP_AGENT_IDS) {
+    const currentEntry = agents[agentId] && typeof agents[agentId] === "object"
+      ? agents[agentId]
+      : {};
+    let shouldUninstall;
+    if (diskAgents) {
+      const diskAgent = diskAgents.find((entry) => entry && entry.agentId === agentId);
+      if (!diskAgent) {
+        // Conservative: a missing result is not proof of success.
+        shouldUninstall = false;
+        summaryWarnings.push(`cleanup result did not include ${agentId}; keeping its install intent`);
+      } else if (diskAgent.status === "failed") {
+        shouldUninstall = false;
+      } else if (diskAgent.registrationRemoved === false || diskAgent.registrationRemoved === null) {
+        shouldUninstall = false;
+      } else if (diskAgent.activeEntryRemaining === true) {
+        shouldUninstall = false;
+      } else {
+        shouldUninstall = true;
+      }
+    } else {
+      // Legacy cleaner contract: no `agents` array. Blanket-uninstall only on a
+      // clean success; any error/throw keeps the install intent (disabled only).
+      shouldUninstall = !cleanupErrored;
+    }
+
+    if (shouldUninstall && currentEntry.integrationInstalled !== false) {
+      agents = {
+        ...agents,
+        [agentId]: {
+          ...currentEntry,
+          integrationInstalled: false,
+        },
+      };
+      agentsChanged = true;
+    }
+  }
+
+  if (summaryWarnings.length && cleanup && typeof cleanup === "object") {
+    cleanup.summary = { ...(cleanup.summary || {}), warnings: summaryWarnings };
   }
 
   const response = {
@@ -2422,7 +2659,19 @@ feishuApprovalSaveManualApprover.lockKey = "feishuApproval";
 feishuApprovalCommitResolvedApprover.lockKey = "feishuApproval";
 feishuApprovalUpdateConfig.lockKey = "feishuApproval";
 feishuApprovalSendTest.lockKey = "feishuApproval";
+slackNotifySetSecrets.lockKey = "slackNotify";
+slackNotifySendTest.lockKey = "slackNotify";
 cleanupIntegrationsCommand.lockKey = "agentIntegration";
+// All theme mutations share one domain lock: selection, generic removal, and
+// the managed official install-commit/uninstall. Without a shared key a
+// selection could land between an uninstall's active check and its delete.
+setThemeSelection.lockKey = "theme";
+removeTheme.lockKey = "theme";
+officialThemeCommitInstall.lockKey = "theme";
+officialThemeUninstall.lockKey = "theme";
+// The legacy single-field `theme` update also activates the runtime, so it
+// must share the same domain lock as selection/removal.
+updateRegistry.theme.lockKey = "theme";
 
 const repairDoctorIssue = createRepairDoctorIssue({
   repairAgentIntegration,
@@ -2502,6 +2751,8 @@ const commandRegistry = {
   setWideHitboxOverride,
   setThemeSelection,
   setIdleVisual,
+  "officialTheme.commitInstall": officialThemeCommitInstall,
+  "officialTheme.uninstall": officialThemeUninstall,
   "remoteSsh.add": remoteSshAddProfile,
   "remoteSsh.update": remoteSshUpdateProfile,
   "remoteSsh.delete": remoteSshDeleteProfile,
@@ -2526,6 +2777,10 @@ const commandRegistry = {
   "feishuApproval.status": feishuApprovalStatus,
   "feishuApproval.secretInfo": feishuApprovalSecretInfo,
   "feishuApproval.test": feishuApprovalSendTest,
+  "slackNotify.setSecrets": slackNotifySetSecrets,
+  "slackNotify.status": slackNotifyStatus,
+  "slackNotify.secretInfo": slackNotifySecretInfo,
+  "slackNotify.test": slackNotifySendTest,
   "telegramMigration.snapshot": telegramMigrationSnapshot,
   "telegramMigration.dispatch": telegramMigrationDispatch,
 };
@@ -2544,4 +2799,6 @@ module.exports = {
   requireString,
   requirePlainObject,
   requireIntegerInRange,
+  buildThemeScopedPrefsCommit,
+  applyThemeSelection,
 };

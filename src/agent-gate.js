@@ -24,6 +24,28 @@ const isAgentIntegrationInstalled = (snapshot, agentId) => (
 const shouldSyncAgentIntegration = (snapshot, agentId) => (
   isAgentEnabled(snapshot, agentId) && isAgentIntegrationInstalled(snapshot, agentId)
 );
+// Unlike legacy per-agent flags, Codex cold-launch is an explicit opt-in for
+// fresh installs. It also requires the local integration to be both installed
+// and enabled; WSL/remote exclusion is enforced inside codex-hook.js.
+const isCodexAutoStartEnabled = (snapshot) => {
+  if (!snapshot || typeof snapshot !== "object" || snapshot.autoStartWithCodex !== true) {
+    return false;
+  }
+  const agents = snapshot.agents;
+  if (!agents || typeof agents !== "object" || Array.isArray(agents)) return false;
+  const codex = agents.codex;
+  if (!codex || typeof codex !== "object" || Array.isArray(codex)) return false;
+  return codex.integrationInstalled === true && codex.enabled === true;
+};
+
+// Capture startup authority once. A normalized fallback snapshot can look
+// valid after malformed prefs have been repaired in memory, so authority lost
+// during the initial load must stay lost for this process and recover only
+// after a clean restart.
+function createCodexAutoStartGateEvaluator({ authorityLost = false } = {}) {
+  const canEnable = authorityLost !== true;
+  return (snapshot) => canEnable && isCodexAutoStartEnabled(snapshot);
+}
 const isAgentPermissionsEnabled = (snapshot, agentId) => readFlag(snapshot, agentId, "permissionsEnabled");
 // #451 sub-gate under permissionsEnabled: bubbles for PermissionRequests that
 // fire from inside a Claude Code subagent (Task tool). Only claude-code's
@@ -35,8 +57,10 @@ const isCodexNativeNotificationSoundEnabled = (snapshot) =>
   readFlag(snapshot, "codex", "nativeNotificationSoundEnabled", false);
 function getCodexPermissionMode(snapshot) {
   const entry = snapshot && snapshot.agents && snapshot.agents.codex;
-  if (entry && entry.permissionMode === "native") return "native";
-  return "intercept";
+  if (entry && entry.permissionMode === "intercept") return "intercept";
+  // Legacy Native values migrate to Auto; unreadable/missing modes must not
+  // take approvals away from Codex by default.
+  return "auto";
 }
 const isCodexPermissionInterceptEnabled = (snapshot) => getCodexPermissionMode(snapshot) === "intercept";
 
@@ -91,6 +115,9 @@ function createRuntimeAgentGate({ getSnapshot, isAuthoritative = () => true } = 
     isCodexNativeNotificationSoundEnabled() {
       return withSnapshot((current) => isCodexNativeNotificationSoundEnabled(current));
     },
+    getCodexPermissionMode() {
+      return withSnapshot((current) => getCodexPermissionMode(current)) || "auto";
+    },
     isCodexPermissionInterceptEnabled() {
       return withSnapshot((current) => isCodexPermissionInterceptEnabled(current));
     },
@@ -106,6 +133,7 @@ function createRuntimeAgentGate({ getSnapshot, isAuthoritative = () => true } = 
 }
 
 module.exports = {
+  createCodexAutoStartGateEvaluator,
   createRuntimeAgentGate,
   getCodexPermissionMode,
   isAgentIntegrationInstalled,
@@ -114,6 +142,7 @@ module.exports = {
   isAgentSubagentPermissionsEnabled,
   isAgentNotificationHookEnabled,
   isCodexNativeNotificationSoundEnabled,
+  isCodexAutoStartEnabled,
   isCodexPermissionInterceptEnabled,
   shouldSyncAgentIntegration,
 };
