@@ -11,7 +11,7 @@ Claude Code's `AskUserQuestion` and Hermes clarification already use their exist
 
 The adapter checks the running host's health/version and exact pending native question before showing a card, then checks it again before returning answers. Each request stays bound to its original plugin instance, SDK client, directory, session, request ID, and tool message/call IDs. It does not infer eligibility from general permission support.
 
-Install or repair the relevant integration through **Settings → Agents**, then reload or restart the agent so it loads the current plugin. The agent, the global permission bubble switch, and that agent's permission bubble switch must be enabled. Turning off notification bubbles alone does not hide these question cards. DND, a disabled agent, or either permission bubble switch being off leaves the question in the agent's native interface.
+Install or repair the relevant integration through **Settings → AI Coding Tools**, then reload or restart the agent so it loads the current plugin. The agent, the global permission bubble switch, and that agent's permission bubble switch must be enabled. Turning off notification bubbles alone does not hide these question cards. DND, a disabled agent, or either permission bubble switch being off leaves the question in the agent's native interface.
 
 ## Question behavior
 

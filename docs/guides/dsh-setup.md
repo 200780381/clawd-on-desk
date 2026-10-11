@@ -163,7 +163,7 @@ Linux does not support the desktop app; on Linux only the `web` profile applies.
 
 ## Install and repair
 
-Open **Settings → Agents**, find **DeepSeek Harness (experimental)**, and click
+Open **Settings → AI Coding Tools**, find **DeepSeek Harness (experimental)**, and click
 **Install**. One queued operation handles both carriers, web first and desktop
 second, and a failure on one side does not stop the other. Each side independently:
 
@@ -224,7 +224,7 @@ upgraded and Clawd stays on the same version, startup sync keeps the existing
 generation instead of staging a new one (it reports `generation-conflict`
 internally). The kept generation already contains the bridge files from the
 current Clawd version, but its marker still records the older DSH version. To
-switch to the new contract right away, open **Settings → Agents**, click
+switch to the new contract right away, open **Settings → AI Coding Tools**, click
 **Uninstall** and then **Install** for DeepSeek Harness, and restart any running
 `dsh web`. When Clawd itself is upgraded first and the installed generation was
 staged by an older Clawd version, startup sync replaces that generation
@@ -249,7 +249,7 @@ empty lock directory.
 
 ## Persistent notices
 
-Settings → Agents shows persistent notices under the DeepSeek Harness row, one
+Settings → AI Coding Tools shows persistent notices under the DeepSeek Harness row, one
 per unacknowledged record. They keep telling the user what a short toast cannot:
 
 - **Desktop restart required**: a plugin update staged a new generation. The
@@ -280,7 +280,7 @@ leftover link before it adds the plugin again. Startup sync only reports
 
 ## Uninstall and ownership safety
 
-Use Settings → Agents → Uninstall, or:
+Use Settings → AI Coding Tools → Uninstall, or:
 
 ```bash
 npm run uninstall:dsh

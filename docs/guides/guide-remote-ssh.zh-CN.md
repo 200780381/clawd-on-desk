@@ -38,12 +38,12 @@ Clawd 不保存 SSH 密码或私钥口令。首次 host key 确认、passphrase�
    - 配置下方会展示连接 / 部署日志
 5. 在远端终端里启动 Claude Code、Codex CLI、Copilot CLI 或一个 Hermes 会话。Dashboard 会在第一条远端 hook 事件到达后显示 session。
 
-全新本机安装下，如果只是接收远程 Copilot CLI 事件，请到 **Settings -> Agents**
+全新本机安装下，如果只是接收远程 Copilot CLI 事件，请到 **Settings -> AI 编程工具**
 打开 **Copilot CLI**，这样 Clawd 才会接收远程 hook 事件；不需要点
 **Install / 安装**，除非你也想在本机安装 Copilot hooks。
 
 如果只是接收远程 Hermes Agent 事件，远程 SSH 部署完整验证通过后，Clawd 会自动在
-**Settings -> Agents** 打开 **Hermes Agent**，远程 hook 事件随即被接收；不需要点
+**Settings -> AI 编程工具** 打开 **Hermes Agent**，远程 hook 事件随即被接收；不需要点
 **Install / 安装**，除非你也想在本机安装 Hermes plugin：远程部署不会在本机装任何
 东西，也不会把本机集成标记为已安装。
 
@@ -104,8 +104,8 @@ Clawd HTTP 服务，不是远端集群的 IP。远端 hook 也不直接访问你
 - 远端 hooks 已部署成功
 - 远端 agent 已启动并产生至少一条 hook 事件
 - Codex 如需 `/hooks` review，已经在远端 Codex TUI 里 review 通过
-- 全新本机安装下，如果只接收远程 Copilot CLI，本机 **Settings -> Agents -> Copilot CLI** 已打开
-- 如果只接收远程 Hermes Agent，本机 **Settings -> Agents -> Hermes Agent** 仍处于打开状态（完整验证通过的部署会自动打开它）；部署日志要求时，远端 gateway 也已手动重启
+- 全新本机安装下，如果只接收远程 Copilot CLI，本机 **Settings -> AI 编程工具 -> Copilot CLI** 已打开
+- 如果只接收远程 Hermes Agent，本机 **Settings -> AI 编程工具 -> Hermes Agent** 仍处于打开状态（完整验证通过的部署会自动打开它）；部署日志要求时，远端 gateway 也已手动重启
 
 ## 共享服务器隔离与升级边界
 
