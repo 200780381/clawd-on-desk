@@ -19,16 +19,16 @@
 | **Cursor Agent：无权限气泡** | Cursor 在 hook 的 stdout JSON 里处理权限，而不是走 HTTP 阻塞式审批，Clawd 无法接管这条审批链路。 |
 | **Cursor Agent：启动恢复能力有限** | 启动时不做进程检测，否则任意 Cursor 编辑器进程都可能误判为活跃会话。Clawd 会保持 idle，直到收到第一条 hook 事件。 |
 | **自定义 HTTP Agent：仅状态，且需要发送端** | 注册可执行文件只会分配 ID 并公开 `/state` 合约，不会安装 hook、观察进程，也不能证明该应用是 AI 工具。应用或 adapter 必须读取 `~/.clawd/runtime.json` 的当前端口，使用字面 loopback `Host`、不带 `Origin`，并只发送一个 `application/json` Content-Type。custom v1 不支持 `/permission`，审批仍在应用自己的界面完成。 |
-| **Hermes Agent：使用前需要安装集成** | Hermes 会显示在 Settings 里，但新安装默认是 Not installed。Clawd 只有在你显式安装该集成、且检测到真实 Hermes 安装后才会写入 plugin 文件。安装 Hermes 后，在 **Settings -> Agents -> Install** 里安装，或执行 `npm run install:hermes-plugin`。 |
+| **Hermes Agent：使用前需要安装集成** | Hermes 会显示在 Settings 里，但新安装默认是 Not installed。Clawd 只有在你显式安装该集成、且检测到真实 Hermes 安装后才会写入 plugin 文件。安装 Hermes 后，在 **Settings -> AI 编程工具 -> Install** 里安装，或执行 `npm run install:hermes-plugin`。 |
 | **Hermes Agent：部分支持权限气泡** | Hermes plugin 事件已覆盖状态、会话、SessionEnd、工具活动、终端聚焦、clarify 交互提问气泡，以及 plugin 发起的权限气泡。对显式列入 `CLAWD_HERMES_PERMISSION_TOOLS` 的工具，如果 Clawd 没有返回决定或不可用，plugin 会 fail closed；Hermes 当前没有可接管这条 opt-in gate 的原生审批框，需要等 Clawd 能正常显示气泡后重试工具。Clawd 尚未完全取代 Hermes 原生审批菜单：在上游提供阻塞式审批结果 hook 前，`once` / `session` / `always` 的持久化仍由 Hermes 处理。Subagent 生命周期仍需上游提供成对的 start/stop 事件。 |
-| **Hermes Agent over Remote SSH（Phase 1）** | 远程 SSH 部署目前只覆盖默认 `account-default` layout 和标准 Hermes 安装：`~/.hermes` home 加上 `~/.hermes/profiles/*` 下的 profile home，对应默认 gateway 和普通 named-profile gateway。自定义 `HERMES_HOME`、multiplexed gateway 和实验性 `profile-isolated` 模式都不受支持、也未验证。Clawd 从不重启 Hermes gateway：启用 plugin 在下一个会话生效；托管模块被替换时，正在运行的 gateway 需要你手动重启，`systemctl --user is-active` 只作为 best-effort 提示上报。远程部署不会把本机 Hermes 集成标记为已安装；部署完整验证通过后，Clawd 会自动打开本机 **Settings -> Agents -> Hermes Agent** 开关，以接收远程事件。 |
+| **Hermes Agent over Remote SSH（Phase 1）** | 远程 SSH 部署目前只覆盖默认 `account-default` layout 和标准 Hermes 安装：`~/.hermes` home 加上 `~/.hermes/profiles/*` 下的 profile home，对应默认 gateway 和普通 named-profile gateway。自定义 `HERMES_HOME`、multiplexed gateway 和实验性 `profile-isolated` 模式都不受支持、也未验证。Clawd 从不重启 Hermes gateway：启用 plugin 在下一个会话生效；托管模块被替换时，正在运行的 gateway 需要你手动重启，`systemctl --user is-active` 只作为 best-effort 提示上报。远程部署不会把本机 Hermes 集成标记为已安装；部署完整验证通过后，Clawd 会自动打开本机 **Settings -> AI 编程工具 -> Hermes Agent** 开关，以接收远程事件。 |
 | **Kiro CLI：无法区分会话** | Kiro CLI stdin JSON 不含 session_id，所有 Kiro 会话会被合并为单个追踪会话。 |
 | **Kiro CLI：无 SessionEnd 事件** | Kiro CLI 没有 SessionEnd 事件，Clawd 无法检测 Kiro 会话结束。 |
 | **Kiro CLI：无 subagent 检测** | Kiro CLI 没有 subagent 事件，不会触发杂耍/指挥动画。 |
 | **Kiro CLI：终端权限确认仍在终端处理** | macOS 与 Windows 上 Kiro 的状态 hooks 已验证可用；但当 Kiro 显示 `t / y / n` 这类原生权限确认时，当前仍需在终端里处理，Clawd 不接管这类确认。 |
 | **Kimi Code CLI（Kimi-CLI）：hook-only 运行路径** | Kimi 在 Clawd 中采用 hook-only 集成（`~/.kimi/config.toml`）。如果未来某个 Kimi 版本让 hooks 失效，回退方式是恢复 commit `e57679a` 里的旧日志轮询实现（当前 `agents/kimi-log-monitor.js` 只是兼容 stub）。 |
 | **Kimi Code CLI（Kimi-CLI）：引用 `kimi-hook.js` 的 `[[hooks]]` block 由 Clawd 接管** | Clawd 每次启动（以及执行 `npm run install:kimi-hooks`）都会自动同步 Kimi hooks。凡是 `command` 里引用 `kimi-hook.js` 的 `[[hooks]]` block，都会被视为 Clawd-owned：这些 block 会被整批删除并重写为标准 13 个事件，命令上带 `--permission-mode=<mode>` 参数（此前安装选过的模式——包括用已停用的 `CLAWD_KIMI_PERMISSION_MODE=…` env 前缀形式写入的——在没传 env 时沿用旧值；全新安装默认 `suspect`）。`config.toml` 里其他非 hook 段（如 `[server]`、`[mcp]`、`[[tools]]`）和你自己写的、但不引用 `kimi-hook.js` 的 `[[hooks]]` block 不会被动。想调整权限模式，请先设置环境变量（例如 `CLAWD_KIMI_PERMISSION_MODE`）再重新运行安装脚本，不要直接手改 `command` 字段。 |
-| **旧版 Kimi CLI：suspect 启发式可能闪现误报提示卡** | 旧版 `~/.kimi` 安装的权限提示默认使用 suspect 启发式（现行 kimi-cli 不发显式审批字段，旧的 explicit-only 默认下提示卡从不出现；自批量审批修复后，同一条消息里排队的每个审批都会各自重新弹卡）。代价是：*已免审*的门控命令若运行超过约 0.8 秒，会短暂弹出一张仿佛在等审批的提示卡——卡片几秒后自动关闭，宠物会保持通知姿势直到该命令跑完。想退出：重新运行安装脚本前设置 `CLAWD_KIMI_PERMISSION_MODE=explicit`（持久化），或在 kimi-cli 运行时用同一环境变量临时覆盖，或在 **Settings → Agents** 里整体关闭 Kimi 权限提示。另注意：旧版事件词汇表里，*下一个*排队审批的提示卡要等上一个工具的 `PostToolUse` 之后才会重弹，所以第一个工具耗时很长时第二张卡会迟到（迟到但正确）。 |
+| **旧版 Kimi CLI：suspect 启发式可能闪现误报提示卡** | 旧版 `~/.kimi` 安装的权限提示默认使用 suspect 启发式（现行 kimi-cli 不发显式审批字段，旧的 explicit-only 默认下提示卡从不出现；自批量审批修复后，同一条消息里排队的每个审批都会各自重新弹卡）。代价是：*已免审*的门控命令若运行超过约 0.8 秒，会短暂弹出一张仿佛在等审批的提示卡——卡片几秒后自动关闭，宠物会保持通知姿势直到该命令跑完。想退出：重新运行安装脚本前设置 `CLAWD_KIMI_PERMISSION_MODE=explicit`（持久化），或在 kimi-cli 运行时用同一环境变量临时覆盖，或在 **Settings → AI 编程工具** 里整体关闭 Kimi 权限提示。另注意：旧版事件词汇表里，*下一个*排队审批的提示卡要等上一个工具的 `PostToolUse` 之后才会重弹，所以第一个工具耗时很长时第二张卡会迟到（迟到但正确）。 |
 | **opencode：child session 仅作为后台工作** | 当 opencode 的 `session.created` 明确带 `event.properties.info.parentID` 时，Clawd 会把该 child / subtask 视为 root session 拥有的 headless 后台工作。它不会出现在 HUD / focus 表面，也不会参与多会话 fanout 动画。 |
 | **opencode：终端聚焦锚定启动窗口** | Plugin 跑在 opencode 进程内，`source_pid` 指向启动 opencode 的那个终端。如果你用 `opencode attach` 从另一个窗口接入，点击桌宠只会聚焦到最初的启动窗口。 |
 | **Pi：仅状态同步** | Clawd 通过全局 extension 观察 Pi 交互式会话生命周期和工具事件，但不接管权限、不新增确认弹窗。Pi 会保留默认 YOLO 执行行为。 |
@@ -54,7 +54,7 @@
 
 ## Codex 审批路由
 
-设置 → Agents → Codex 提供 **Auto**（默认）和 **Intercept**，通用页的权限区可直接跳到此处。Intercept 是显式由 Clawd 接管的审批流程，可能让 Codex 的 Approve for me 等待用户回答 Clawd 气泡。升级时，旧 Intercept / Native 会统一迁到 Auto 一次，因为旧版保存了 Intercept 默认值，无法区分是否为用户主动选择；升级后重新选择 Intercept，此后的选择会保留。
+设置 → AI 编程工具 → Codex 提供 **Auto**（默认）和 **Intercept**，通用页的权限区可直接跳到此处。Intercept 是显式由 Clawd 接管的审批流程，可能让 Codex 的 Approve for me 等待用户回答 Clawd 气泡。升级时，旧 Intercept / Native 会统一迁到 Auto 一次，因为旧版保存了 Intercept 默认值，无法区分是否为用户主动选择；升级后重新选择 Intercept，此后的选择会保留。
 
 Auto 有界读取准确的本机 hook transcript，并核对 session / turn，只接管有人工 reviewer 证据的 Bash / 文件审批。自动 reviewer 或不确定证据立即返回 no-decision，绝不产生 Allow / Deny。Codex 的公开 hook 合约不提供请求实际生效的 reviewer（#23465）；MCP / app 可能覆盖回合设置，因此仍留在 Codex。记录缺失、过旧、不可读、行不完整、快照后的模式变化、长回合上下文落到读取预算外，以及远程 / WSL 请求，同样留在 Codex；Auto 不保证每个手动请求都出现 Clawd 气泡。
 

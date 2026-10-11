@@ -173,6 +173,7 @@
     const controlHost = document.createElement("div");
     controlHost.className = "row-control";
     const control = helpers.buildSegmentedRadio({
+      id: "roam-movement-style",
       value: readRoamMovementStyle(),
       disabled: !(state.snapshot && state.snapshot.freeRoam === true),
       ariaLabel: t("rowRoamMovementStyle"),
@@ -229,6 +230,7 @@
     let syncConditionalVisibility = () => {};
 
     const modeControl = helpers.buildSegmentedRadio({
+      id: "bubble-placement-mode",
       value: state.snapshot && state.snapshot.bubbleFollowPet === true ? "follow" : "fixed",
       ariaLabel: t("rowBubblePlacement"),
       className: "bubble-placement-mode-segmented",
@@ -244,6 +246,7 @@
       },
     });
     const followControl = helpers.buildSegmentedRadio({
+      id: "bubble-follow-preference",
       value: state.snapshot && state.snapshot.bubbleFollowPreference || "auto",
       ariaLabel: t("rowBubbleFollowPreference"),
       className: "bubble-follow-preference-segmented",
@@ -255,6 +258,7 @@
       onChange: (value) => saveBubblePlacementValue("bubbleFollowPreference", value),
     });
     const cornerControl = helpers.buildSegmentedRadio({
+      id: "bubble-fixed-corner",
       value: state.snapshot && state.snapshot.bubbleFixedCorner || "bottom-right",
       ariaLabel: t("rowBubbleFixedCorner"),
       className: "bubble-fixed-corner-segmented",
@@ -758,6 +762,7 @@
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
     const segmented = helpers.buildSegmentedRadio({
+      id: "permission-automation",
       value: current,
       ariaLabel: t("rowPermissionAutomation"),
       className: "permission-automation-segmented",
@@ -1135,6 +1140,7 @@
     const controlWrap = document.createElement("div");
     controlWrap.className = "row-control";
     const control = helpers.buildSegmentedRadio({
+      id: "quota-ring-display-mode",
       value: state.snapshot && state.snapshot.quotaRingDisplayMode,
       ariaLabel: t("rowQuotaRingDisplayMode"),
       className: "quota-ring-display-mode-choice",
@@ -1865,7 +1871,7 @@
 
     function setVisual(enabled, pending = false) {
       switchControl.setState({ checked: enabled, pending });
-      if (secondsInput) secondsInput.disabled = !enabled || pending;
+      if (secondsInput) helpers.setTextInputState(secondsInput, { disabled: !enabled, pending });
     }
 
     function clearSecondsCommitTimer() {
@@ -1957,13 +1963,20 @@
     switchControl.setOnToggle(runToggle);
 
     if (secondsKey) {
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "bubble-policy-seconds";
-      input.inputMode = "numeric";
-      input.maxLength = 4;
-      input.pattern = "[0-9]*";
-      input.value = String(Number(state.snapshot && state.snapshot[secondsKey]) || 0);
+      const input = helpers.buildTextInput({
+        type: "text",
+        size: "compact",
+        className: "bubble-policy-seconds",
+        inputMode: "numeric",
+        maxLength: 4,
+        pattern: "[0-9]*",
+        value: String(Number(state.snapshot && state.snapshot[secondsKey]) || 0),
+        ariaLabel: t(labelKey),
+        onEnter: () => {
+          flushSecondsCommit();
+          input.blur();
+        },
+      });
       const prefix = document.createElement("span");
       prefix.className = "bubble-policy-prefix";
       prefix.textContent = t("bubbleSecondsPrefix");
@@ -1974,7 +1987,7 @@
       controls.insertBefore(input, switchControl.element);
       controls.insertBefore(suffix, switchControl.element);
       secondsInput = input;
-      input.disabled = !currentEnabled();
+      helpers.setTextInputState(input, { disabled: !currentEnabled() });
       input.addEventListener("input", () => {
         const sanitized = input.value.replace(/\D+/g, "").slice(0, 4);
         if (input.value !== sanitized) input.value = sanitized;
@@ -1993,12 +2006,6 @@
       });
       input.addEventListener("change", () => {
         flushSecondsCommit();
-      });
-      input.addEventListener("keydown", (ev) => {
-        if (ev.key !== "Enter") return;
-        ev.preventDefault();
-        flushSecondsCommit();
-        input.blur();
       });
     }
 

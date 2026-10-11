@@ -43,12 +43,12 @@ the system `ssh` and your system terminal.
 5. Start Claude Code, Codex CLI, Copilot CLI, or a Hermes session on the remote. The Dashboard will show the session once the first remote hook event arrives.
 
 For remote-only Copilot CLI tracking on a fresh local install, turn on
-**Copilot CLI** in **Settings → Agents** so Clawd accepts those remote hook
+**Copilot CLI** in **Settings → AI Coding Tools** so Clawd accepts those remote hook
 events. You do not need to click **Install** unless you also want local Copilot
 hooks on this machine.
 
 For remote-only Hermes Agent tracking, Clawd turns on **Hermes Agent** in
-**Settings → Agents** by itself once the Remote SSH deployment is fully
+**Settings → AI Coding Tools** by itself once the Remote SSH deployment is fully
 verified, so those remote hook events are accepted right away. You do not need
 to click **Install** unless you also want the local Hermes plugin on this
 machine: a remote deployment installs nothing locally and does not set the
@@ -123,8 +123,8 @@ appear in the Dashboard, you still need:
 - Remote hooks deployed successfully
 - The remote agent started, with at least one hook event emitted
 - For Codex, the remote Codex TUI has reviewed the hooks via `/hooks` if your version requires it
-- For remote-only Copilot CLI on a fresh local install, local **Settings → Agents → Copilot CLI** is turned on
-- For remote-only Hermes Agent, local **Settings → Agents → Hermes Agent** is still turned on (a fully verified deploy enables it automatically), and the remote gateway has been restarted manually if the deploy log asked for it
+- For remote-only Copilot CLI on a fresh local install, local **Settings → AI Coding Tools → Copilot CLI** is turned on
+- For remote-only Hermes Agent, local **Settings → AI Coding Tools → Hermes Agent** is still turned on (a fully verified deploy enables it automatically), and the remote gateway has been restarted manually if the deploy log asked for it
 
 ## Shared-server isolation and upgrade boundary
 

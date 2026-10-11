@@ -99,6 +99,7 @@
       roamArea: null,
       settingsSelects: new Set(),
       segmentedRadios: new Set(),
+      formFields: new Set(),
       disposableScopes: new Map(),
       quotaRingDisplayMode: null,
       permissionAutomationMode: null,
@@ -595,6 +596,278 @@
     return button;
   }
 
+  let nextSettingsDomId = 1;
+  function createSettingsDomId(suffix) {
+    const id = nextSettingsDomId++;
+    return `settings-${suffix}-${id}`;
+  }
+
+  function resolveCanonicalOrAlias(config, canonicalKey, aliasKey) {
+    if (Object.prototype.hasOwnProperty.call(config, canonicalKey)) {
+      return config[canonicalKey];
+    }
+    if (Object.prototype.hasOwnProperty.call(config, aliasKey)) {
+      return config[aliasKey];
+    }
+    return undefined;
+  }
+
+  // Shared layout primitive for ordinary Settings rows. It deliberately owns
+  // only structure and accessible relationships; feature tabs still own the
+  // contents placed into the text and control slots.
+  function buildSettingRow(config = {}) {
+    const element = document.createElement("div");
+    element.className = ["row", config.className || ""].filter(Boolean).join(" ");
+
+    const textElement = document.createElement("div");
+    textElement.className = "row-text";
+    const labelElement = document.createElement("span");
+    labelElement.className = "row-label";
+    labelElement.id = createSettingsDomId("row-label");
+    labelElement.textContent = config.label != null
+      ? String(config.label)
+      : (config.labelKey ? t(config.labelKey) : "");
+    textElement.appendChild(labelElement);
+
+    let descriptionElement = null;
+    const description = config.description != null
+      ? String(config.description)
+      : (config.descriptionKey ? t(config.descriptionKey) : "");
+    if (description) {
+      descriptionElement = document.createElement("span");
+      descriptionElement.className = "row-desc";
+      descriptionElement.id = createSettingsDomId("row-description");
+      descriptionElement.textContent = description;
+      textElement.appendChild(descriptionElement);
+    }
+
+    const controlElement = document.createElement("div");
+    controlElement.className = ["row-control", config.controlClassName || ""]
+      .filter(Boolean).join(" ");
+    element.appendChild(textElement);
+    element.appendChild(controlElement);
+    return { element, textElement, labelElement, descriptionElement, controlElement };
+  }
+
+  function buildFormField(config = {}) {
+    const supportedTypes = new Set(["text", "password", "number", "search"]);
+    const type = config.type || "text";
+    if (!supportedTypes.has(type)) throw new Error(`Unsupported Settings form field type: ${type}`);
+    const ariaLabel = config.ariaLabel != null ? String(config.ariaLabel) : "";
+    const ariaLabelledBy = resolveCanonicalOrAlias(config, "ariaLabelledBy", "labelledBy");
+    if (!ariaLabel && !ariaLabelledBy) {
+      throw new Error("Settings form fields require ariaLabel or ariaLabelledBy");
+    }
+    const ariaDescribedBy = resolveCanonicalOrAlias(config, "ariaDescribedBy", "describedBy");
+
+    const element = document.createElement("input");
+    const size = config.size === "compact" ? "compact" : "regular";
+    element.type = type;
+    element.className = [
+      "settings-form-field",
+      "settings-text-input",
+      `settings-text-input-${size}`,
+      config.className || "",
+    ].filter(Boolean).join(" ");
+    if (config.placeholder != null) element.placeholder = String(config.placeholder);
+    if (config.autocomplete != null) element.autocomplete = String(config.autocomplete);
+    if (config.spellcheck != null) element.spellcheck = config.spellcheck === true;
+    if (config.inputMode != null) element.inputMode = String(config.inputMode);
+    if (config.maxLength != null) element.maxLength = Number(config.maxLength);
+    if (config.pattern != null) element.pattern = String(config.pattern);
+    for (const key of ["min", "max", "step"]) {
+      if (config[key] != null) element[key] = String(config[key]);
+    }
+
+    const validationElement = document.createElement("span");
+    validationElement.id = createSettingsDomId("field-validation");
+    validationElement.className = "settings-form-field-validation";
+    validationElement.hidden = true;
+    document.body.appendChild(validationElement);
+
+    let disposed = false;
+    const listeners = [];
+    const fieldState = {
+      disabled: false,
+      pending: false,
+      invalid: false,
+      ariaLabel,
+      ariaLabelledBy: ariaLabelledBy ? String(ariaLabelledBy) : "",
+      ariaDescribedBy: ariaDescribedBy == null ? "" : String(ariaDescribedBy),
+      validationMessage: "",
+    };
+
+    function addListener(typeName, listener) {
+      if (typeof listener !== "function") return;
+      element.addEventListener(typeName, listener);
+      listeners.push([typeName, listener]);
+    }
+
+    function syncAccessibleDescription() {
+      const ids = String(fieldState.ariaDescribedBy || "").split(/\s+/).filter(Boolean);
+      if (fieldState.validationMessage) ids.push(validationElement.id);
+      const describedBy = [...new Set(ids)].join(" ");
+      if (describedBy) element.setAttribute("aria-describedby", describedBy);
+      else element.removeAttribute("aria-describedby");
+    }
+
+    const control = {
+      element,
+      validationElement,
+      getValue() {
+        return element.value;
+      },
+      setState(patch = {}) {
+        if (disposed) return control;
+        if (Object.prototype.hasOwnProperty.call(patch, "value")) {
+          const nextValue = patch.value == null ? "" : String(patch.value);
+          if (element.value !== nextValue) element.value = nextValue;
+        }
+        for (const key of ["disabled", "pending", "invalid"]) {
+          if (Object.prototype.hasOwnProperty.call(patch, key)) fieldState[key] = patch[key] === true;
+        }
+        for (const key of ["ariaLabel", "ariaLabelledBy", "ariaDescribedBy", "validationMessage"]) {
+          if (Object.prototype.hasOwnProperty.call(patch, key)) {
+            fieldState[key] = patch[key] == null ? "" : String(patch[key]);
+          }
+        }
+        element.disabled = fieldState.disabled;
+        element.classList.toggle("disabled", fieldState.disabled);
+        element.classList.toggle("pending", fieldState.pending);
+        element.classList.toggle("invalid", fieldState.invalid);
+        element.setAttribute("aria-disabled", fieldState.disabled ? "true" : "false");
+        element.setAttribute("aria-busy", fieldState.pending ? "true" : "false");
+        element.setAttribute("aria-invalid", fieldState.invalid ? "true" : "false");
+        if (fieldState.ariaLabel) element.setAttribute("aria-label", fieldState.ariaLabel);
+        else element.removeAttribute("aria-label");
+        if (fieldState.ariaLabelledBy) element.setAttribute("aria-labelledby", fieldState.ariaLabelledBy);
+        else element.removeAttribute("aria-labelledby");
+        validationElement.textContent = fieldState.validationMessage;
+        validationElement.hidden = !fieldState.validationMessage;
+        syncAccessibleDescription();
+        return control;
+      },
+      focus() {
+        if (!disposed) element.focus();
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const [typeName, listener] of listeners) element.removeEventListener(typeName, listener);
+        listeners.length = 0;
+        validationElement.remove();
+        state.mountedControls.formFields.delete(control);
+      },
+    };
+
+    const callbackFor = (name) => (event) => {
+      if (!disposed && typeof config[name] === "function") {
+        config[name]({ value: element.value, event, control });
+      }
+    };
+    addListener("input", callbackFor("onInput"));
+    addListener("change", callbackFor("onChange"));
+    addListener("focus", callbackFor("onFocus"));
+    addListener("blur", callbackFor("onBlur"));
+    addListener("click", (event) => {
+      if (config.stopPropagation === true) event.stopPropagation();
+    });
+    addListener("keydown", (event) => {
+      if (config.stopPropagation === true) event.stopPropagation();
+      if (typeof config.onKeyDown === "function") {
+        config.onKeyDown({ value: element.value, event, control });
+      }
+    });
+
+    element._settingsFormFieldControl = control;
+    control.setState({
+      value: config.value,
+      disabled: config.disabled,
+      pending: config.pending,
+      invalid: config.invalid,
+      ariaLabel,
+      ariaLabelledBy,
+      ariaDescribedBy,
+      validationMessage: config.validationMessage,
+    });
+    state.mountedControls.formFields.add(control);
+    return control;
+  }
+
+  function setTextInputState(input, nextState = {}) {
+    if (!input) return input;
+    const previous = input._settingsTextInputState || {
+      disabled: false,
+      pending: false,
+      invalid: false,
+      lockWhilePending: true,
+    };
+    const state = { ...previous };
+    for (const key of ["disabled", "pending", "invalid"]) {
+      if (Object.prototype.hasOwnProperty.call(nextState, key)) state[key] = nextState[key] === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(nextState, "lockWhilePending")) {
+      state.lockWhilePending = nextState.lockWhilePending !== false;
+    }
+    input._settingsTextInputState = state;
+    const control = input._settingsFormFieldControl;
+    if (control && typeof control.setState === "function") {
+      const patch = {
+        disabled: state.disabled || (state.pending && state.lockWhilePending),
+        pending: state.pending,
+        invalid: state.invalid,
+      };
+      if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
+        patch.ariaDescribedBy = nextState.describedBy;
+      }
+      control.setState(patch);
+    }
+    return input;
+  }
+
+  function buildTextInput(config = {}) {
+    const control = buildFormField({
+      ...config,
+      onInput: config.onInput
+        ? ({ event }) => config.onInput(event)
+        : null,
+      onChange: config.onChange
+        ? ({ event }) => config.onChange(event)
+        : null,
+      onFocus: config.onFocus
+        ? ({ event }) => config.onFocus(event)
+        : null,
+      onBlur: config.onBlur
+        ? ({ event }) => config.onBlur(event)
+        : null,
+      onKeyDown: ({ event }) => {
+        if (typeof config.onKeyDown === "function") config.onKeyDown(event);
+        if (
+          event.key !== "Enter"
+          || typeof config.onEnter !== "function"
+          || event.isComposing === true
+          || event.keyCode === 229
+        ) return;
+        event.preventDefault();
+        config.onEnter(event, control.element);
+      },
+    });
+    const input = control.element;
+    const textState = {
+      disabled: config.disabled,
+      pending: config.pending,
+      invalid: config.invalid,
+      lockWhilePending: config.lockWhilePending,
+    };
+    if (Object.prototype.hasOwnProperty.call(config, "ariaDescribedBy")) {
+      textState.describedBy = config.ariaDescribedBy;
+    } else if (Object.prototype.hasOwnProperty.call(config, "describedBy")) {
+      textState.describedBy = config.describedBy;
+    }
+    setTextInputState(input, textState);
+    return input;
+  }
+
   function buildSettingsSelect(config = {}) {
     const factory = selectPickerApi.createSettingsSelect || selectPickerApi.createLanguagePicker;
     if (typeof factory !== "function") {
@@ -610,6 +883,144 @@
     return control;
   }
 
+  // Selection controls own semantics and input; pages own rendering and commands.
+  function buildTabs(config = {}) {
+    if (!config.id || (!config.ariaLabel && !config.labelledBy)) {
+      throw new TypeError("Tabs require a stable id and accessible name");
+    }
+    const options = config.options || [];
+    const values = options.map((option) => String(option.value));
+    if (new Set(values).size !== values.length) throw new TypeError("Duplicate tab value");
+    let value = values.includes(String(config.value)) ? String(config.value) : (values[0] || "");
+    let focused = value;
+    let disabled = config.disabled === true;
+    let disposed = false;
+    const vertical = config.orientation === "vertical";
+    const element = document.createElement("div");
+    element.className = config.className || "segmented settings-tabs";
+    element.setAttribute("role", "tablist");
+    element.setAttribute("aria-orientation", vertical ? "vertical" : "horizontal");
+    if (config.labelledBy) element.setAttribute("aria-labelledby", config.labelledBy);
+    else element.setAttribute("aria-label", config.ariaLabel);
+    const panels = new Map();
+    const buttons = options.map((option, index) => {
+      const key = values[index];
+      const id = `${config.id}-${encodeURIComponent(key)}`;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = config.buttonClassName || "";
+      button.id = `${id}-tab`;
+      button.dataset.value = key;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-controls", `${id}-panel`);
+      button.setAttribute("data-settings-focus-key", `${id}-tab`);
+      button.setAttribute("data-settings-choice-group", config.id);
+      button.textContent = option.label;
+      if (typeof config.renderLabel === "function") config.renderLabel(button, option);
+      const panel = config.panels?.get(key) || document.createElement("div");
+      panel.id = `${id}-panel`;
+      panel.setAttribute("role", "tabpanel");
+      panel.setAttribute("aria-labelledby", button.id);
+      panel.tabIndex = 0;
+      panels.set(key, panel);
+      element.appendChild(button);
+      return button;
+    });
+    const available = () => buttons.filter((button, index) => !disabled && !options[index].disabled);
+    function sync() {
+      const enabled = available();
+      if (!enabled.some((button) => button.dataset.value === focused)) {
+        focused = (enabled.find((button) => button.dataset.value === value) || enabled[0])?.dataset.value || "";
+      }
+      buttons.forEach((button, index) => {
+        const selected = button.dataset.value === value;
+        button.disabled = disabled || options[index].disabled === true;
+        button.classList.toggle("disabled", button.disabled);
+        button.classList.toggle("active", selected);
+        button.setAttribute("aria-selected", String(selected));
+        button.tabIndex = !button.disabled && button.dataset.value === focused ? 0 : -1;
+        panels.get(button.dataset.value).hidden = !selected;
+      });
+    }
+    function focus(next = value) {
+      if (disposed) return;
+      const button = available().find((item) => item.dataset.value === String(next)) || available()[0];
+      if (!button) return;
+      focused = button.dataset.value;
+      sync();
+      button.focus({ preventScroll: true });
+    }
+    function activate(button) {
+      if (disposed || button.disabled || button.dataset.value === value) return;
+      const previous = value;
+      if (typeof config.onBeforeChange === "function") config.onBeforeChange(button.dataset.value, previous);
+      value = button.dataset.value;
+      focused = value;
+      sync();
+      if (typeof config.onChange === "function" && config.onChange(value) === false && !disposed) {
+        value = previous;
+        sync();
+      }
+    }
+    function onClick(event) {
+      if (config.stopPropagation === true) event.stopPropagation();
+      if (disposed || event.currentTarget.disabled) return;
+      focus(event.currentTarget.dataset.value);
+      activate(event.currentTarget);
+    }
+    function onFocus(event) {
+      focused = event.currentTarget.dataset.value;
+      sync();
+    }
+    function onBlur(event) {
+      if (buttons.includes(event.relatedTarget)) return;
+      focused = value;
+      sync();
+    }
+    function onKeyDown(event) {
+      if (disposed || event.currentTarget.disabled) return;
+      const enabled = available();
+      const index = enabled.indexOf(event.currentTarget);
+      let target;
+      if (event.key === (vertical ? "ArrowDown" : "ArrowRight")) target = enabled[(index + 1) % enabled.length];
+      else if (event.key === (vertical ? "ArrowUp" : "ArrowLeft")) target = enabled[(index - 1 + enabled.length) % enabled.length];
+      else if (event.key === "Home") target = enabled[0];
+      else if (event.key === "End") target = enabled[enabled.length - 1];
+      else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (!event.repeat) activate(event.currentTarget);
+        return;
+      } else return;
+      event.preventDefault();
+      if (target) focus(target.dataset.value);
+    }
+    const listeners = { click: onClick, keydown: onKeyDown, focus: onFocus, blur: onBlur };
+    for (const button of buttons) {
+      for (const [event, listener] of Object.entries(listeners)) button.addEventListener(event, listener);
+    }
+    sync();
+    return {
+      element, panels,
+      getValue: () => value,
+      setValue(next) {
+        if (disposed || !values.includes(String(next))) return false;
+        value = String(next);
+        if (!buttons.includes(document.activeElement)) focused = value;
+        sync();
+        return true;
+      },
+      setDisabled(next) { if (!disposed) { disabled = next === true; sync(); } },
+      focus,
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const button of buttons) {
+          for (const [event, listener] of Object.entries(listeners)) button.removeEventListener(event, listener);
+        }
+      },
+    };
+  }
+
   function buildSegmentedRadio(config = {}) {
     const options = Array.isArray(config.options)
       ? config.options.filter((option) => option && option.value != null)
@@ -619,7 +1030,10 @@
       ? String(config.value)
       : (values[0] || "");
     let disabled = config.disabled === true;
-    let pending = false;
+    let pending = config.pending === true;
+    let inFlight = false;
+    let operation = 0;
+    let version = 0;
     let disposed = false;
 
     const element = document.createElement("div");
@@ -627,13 +1041,20 @@
       .filter(Boolean)
       .join(" ");
     element.setAttribute("role", "radiogroup");
-    if (config.ariaLabel) element.setAttribute("aria-label", config.ariaLabel);
+    if (config.labelledBy) element.setAttribute("aria-labelledby", config.labelledBy);
+    else if (config.ariaLabel) element.setAttribute("aria-label", config.ariaLabel);
+    else throw new TypeError("Segmented radio requires an accessible name");
 
     const buttons = options.map((option) => {
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("role", "radio");
       button.dataset.value = String(option.value);
+      if (config.id) {
+        button.setAttribute("data-settings-focus-key", `${config.id}-${encodeURIComponent(option.value)}`);
+        button.setAttribute("data-settings-choice-group", config.id);
+      }
+      if (option.dataset) Object.assign(button.dataset, option.dataset);
 
       const label = document.createElement("span");
       label.className = "settings-segmented-radio-label";
@@ -651,73 +1072,92 @@
     });
 
     function syncVisualState() {
-      element.classList.toggle("pending", pending);
+      const busy = pending || inFlight;
+      element.classList.toggle("pending", busy);
       element.classList.toggle("disabled", disabled);
-      element.setAttribute("aria-busy", pending ? "true" : "false");
-      for (const button of buttons) {
+      element.setAttribute("aria-busy", busy ? "true" : "false");
+      const entry = buttons.find((button, index) => button.dataset.value === currentValue && !options[index].disabled)
+        || buttons.find((button, index) => !options[index].disabled);
+      for (const [index, button] of buttons.entries()) {
         const selected = button.dataset.value === currentValue;
         button.classList.toggle("active", selected);
         button.setAttribute("aria-checked", selected ? "true" : "false");
-        button.tabIndex = selected ? 0 : -1;
-        button.disabled = disabled || pending;
+        button.tabIndex = !disabled && button === entry ? 0 : -1;
+        // Pending blocks activation without dropping keyboard focus.
+        button.disabled = disabled || options[index].disabled === true;
+        button.setAttribute("aria-disabled", String(button.disabled || busy));
       }
+      if (typeof config.onValueSync === "function") config.onValueSync(currentValue, element);
     }
 
-    async function selectValue(nextValue) {
+    function selectValue(nextValue) {
       const next = String(nextValue);
-      if (disposed || disabled || pending || !values.includes(next)) return false;
+      if (disposed || disabled || pending || inFlight || !values.includes(next)
+        || options[values.indexOf(next)].disabled) return false;
       if (next === currentValue) return true;
       const previous = currentValue;
+      const request = ++operation;
+      const revision = version;
       const focusTarget = buttons.includes(document.activeElement) ? document.activeElement : null;
       currentValue = next;
-      let accepted = true;
-      try {
-        if (typeof config.onChange === "function") {
-          const result = config.onChange(next);
-          pending = true;
-          syncVisualState();
-          accepted = (await Promise.resolve(result)) !== false;
-        } else {
-          pending = true;
-          syncVisualState();
-        }
-      } catch (_) {
-        accepted = false;
-      }
-      if (!accepted) currentValue = previous;
-      pending = false;
+      inFlight = true;
       syncVisualState();
-      if (focusTarget && focusTarget.isConnected !== false && typeof focusTarget.focus === "function") {
-        const active = document.activeElement;
-        if (!active || active === document.body || active === focusTarget || active.isConnected === false) {
-          try { focusTarget.focus({ preventScroll: true }); } catch (_) { focusTarget.focus(); }
+      function finish(accepted) {
+        if (disposed || request !== operation) return accepted;
+        if (!accepted && version === revision) currentValue = previous;
+        inFlight = false;
+        syncVisualState();
+        if (focusTarget && focusTarget.isConnected !== false && typeof focusTarget.focus === "function") {
+          const active = document.activeElement;
+          if (!active || active === document.body || active === focusTarget || active.isConnected === false) {
+            try { focusTarget.focus({ preventScroll: true }); } catch (_) { focusTarget.focus(); }
+          }
         }
+        return accepted;
       }
-      return accepted;
+      try {
+        const result = typeof config.onChange === "function" ? config.onChange(next) : true;
+        if (result && typeof result.then === "function") {
+          return Promise.resolve(result).then((value) => finish(value !== false), () => finish(false));
+        }
+        return finish(result !== false);
+      } catch (_) {
+        return finish(false);
+      }
     }
 
     function onClick(event) {
+      // Opt-in only: a document-level click listener (e.g. the dropdown
+      // picker's outside-click close) must still see ordinary choice clicks.
+      if (config.stopPropagation === true) event.stopPropagation();
       const button = event && event.currentTarget;
       if (button) void selectValue(button.dataset.value);
     }
 
     function onKeyDown(event) {
-      if (disabled || pending || buttons.length === 0) return;
-      const currentIndex = Math.max(0, buttons.indexOf(event.currentTarget));
+      if (disposed || disabled || pending || inFlight || event.currentTarget.disabled) {
+        // Suppress Space's deferred native click even if the save finishes
+        // between keydown and keyup.
+        if (event.key === " " || event.key === "Enter") event.preventDefault();
+        return;
+      }
+      const enabled = buttons.filter((button) => !button.disabled);
+      if (!enabled.length) return;
+      const currentIndex = Math.max(0, enabled.indexOf(event.currentTarget));
       let nextIndex = currentIndex;
       if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-        nextIndex = (currentIndex + 1) % buttons.length;
+        nextIndex = (currentIndex + 1) % enabled.length;
       } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-        nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+        nextIndex = (currentIndex - 1 + enabled.length) % enabled.length;
       } else if (event.key === "Home") {
         nextIndex = 0;
       } else if (event.key === "End") {
-        nextIndex = buttons.length - 1;
+        nextIndex = enabled.length - 1;
       } else if (event.key !== "Enter" && event.key !== " ") {
         return;
       }
       event.preventDefault();
-      const target = buttons[nextIndex];
+      const target = enabled[nextIndex];
       if (target && typeof target.focus === "function") target.focus();
       void selectValue(target.dataset.value);
     }
@@ -733,18 +1173,27 @@
       getValue: () => currentValue,
       setValue(value) {
         const next = String(value);
-        if (!values.includes(next)) return false;
+        if (disposed || !values.includes(next)) return false;
+        version++;
         currentValue = next;
         syncVisualState();
         return true;
       },
       setDisabled(value) {
+        if (disposed) return;
         disabled = value === true;
+        syncVisualState();
+      },
+      setPending(value) {
+        if (disposed) return;
+        pending = value === true;
         syncVisualState();
       },
       dispose() {
         if (disposed) return;
         disposed = true;
+        operation++;
+        state.mountedControls.segmentedRadios.delete(control);
         for (const button of buttons) {
           button.removeEventListener("click", onClick);
           button.removeEventListener("keydown", onKeyDown);
@@ -1305,26 +1754,35 @@
     zeroLabelKey = null,
     debounceMs = NUMBER_INPUT_COMMIT_DELAY_MS,
   }) {
-    const row = document.createElement("div");
-    row.className = "row session-cleanup-row";
-    row.innerHTML =
-      `<div class="row-text">` +
-        `<span class="row-label"></span>` +
-        `<span class="row-desc"></span>` +
-      `</div>` +
-      `<div class="row-control session-cleanup-control">` +
-        `<input type="text" class="bubble-policy-seconds session-cleanup-input" inputmode="numeric" />` +
-        `<span class="bubble-policy-unit session-cleanup-unit"></span>` +
-      `</div>`;
-    row.querySelector(".row-label").textContent = t(labelKey);
-    const descNode = row.querySelector(".row-desc");
-    if (descKey) descNode.textContent = t(descKey);
-    else descNode.remove();
-    const input = row.querySelector(".session-cleanup-input");
-    const unit = row.querySelector(".session-cleanup-unit");
-    if (unitKey) unit.textContent = t(unitKey);
-    else unit.remove();
-    input.maxLength = String(max).length + 1;
+    const rowParts = buildSettingRow({
+      labelKey,
+      descriptionKey: descKey,
+      className: "session-cleanup-row",
+      controlClassName: "session-cleanup-control",
+    });
+    const row = rowParts.element;
+    const control = rowParts.controlElement;
+    const input = buildTextInput({
+      type: "text",
+      size: "compact",
+      className: "bubble-policy-seconds session-cleanup-input",
+      inputMode: "numeric",
+      maxLength: String(max).length + 1,
+      labelledBy: rowParts.labelElement.id,
+      describedBy: rowParts.descriptionElement ? rowParts.descriptionElement.id : null,
+      onEnter: () => {
+        clearCommitTimer();
+        commitFromInput();
+        input.blur();
+      },
+    });
+    control.appendChild(input);
+    const unit = document.createElement("span");
+    unit.className = "bubble-policy-unit session-cleanup-unit";
+    if (unitKey) {
+      unit.textContent = t(unitKey);
+      control.appendChild(unit);
+    }
 
     function currentStored() {
       const stored = state.snapshot && state.snapshot[key];
@@ -1425,12 +1883,7 @@
       commitFromInput();
     });
     input.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") {
-        ev.preventDefault();
-        clearCommitTimer();
-        commitFromInput();
-        input.blur();
-      } else if (ev.key === "Escape") {
+      if (ev.key === "Escape") {
         ev.preventDefault();
         clearCommitTimer();
         revert();
@@ -1479,6 +1932,10 @@
       if (control && typeof control.dispose === "function") control.dispose();
     }
     state.mountedControls.segmentedRadios.clear();
+    for (const control of [...state.mountedControls.formFields]) {
+      if (control && typeof control.dispose === "function") control.dispose();
+    }
+    state.mountedControls.formFields.clear();
     disposeMountedDisposables();
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
@@ -1535,6 +1992,7 @@
     const focusKey = String(active.getAttribute("data-settings-focus-key") || "").trim();
     return {
       focusKey,
+      group: active.getAttribute("data-settings-choice-group") || "",
       fallbackKey: focusKey
         ? String(active.getAttribute("data-settings-focus-fallback-key") || "").trim()
         : "",
@@ -1563,33 +2021,67 @@
     try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); }
   }
 
+  // Page chrome belongs to the page; only the active body belongs to this host.
+  // Callers keep business state and async request fencing in their own modules.
+  function createSubpageHost({ disposeBody = () => {} } = {}) {
+    let mountedPanel = null;
+    let disposed = false;
+    let revision = 0;
+    return {
+      render(panel, renderBody, { scrollTop } = {}) {
+        if (disposed || !panel) return false;
+        const currentRevision = ++revision;
+        const focusState = getActiveSettingsFocusState();
+        const scroller = document.getElementById("content");
+        const savedScroll = scrollTop ?? scroller?.scrollTop;
+        if (mountedPanel) {
+          disposeBody();
+          mountedPanel.innerHTML = "";
+        }
+        mountedPanel = panel;
+        panel.innerHTML = "";
+        renderBody(panel);
+        if (focusState.focusKey) {
+          const exact = findSettingsFocusTarget(panel, focusState.focusKey);
+          const key = exact && !exact.disabled
+            ? focusState.focusKey : focusState.fallbackKey;
+          focusSettingsTarget(scroller || panel, key, { onlyIfFocusLost: true });
+        }
+        if (scroller && Number.isFinite(savedScroll)) {
+          scroller.scrollTop = savedScroll;
+          const appliedScroll = scroller.scrollTop;
+          requestAnimationFrame(() => {
+            if (disposed || revision !== currentRevision || !panel.isConnected
+              || document.getElementById("content") !== scroller) return;
+            // Do not undo scrolling that happened after this replacement.
+            if (scroller.scrollTop === appliedScroll) scroller.scrollTop = savedScroll;
+          });
+        }
+        return true;
+      },
+      dispose() {
+        disposed = true;
+        revision += 1;
+        mountedPanel = null;
+      },
+    };
+  }
+
   function requestRender({
     sidebar = false,
     content = false,
     modal = false,
     preserveScroll = false,
   } = {}) {
+    const focusState = getActiveSettingsFocusState();
     if (sidebar && typeof renderHooks.sidebar === "function") renderHooks.sidebar();
     if (content && typeof renderHooks.content === "function") {
-      const { focusKey, fallbackKey } = getActiveSettingsFocusState();
       const contentRoot = document.getElementById("content");
       const scrollTop = preserveScroll && contentRoot
         ? normalizePersistedScrollTop(Number(contentRoot.scrollTop))
         : null;
       const scrollTabId = state.activeTab;
       renderHooks.content();
-      if (focusKey) {
-        const currentContentRoot = document.getElementById("content");
-        const exactTarget = findSettingsFocusTarget(currentContentRoot, focusKey);
-        const restoreKey = exactTarget
-          && exactTarget.disabled !== true
-          && typeof exactTarget.focus === "function"
-          ? focusKey
-          : fallbackKey;
-        if (restoreKey) {
-          focusSettingsTarget(currentContentRoot, restoreKey, { onlyIfFocusLost: true });
-        }
-      }
       if (scrollTop !== null
         && document.getElementById("content") === contentRoot
         && state.activeTab === scrollTabId) {
@@ -1602,6 +2094,28 @@
       }
     }
     if (modal && typeof renderHooks.modal === "function") renderHooks.modal();
+    if ((sidebar || content) && focusState.focusKey) {
+      const roots = [document.getElementById("sidebar"), document.getElementById("content")].filter(Boolean);
+      for (const rootNode of roots) {
+        const exact = findSettingsFocusTarget(rootNode, focusState.focusKey);
+        if (exact && !exact.disabled) {
+          focusSettingsTarget(rootNode, focusState.focusKey, { onlyIfFocusLost: true });
+          return;
+        }
+      }
+      for (const rootNode of roots) {
+        const candidates = [];
+        const visit = (node) => {
+          if (node.getAttribute?.("data-settings-choice-group") === focusState.group && !node.disabled) candidates.push(node);
+          for (const child of node.children || []) visit(child);
+        };
+        if (focusState.group) visit(rootNode);
+        const target = candidates.find((node) => node.getAttribute("aria-selected") === "true"
+          || node.getAttribute("aria-checked") === "true") || candidates[0];
+        const key = target?.getAttribute("data-settings-focus-key") || focusState.fallbackKey;
+        if (key) focusSettingsTarget(rootNode, key, { onlyIfFocusLost: true });
+      }
+    }
   }
 
   function normalizePersistedScrollTop(value) {
@@ -2479,6 +2993,10 @@
   core.helpers = {
     t,
     buildButton,
+    buildSettingRow,
+    buildFormField,
+    buildTextInput,
+    setTextInputState,
     setButtonState,
     showSettingsDialog,
     showSettingsConfirmModal,
@@ -2489,6 +3007,8 @@
     buildSection,
     buildSettingsSelect,
     buildSegmentedRadio,
+    buildTabs,
+    createSubpageHost,
     buildCollapsibleGroup,
     attachSettingsDisclosure,
     registerMountedDisposable,
