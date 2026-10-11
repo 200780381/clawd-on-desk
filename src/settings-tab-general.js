@@ -1871,7 +1871,7 @@
 
     function setVisual(enabled, pending = false) {
       switchControl.setState({ checked: enabled, pending });
-      if (secondsInput) secondsInput.disabled = !enabled || pending;
+      if (secondsInput) helpers.setTextInputState(secondsInput, { disabled: !enabled, pending });
     }
 
     function clearSecondsCommitTimer() {
@@ -1963,13 +1963,20 @@
     switchControl.setOnToggle(runToggle);
 
     if (secondsKey) {
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "bubble-policy-seconds";
-      input.inputMode = "numeric";
-      input.maxLength = 4;
-      input.pattern = "[0-9]*";
-      input.value = String(Number(state.snapshot && state.snapshot[secondsKey]) || 0);
+      const input = helpers.buildTextInput({
+        type: "text",
+        size: "compact",
+        className: "bubble-policy-seconds",
+        inputMode: "numeric",
+        maxLength: 4,
+        pattern: "[0-9]*",
+        value: String(Number(state.snapshot && state.snapshot[secondsKey]) || 0),
+        ariaLabel: t(labelKey),
+        onEnter: () => {
+          flushSecondsCommit();
+          input.blur();
+        },
+      });
       const prefix = document.createElement("span");
       prefix.className = "bubble-policy-prefix";
       prefix.textContent = t("bubbleSecondsPrefix");
@@ -1980,7 +1987,7 @@
       controls.insertBefore(input, switchControl.element);
       controls.insertBefore(suffix, switchControl.element);
       secondsInput = input;
-      input.disabled = !currentEnabled();
+      helpers.setTextInputState(input, { disabled: !currentEnabled() });
       input.addEventListener("input", () => {
         const sanitized = input.value.replace(/\D+/g, "").slice(0, 4);
         if (input.value !== sanitized) input.value = sanitized;
@@ -1999,12 +2006,6 @@
       });
       input.addEventListener("change", () => {
         flushSecondsCommit();
-      });
-      input.addEventListener("keydown", (ev) => {
-        if (ev.key !== "Enter") return;
-        ev.preventDefault();
-        flushSecondsCommit();
-        input.blur();
       });
     }
 
