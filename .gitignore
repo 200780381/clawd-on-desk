@@ -22,6 +22,7 @@ docs/**
 !docs/guides/copilot-setup.zh-CN.md
 !docs/guides/guide-theme-creation.md
 !docs/guides/known-limitations.md
+!docs/guides/agent-questions.md
 !docs/guides/known-limitations.zh-CN.md
 !docs/guides/recap.md
 !docs/guides/setup-guide.md
@@ -70,6 +71,7 @@ docs/**
 !docs/releases/release-v1.0.0.md
 !docs/releases/release-v1.1.0.md
 !docs/releases/release-v1.2.0.md
+!docs/releases/release-v1.3.0.md
 
 # Temp files from testing
 .tmp_*

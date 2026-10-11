@@ -89,6 +89,9 @@ const {
   createSettingsSizePreviewSession,
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
+const { registerQuotaNotificationIpc } = require("./quota-notification-ipc");
+const { createQuotaAlertsRuntime } = require("./quota-alerts-runtime");
+const { createQuotaNotificationPresenter } = require("./quota-notifications");
 const createSettingsEffectRouter = require("./settings-effect-router");
 const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
@@ -1320,6 +1323,7 @@ function getEffectiveCurrentPixelSize(overrideWa) {
 }
 let contextMenu;
 let doNotDisturb = false;
+let quotaAlertsRuntime = null;
 let isQuitting = false;
 let quitCleanupStarted = false;
 let appQuitDrainStarted = false;
@@ -1550,6 +1554,7 @@ function requestDisplayedVisual(displayState, file, options = {}) {
     file: visualFile,
     hitBox: _state.resolveHitBoxForSvg(file),
     source: options.source || inferVisualSource(displayState, file),
+    restartAnimation: options.restartAnimation === true,
     deliver: options.deliver || ((payload) => sendRawToRenderer("state-change", payload)),
     onLogicalSettlement: options.onLogicalSettlement,
   });
@@ -2076,6 +2081,7 @@ const _permCtx = {
     _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) =>
     _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () =>
     _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   // The permission layer consumes one normalized runtime mode. DND,
@@ -2380,6 +2386,7 @@ const _stateCtx = {
   buildTrayMenu: () => buildTrayMenu(),
   debugLog: (msg) => sessionLog(msg),
   broadcastSessionSnapshot: (snapshot) => {
+    quotaAlertsRuntime?.observeQuota();
     reconcilePowerSaveBlocker();
     broadcastDashboardSessionSnapshot(snapshot);
     broadcastSessionHudSnapshot(snapshot);
@@ -2506,10 +2513,21 @@ _settingsController.subscribeKey("agents", (_agents, snapshot) => {
   }
 });
 const { setState, applyState, updateSession, resolveDisplayState, getSvgOverride,
-        enableDoNotDisturb, disableDoNotDisturb, startStaleCleanup, stopStaleCleanup,
+        enableDoNotDisturb, disableDoNotDisturb: disableDoNotDisturbState,
+        startStaleCleanup, stopStaleCleanup,
         startWakePoll, stopWakePoll, detectRunningAgentProcesses,
         startStartupRecovery: _startStartupRecovery } = _state;
 const sessions = _state.sessions;
+
+function disableDoNotDisturb() {
+  const result = disableDoNotDisturbState();
+  quotaAlertsRuntime?.observeQuota();
+  return result;
+}
+
+function showQuotaAlert(event) {
+  return quotaNotifications.show(event);
+}
 
 async function showSessionAutomationWarning(entry) {
   const parent = selectSessionAutomationDialogParent({
@@ -2987,10 +3005,12 @@ const _serverCtx = {
   isAgentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
   setState,
   updateSession: agentRuntime.updateSessionFromServer,
+  observeClaudeToolPhase: _state.observeClaudeToolPhase,
   updateSessionMetadata: agentRuntime.updateSessionMetadataFromServer,
   shouldSuppressCodexArchive: (rawSessionId, opts) =>
     agentRuntime.shouldSuppressCodexArchive(rawSessionId, opts),
@@ -3008,6 +3028,7 @@ const _serverCtx = {
       && sessionAutomationCoordinator.resolveIfAllowed(entry, options)),
   showPermissionBubble,
   showCodexUserInputBubble,
+  syncPermissionBubbleContent,
   clearCodexUserInputBubbles,
   handleTestResult: (result, context) => handleTestResult(result, context),
   maybeStartRemoteApproval,
@@ -4993,6 +5014,22 @@ const settingsSizePreviewSession = createSettingsSizePreviewSession({
   },
 });
 
+const quotaNotifications = createQuotaNotificationPresenter({
+  Notification, platform: process.platform, trayBalloonOwner, getTray: () => _menu.getTray(),
+  isSuppressed: () => doNotDisturb || isQuitting || !app.isReady(),
+  isMuted: () => soundMuted, getLang: () => lang, openSettings: () => settingsWindowRuntime.open(),
+});
+const quotaNotificationIpc = registerQuotaNotificationIpc({
+  ipcMain, settingsController: _settingsController, getSettingsWindow,
+  testNotification: () => quotaNotifications.test(),
+});
+quotaAlertsRuntime = createQuotaAlertsRuntime({
+  settingsController: _settingsController, state: _state,
+  getDoNotDisturb: () => doNotDisturb, notifyQuota: showQuotaAlert,
+  historyPath: path.join(app.getPath("userData"), "quota-alert-history.json"),
+  powerMonitor, logWarn: (message) => console.warn(message),
+});
+
 const settingsIpcRuntime = registerSettingsIpc({
   ipcMain,
   app,
@@ -5564,6 +5601,8 @@ const { enterMiniMode, exitMiniMode, enterMiniViaMenu, miniPeekIn, miniPeekOut,
 
 // ── Free Roam — initialized here after state and mini modules ──
 const _roamCtx = {
+  hasActiveSessions: anySessionInProgress,
+  resolveDisplayState,
   get win() { return win; },
   get dragLocked() { return petWindowRuntime.isDragLocked(); },
   getPetWindowBounds,
@@ -5763,10 +5802,12 @@ if (!gotTheLock) {
     try {
       const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
       if (process.platform === "win32") {
+        const { getCodexHookNudgeKeys } = require("./codex-hook-health");
+        const keys = getCodexHookNudgeKeys(verdict);
         trayBalloonOwner.show(tray, {
           iconType: "warning",
-          title: t("codexHookHealthNudgeTitle"),
-          content: t("codexHookHealthNudgeBody"),
+          title: t(keys.title),
+          content: t(keys.body),
         });
       }
     } catch (err) {
@@ -5963,6 +6004,7 @@ if (!gotTheLock) {
 
     // Register persistent global shortcuts from the validated prefs snapshot.
     shortcutRuntime.registerPersistentShortcutsFromSettings();
+    quotaAlertsRuntime.start();
 
     // Construct log monitors. We always instantiate them so toggling the
     // agent on/off later can call start()/stop() without paying the require
@@ -5992,6 +6034,7 @@ if (!gotTheLock) {
   });
 
   app.on("before-quit", (event) => {
+    quotaNotificationIpc.dispose();
     isQuitting = true;
     if (!appQuitDrainReady) {
       event.preventDefault();
@@ -6006,6 +6049,8 @@ if (!gotTheLock) {
     }
     if (quitCleanupStarted) return;
     quitCleanupStarted = true;
+    quotaAlertsRuntime?.dispose();
+    quotaNotifications.dispose();
     // Cancel any live official-theme download and drop this round's `.part`.
     if (officialThemeMain) {
       try { officialThemeMain.cancelInstall(); } catch {}

@@ -23,6 +23,7 @@ const {
 } = require("../hooks/server-config");
 const { isOpencodeFamilyEntry, getFamilyConfig } = require("../agents/opencode-family");
 const { isPassiveNotifyEntry } = require("./passive-notify-entry");
+const { validateQuestionAnswers } = require("./agent-question-wire");
 const { reminderHolds } = require("./permission-reminder");
 const {
   normalizeOpencodeFamilyBridgeUrl,
@@ -817,6 +818,10 @@ let expandedPermissionEntry = null;
 // a bubble during its 250ms fade-out after the request has already been removed
 // from the pending list.
 const permissionBubbleWindows = new Set();
+// A hidden BrowserWindow starts at a provisional origin. Only a successful
+// presentation bounds write makes it eligible to show, including the
+// transactional first-show retry below.
+const positionedPermissionWindows = new WeakSet();
 const overflowPresentation = {
   mode: "normal",
   revision: 0,
@@ -1273,7 +1278,9 @@ function getLocalPresentationEntries() {
 function createPresentationGeometry() {
   if (!ctx.win || ctx.win.isDestroyed()) return null;
   const petBounds = ctx.getPetWindowBounds();
+  if (!isUsableRect(petBounds)) return null;
   const workArea = getAnchorWorkArea(petBounds);
+  if (!isUsableRect(workArea)) return null;
   const scale = getTextScale(workArea);
   const margin = Math.round(8 * scale);
   const gap = Math.round(6 * scale);
@@ -1589,10 +1596,24 @@ function setRequestWindowVisible(entry, visible, bounds, geometry) {
   const bubble = entry && entry.bubble;
   if (!isLiveBrowserWindow(bubble)) return;
   if (visible) {
-    try { applyZoomToWindow(bubble, geometry.scale); } catch {}
-    if (bounds && !bubble.__clawdMacImeEditing) {
-      try { bubble.setBounds(bounds); } catch {}
+    if (!bubble.__clawdMacImeEditing) {
+      positionedPermissionWindows.delete(bubble);
+      if (!geometry || !isUsableRect(bounds)) return;
+      try {
+        bubble.setBounds(bounds);
+        positionedPermissionWindows.add(bubble);
+      } catch {
+        // Keep the request pending. A later owner/display/measurement reflow
+        // retries placement; showing now would expose the provisional origin
+        // or bounds from a previous presentation.
+        return;
+      }
+    } else if (!positionedPermissionWindows.has(bubble)) {
+      // An editing card may preserve valid prior bounds, but an unpositioned
+      // window cannot use the IME freeze to bypass its first placement.
+      return;
     }
+    try { applyZoomToWindow(bubble, geometry.scale); } catch {}
     try {
       if (isWin) bubble.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
       if (isMac && !bubble.__clawdMacImeEditing) bubble.setAlwaysOnTop(true, MAC_TOPMOST_LEVEL);
@@ -1662,7 +1683,7 @@ function requestSlackRemeasureForNewlyVisible(candidates) {
 
 function showQueueWindow(bounds, geometry, options = {}) {
   const queueWindow = overflowPresentation.queueWindow;
-  if (!isLiveBrowserWindow(queueWindow) || !bounds) return false;
+  if (!isLiveBrowserWindow(queueWindow) || !geometry || !isUsableRect(bounds)) return false;
   try { applyZoomToWindow(queueWindow, geometry.scale); } catch {}
   try {
     queueWindow.setBounds(bounds);
@@ -2318,6 +2339,9 @@ function canAutoResolvePendingPermission(permEntry, options = {}) {
 
   if (
     permEntry.isCodex
+    && !(permEntry.codexAutoManual === true
+      && typeof ctx.getCodexPermissionMode === "function"
+      && ctx.getCodexPermissionMode() === "auto")
     && (
       typeof ctx.isCodexPermissionInterceptEnabled !== "function"
       || !ctx.isCodexPermissionInterceptEnabled()
@@ -2459,10 +2483,12 @@ function showPermissionBubble(permEntry) {
   const canOfferSessionTrust = typeof ctx.canOfferSessionTrust === "function"
     && ctx.canOfferSessionTrust(permEntry) === true;
   const sugCount = (permEntry.suggestions || []).length + (canOfferSessionTrust ? 1 : 0);
-  const wa = getAnchorWorkArea();
-  const scale = getTextScale(wa);
-  const bh = clampBubbleHeight(scaleHeight(estimateBubbleHeight(sugCount), scale), wa.height);
-  // Temporary position — repositionBubbles() will finalize after renderer reports real height
+  const initialGeometry = createPresentationGeometry();
+  const wa = initialGeometry && initialGeometry.workArea;
+  const scale = initialGeometry ? initialGeometry.scale : getTextScale();
+  const bh = clampBubbleHeight(scaleHeight(estimateBubbleHeight(sugCount), scale), wa && wa.height);
+  // Provisional bounds stay hidden until presentation applies a valid layout.
+  // Renderer measurements refine that first layout afterwards.
   const pos = { x: 0, y: 0, width: getBubbleWidth(scale, wa), height: bh };
 
   // Bubbles that host a text input (elicitation "Other", ExitPlanMode
@@ -2528,8 +2554,12 @@ function showPermissionBubble(permEntry) {
       permEntry.bubbleReady = true;
       // Explicit even though same-origin propagation usually covers it — a
       // stale partition-persisted factor must never win over prefs.
-      applyZoomToWindow(bub, getTextScale(getAnchorWorkArea()));
+      const geometry = createPresentationGeometry();
+      if (geometry) applyZoomToWindow(bub, geometry.scale);
       syncPermissionBubbleContent(permEntry);
+      // Loading provides another natural placement attempt if the owner or a
+      // native bounds write was temporarily unavailable during creation.
+      reconcilePermissionPresentation("bubble-ready");
       // Arrival never steals focus. Eligible Ask cards may already be visually
       // expanded, but controls receive focus only after an explicit local or
       // queue action.
@@ -2636,6 +2666,7 @@ function showPermissionBubble(permEntry) {
     if (
       !queueAlreadyRepresentsPending
       && !isEntryCutOffByPet(permEntry)
+      && positionedPermissionWindows.has(bub)
       && (typeof bub.isVisible !== "function" || !bub.isVisible())
       && typeof bub.showInactive === "function"
     ) {
@@ -2811,6 +2842,9 @@ function buildPermissionBubblePayload(permEntry) {
     lang: ctx.lang,
     interaction: isValidInteraction(permEntry.interaction) ? permEntry.interaction : null,
     isElicitation: permEntry.isElicitation || false,
+    isFamilyQuestion: permEntry.isFamilyQuestion === true,
+    questionAwaitingDelivery: permEntry.questionAwaitingDelivery === true,
+    questionDeliveryUnconfirmed: permEntry.questionDeliveryUnconfirmed === true,
     // opencode-family provenance for the renderer, which has no registry
     // access: presence of familyAgentId selects the family render branch;
     // familyDisplayName templates the blanket-always tooltip (plan §3.5).
@@ -3878,6 +3912,11 @@ function applyPermissionSuggestion(perm, index, options = {}) {
   // (Bun.serve or node:http on a random localhost port). The plugin then calls
   // the host's in-process Hono route. Plugin sent us a fire-and-forget POST — no HTTP
   // response to complete on this connection.
+  if (permEntry.isFamilyQuestion) {
+    if (!res || res.writableEnded || res.destroyed) return;
+    sendNoDecisionResponse(res, "question native fallback", "question");
+    return;
+  }
   if (permEntry.isOpencodeV2) {
     // opencode v2 (issue #1039): the plugin's evaluate hook is BLOCKING on
     // this very HTTP response — the decision is the response body. 204 keeps
@@ -4684,6 +4723,18 @@ function handleDecide(event, behavior) {
     }
     return;
   }
+  if (perm.isFamilyQuestion) {
+    if (perm.questionAwaitingDelivery && behavior !== "deny-and-focus") return;
+    const answers = !perm.questionDeliveryUnconfirmed && behavior && behavior.type === "elicitation-submit"
+      ? validateQuestionAnswers(perm.familyQuestionWire, behavior.answers) : null;
+    if (answers && typeof perm.submitQuestionAnswers === "function") {
+      perm.submitQuestionAnswers(answers);
+      return;
+    }
+    resolvePermissionEntry(perm, "no-decision", "Question native fallback");
+    if (behavior === "deny-and-focus") ctx.focusTerminalForSession(perm.sessionId);
+    return;
+  }
   if (perm.isCodexNotify || perm.isKimiNotify) {
     dismissPassiveNotify(perm, "ipc-decide");
     // Kimi Code's cue is a heads-up that its terminal is blocking on a native
@@ -5147,7 +5198,9 @@ function dismissInteractivePermissionWithoutDecision(perm, reason) {
   // Do not answer approval requests on the user's behalf. Dropping the UI
   // means Codex/Antigravity receive no decision, CC/CodeBuddy fall back
   // via socket close, and opencode falls back by receiving no bridge reply.
-  if (perm.isCodex) {
+  if (perm.isFamilyQuestion) {
+    sendNoDecisionResponse(perm.res, reason || "question-dismissed", "question");
+  } else if (perm.isCodex) {
     sendCodexNoDecisionResponse(perm.res, reason || "permission-dismissed");
   } else if (perm.isQwenCode) {
     sendQwenCodeNoDecisionResponse(perm.res, reason || "permission-dismissed");

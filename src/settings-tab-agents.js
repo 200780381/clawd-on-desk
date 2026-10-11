@@ -11,7 +11,7 @@
   let helpers = null;
   let ops = null;
   const CODEX_PERMISSION_MODE_OPTIONS = [
-    { id: "native", labelKey: "codexPermissionModeNative" },
+    { id: "auto", labelKey: "codexPermissionModeAuto" },
     { id: "intercept", labelKey: "codexPermissionModeIntercept" },
   ];
   const INSTALL_HINT_CONFIDENCES = new Set(["high", "medium"]);
@@ -1047,7 +1047,6 @@
     "plugin-disabled-in-dsh",
     "repair-pending",
     "inspection-required",
-    "generation-conflict",
   ]);
 
   function dshNoticeProfileLabel(profile) {
@@ -1063,6 +1062,7 @@
       case "manual-command":
         return t("dshNoticeManualCommand");
       case "failed-target": {
+        if (notice.reason === "generation-conflict") return t("dshNoticeGenerationConflict");
         const message = notice.message == null ? "" : String(notice.message);
         const key = notice.operation === "uninstall" ? "dshNoticeUninstallFailed" : "dshNoticeInstallFailed";
         let body = t(key).replace("{message}", message);
@@ -2056,11 +2056,8 @@
     if (flag === "enabled") return false;
     const masterOn = readers.readAgentFlagValue(agentId, "enabled");
     if (!masterOn) return true;
-    if (agentId === "codex" && flag === "permissionsEnabled") {
-      return readers.readAgentPermissionMode(agentId) !== "intercept";
-    }
     if (agentId === "codex" && flag === "nativeNotificationSoundEnabled") {
-      return readers.readAgentPermissionMode(agentId) !== "native";
+      return readers.readAgentPermissionMode(agentId) !== "auto";
     }
     // Subagent sub-gate sits under the permission switch: pointless to toggle
     // while the parent permission gate already suppresses every CC bubble.

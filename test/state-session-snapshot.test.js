@@ -1436,33 +1436,45 @@ describe("shouldAutoClearDetachedSession WSL guard", () => {
   });
 });
 
-describe("DSH awaiting-activity rows", () => {
+describe("awaiting-activity rows", () => {
   it("counts only the conversation the user has touched as a pet-body jump target", () => {
     const snapshot = buildSessionSnapshot(new Map([
       ["dsh-active", session("working", {
         agentId: "deepseek-harness",
         dshCarrier: "desktop",
-        dshAwaitingActivity: false,
+        awaitingActivity: false,
         sourcePid: 999,
       })],
       ["dsh-fresh", session("idle", {
         agentId: "deepseek-harness",
         dshCarrier: "desktop",
-        dshAwaitingActivity: true,
+        awaitingActivity: true,
         sourcePid: 998,
+      })],
+      ["kimi-active", session("working", {
+        agentId: "kimi-cli",
+        awaitingActivity: false,
+        sourcePid: 997,
+      })],
+      ["kimi-fresh", session("idle", {
+        agentId: "kimi-cli",
+        awaitingActivity: true,
+        sourcePid: 996,
       })],
     ]), { statePriority: STATE_PRIORITY, focusHostPlatform: "darwin" });
 
     assert.deepStrictEqual(
       snapshot.sessions.map((entry) => entry.id).sort(),
-      ["dsh-active", "dsh-fresh"],
+      ["dsh-active", "dsh-fresh", "kimi-active", "kimi-fresh"],
       "the Dashboard still lists both conversations"
     );
     assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "dsh-fresh").hiddenFromHud, true);
     assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "dsh-fresh").canFocus, true);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "kimi-fresh").hiddenFromHud, true);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "kimi-fresh").canFocus, true);
     assert.deepStrictEqual(
       getFocusableLocalHudSessionIds(snapshot, { osPlatform: "darwin" }),
-      ["dsh-active"]
+      ["dsh-active", "kimi-active"]
     );
   });
 });

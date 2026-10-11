@@ -3,7 +3,11 @@ const assert = require("node:assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { isCodexMemoryWorkerPayload } = require("../hooks/codex-internal-worker");
+const {
+  isCodexAmbientSuggestionPrompt,
+  isCodexClientEphemeralPayload,
+  isCodexMemoryWorkerPayload,
+} = require("../hooks/codex-internal-worker");
 
 function withTempDir(prefix, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -409,5 +413,102 @@ describe("issue #1073: Codex internal memory worker detection", () => {
       }),
       false
     );
+  });
+});
+
+describe("issue #1073 follow-up: Codex client ephemeral event detection", () => {
+  const CLIENT_ENV = { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex" };
+
+  it("matches a no-transcript payload from the client app-server", () => {
+    assert.strictEqual(
+      isCodexClientEphemeralPayload({ hook_event_name: "SessionStart" }, { env: CLIENT_ENV }),
+      true
+    );
+  });
+
+  for (const transcriptPath of [undefined, null, "", " ", "\t\n"]) {
+    it(`treats ${JSON.stringify(transcriptPath)} as an empty transcript`, () => {
+      assert.strictEqual(
+        isCodexClientEphemeralPayload(
+          { hook_event_name: "PreToolUse", transcript_path: transcriptPath },
+          { env: CLIENT_ENV }
+        ),
+        true
+      );
+    });
+  }
+
+  it("keeps a payload whose transcript is a non-empty string", () => {
+    assert.strictEqual(
+      isCodexClientEphemeralPayload(
+        { transcript_path: "/tmp/rollout-2026-03-25T15-10-51-019d23d4-f1a9-7633-b9c7-758327137228.jsonl" },
+        { env: CLIENT_ENV }
+      ),
+      false
+    );
+  });
+
+  it("keeps a payload whose transcript is a non-string value", () => {
+    for (const transcriptPath of [{}, 7, true, ["x"]]) {
+      assert.strictEqual(
+        isCodexClientEphemeralPayload({ transcript_path: transcriptPath }, { env: CLIENT_ENV }),
+        false
+      );
+    }
+  });
+
+  it("requires the client originator variable to be a non-empty string", () => {
+    const payload = { hook_event_name: "Stop" };
+    for (const env of [
+      {},
+      { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "" },
+      { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "   " },
+      { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: null },
+      { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 7 },
+    ]) {
+      assert.strictEqual(isCodexClientEphemeralPayload(payload, { env }), false);
+    }
+  });
+
+  it("does not match a non-object payload", () => {
+    for (const payload of [null, undefined, "cwd", 7, true, []]) {
+      assert.strictEqual(isCodexClientEphemeralPayload(payload, { env: CLIENT_ENV }), false);
+    }
+  });
+});
+
+describe("issue #1073 follow-up: ambient suggestion prompt detection", () => {
+  const GENERATION_PROMPT = "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this local project: /repo";
+  const SAFETY_PROMPT = "You are an expert at upholding safety and compliance standards for Codex ambient suggestions";
+
+  it("matches both fixed prompt prefixes", () => {
+    assert.strictEqual(isCodexAmbientSuggestionPrompt(GENERATION_PROMPT), true);
+    assert.strictEqual(isCodexAmbientSuggestionPrompt(SAFETY_PROMPT), true);
+  });
+
+  it("matches the generation prompt variants", () => {
+    assert.strictEqual(
+      isCodexAmbientSuggestionPrompt("# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this Projectless task"),
+      true
+    );
+    assert.strictEqual(
+      isCodexAmbientSuggestionPrompt("# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this local project: /Users/x/proj"),
+      true
+    );
+  });
+
+  it("ignores leading whitespace", () => {
+    assert.strictEqual(isCodexAmbientSuggestionPrompt(`\n\t  ${SAFETY_PROMPT}`), true);
+  });
+
+  it("does not match the text only appearing later", () => {
+    assert.strictEqual(isCodexAmbientSuggestionPrompt(`please explain: ${SAFETY_PROMPT}`), false);
+    assert.strictEqual(isCodexAmbientSuggestionPrompt(`# Overview looks useful`), false);
+  });
+
+  it("does not match a non-string prompt", () => {
+    for (const prompt of [null, undefined, 7, true, {}, []]) {
+      assert.strictEqual(isCodexAmbientSuggestionPrompt(prompt), false);
+    }
   });
 });

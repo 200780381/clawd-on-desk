@@ -113,6 +113,10 @@ function getWorkBuddyPidResolverOptions(platformConfig, platform = process.platf
     // name; on Windows every WorkBuddy role is the same `workbuddy.exe`, so the
     // command-line predicate (not the name) picks out the main process.
     agentCmdlineNames: new Set(["electron", "workbuddy.exe"]),
+    // Windows 5.7.6 validation captured a 4.17s snapshot: the shared 3s
+    // deadline omitted both PIDs, making application-exit cleanup impossible.
+    // Stdout is answered before this bounded walk; native approval stays fast.
+    ...(platform === "win32" ? { windowsSnapshotTimeoutMs: 5000 } : {}),
     platformConfig,
   };
 }
@@ -174,7 +178,9 @@ const SAFETY_TIMEOUT_MS = 800;
 // (pet never reacts even though hooks fire). After answering stdout we re-arm
 // a generous backstop whose only job is to reap a truly hung process; the
 // POST's own 100ms timeout settles the normal path in well under that.
-const POST_EXIT_BACKSTOP_MS = 5000;
+// Leave room after the Windows snapshot's 5s limit for the POST to settle.
+// An overdue exit timer must not reap the hook before socket I/O can run.
+const POST_EXIT_BACKSTOP_MS = process.platform === "win32" ? 7500 : 5000;
 let _wrote = false;
 let _exited = false;
 let safetyTimer = null;

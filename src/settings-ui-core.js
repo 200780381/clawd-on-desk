@@ -95,6 +95,7 @@
       textScale: null,
       roamMovementStyle: null,
       bubblePlacement: null,
+      quotaAlertThresholds: null,
       roamArea: null,
       settingsSelects: new Set(),
       segmentedRadios: new Set(),
@@ -228,7 +229,7 @@
   function readAgentPermissionMode(agentId) {
     const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
     if (agentId === "codex" && entry && entry.permissionMode === "intercept") return "intercept";
-    return "native";
+    return "auto";
   }
 
   function readAgentCustomPermissionUrl(agentId) {
@@ -1498,6 +1499,7 @@
     state.mountedControls.roamMovementStyle = null;
     state.mountedControls.bubblePlacement = null;
     state.mountedControls.quotaRingDisplayMode = null;
+    state.mountedControls.quotaAlertThresholds = null;
     state.mountedControls.permissionAutomationMode = null;
     state.mountedControls.roamArea = null;
     state.mountedControls.aboutAutoUpdate = null;

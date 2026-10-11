@@ -2,6 +2,56 @@
 
 This document holds the deeper runtime and integration notes that were previously in the root `AGENTS.md`.
 
+Claude's live tool/model phase additionally uses `PostToolBatch` on the conservative
+2.1.280+ baseline. The hook sends only bounded tool IDs and `prompt_id`, omitting
+inputs, responses and process probes. `src/claude-tool-phase.js` keeps a bounded
+in-memory main-session ledger; `/state` observes it before permission cleanup and
+passes its internal decision to `state.js` without consuming the event twice.
+Direct state callers use the same arbiter before completion timers, recap and
+session mutation. Only the batch hint is rejected wholesale. A non-retired
+prompt id on an ordinary tool hook can establish a queued turn without Submit
+when no turn is open. An unseen id while a turn is open disables batch inference
+without retiring the current prompt, so its own Stop still completes normally;
+multiple Submit messages under one id retain normal message handling and the
+existing tool evidence. Fresh identified tools after Stop reopen a continuation,
+while SessionEnd always disposes the session independently of prompt identity.
+Proven retired hooks and settled success tails can annotate existing title/model/
+context metadata without changing phase or liveness. Their exact permission
+matches still clean up; retired events cannot use singleton or plan fallbacks
+against a newer request. A current failure racing behind its batch preserves the
+logical model phase while playing the normal error cue, then resumes thinking.
+Missing correlation keeps the legacy mapping. A batch cannot
+replace pending approvals or live subagent cues, and its recovery/history
+classification is intentionally empty so a delayed phase hint never reopens a
+durable record. This does not add durable fencing to existing Pre/Post writers.
+An early batch can overtake fast tool hooks because it skips PID discovery.
+The ledger retains bounded whole-batch evidence and waits for ordinary
+correlated evidence for every named tool before returning to thinking. Late
+tails then preserve that phase and cannot block later batches; terminal and
+prompt boundaries clear the retained evidence. AskUserQuestion's transcript
+completion probe survives an accepted batch and may settle its thinking phase
+when Stop is missing; fresh tools, prompts and terminal events still cancel it.
+Closed turns may retain bounded batches for an unseen queued prompt without
+adopting it; only an ordinary exact-prompt callback opens that turn. Delayed
+settlement rechecks approval/DND/headless gates. A result may release only its
+own exact tool approval; other requests still block the thinking hint. Settled
+tools retain a first-Pre marker for recap-only accounting, and synthetic
+SubagentStart still updates collaboration lifecycle. Failure resume keeps live
+subagent activity above thinking. Queue evidence is cleared on terminal/new
+prompt boundaries and shares the existing tool and prompt capacity bounds.
+After a confirmed native child ends, already-settled synthetic tool-start hints
+cannot recreate an anonymous collaboration lane. This is a conservative bound
+on older hints, not a guessed tool-to-child identity; unknown/duplicate child
+Stops do not qualify, and fresh identified starts remain authoritative. A
+bounded exact-prompt/tool tombstone may admit a first delayed Pre solely to
+recap accounting after a terminal. It never reopens the row, refreshes activity,
+replays completion or applies singleton/plan permission cleanup. Retirement
+eviction drops the accounting exception with the corresponding tool tombstone.
+A result that beats its own Pre is recorded as unsettled work for the turn:
+its own batch can settle it and earlier batches cannot cross it. This ordering
+alone no longer makes the whole turn unconfirmable; thinking still requires a
+correlated batch and the existing gates.
+
 ## Data Flow
 
 ```text
@@ -28,7 +78,7 @@ Cursor Agent 状态同步（command hook，stdin JSON，非阻塞）：
     → 同上状态机（agent_id: cursor-agent）
 
 Codex CLI 状态同步（official hooks primary + JSONL fallback）：
-  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop
+  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / PostCompact / Stop / Interrupt / SessionEnd
     → hooks/codex-hook.js（stdin JSON，session_id 优先与 transcript_path 的 rollout UUID 对齐）
     → HTTP POST 127.0.0.1:23333/state { state, session_id, event, turn_id, hook_source }
     → 同上状态机（agent_id: codex）
@@ -37,6 +87,42 @@ Codex CLI 状态同步（official hooks primary + JSONL fallback）：
   Codex 写入 ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
     → agents/codex-log-monitor.js（fallback：hook 未覆盖事件、hook 禁用/不可用、历史兼容）
     → src/agent-runtime-main.js 对 hook-active session 做事件级 suppression，避免重复状态/重复气泡；本地 JSONL 路径不经过 HTTP server
+
+JSONL 的状态 suppression 与活跃时钟分离：monitor 对本机当前回合内、有可信记录时间的模型消息/推理、
+工具调用/结果发 activity-only callback，故 official hooks 覆盖的事件或重复 working 状态也能延续真实活跃。
+runtime 只触及已存在的非 headless、非 WSL/远程行，并须匹配 turn fence 已接受的当前回合；
+backfill、旧/未来时间、quota/title/文件 mtime、已结束或其他回合不能延长时钟。
+仅被 working-timeout 转 idle 的行保留私有 timeout 标记和最后真实活跃时间，当前回合新进度可按原 thinking/working
+恢复；普通 idle、Stop/abort/end 不可恢复，任一 accepted lifecycle 或恢复清掉标记。标记不进入 snapshot。
+无真实进度时仍遵守用户配置的 Codex inactivity timeout，不以 Desktop 长寿 PID 永久保活。
+自动自由漫步同时检查 canonical in-progress session；临时 idle/roam 视觉不放行忙碌会话，取消走动时按
+resolveDisplayState 恢复真实显示。手动拖拽、设置预览、DND 与 Mini 的原有入口和 gate 保留。
+
+Codex 桌面端 app-server 下的临时线程（无 transcript 且 hook 环境有非空
+`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`）既包含隐藏的「智能建议」后台线程，也包含
+用户自己的侧边聊天，两者 hook 字段完全相同；终端里直接跑的 `codex exec --ephemeral`
+没有该变量，不受影响。`hooks/codex-internal-worker.js` 保留前提判定
+`isCodexClientEphemeralPayload`，并只按两个固定提示词开头认智能建议
+（`isCodexAmbientSuggestionPrompt`）：这类线程的 `SessionStart` 不显示，
+`UserPromptSubmit` 在 body 上加 `codex_internal_thread:"ambient_suggestions"` 标记照常 POST
+（不发提示词原文），其他状态事件照常 POST，所以侧边聊天正常显示。所有客户端临时线程的
+`SessionStart` 都不显示，但仍用 `lifecycle:"start"` 做一次常规进程解析预热 Windows pid
+缓存（不 POST、不读自动启动开关、不冷启动）：Windows 默认 legacy 模式下首次
+`UserPromptSubmit` 是 cache-only，不预热就拿不到 PID、第一轮没法跳转。服务端
+`src/agent-runtime-main.js` 用有界集合（200）记住被标记的本地 Codex sid，之后该 sid 的
+官方事件一律不建行、不播完成，已有行则按归档方式撤掉，直到它的 SessionEnd 把 sid 移出；
+标记由 `src/server-route-state.js` 校验（仅本地 official codex）后经 `codexInternalThread`
+传入。若上游改写提示词文字，识别失效只会退化成「短暂出现、被 SessionEnd 收掉」，不会藏起
+用户对话。official `SessionEnd`（`CODEX_HOOK_EVENTS`，timeout 固定 3 秒）在线程拆除时发
+（归档、删除、闲置卸载、正常关闭），所以闲置几小时后卸载也会发；服务端 `src/state.js` 的
+SessionEnd 分支删行、取消 exit probe、结束 automation lifecycle，但本地 Codex 会话若仍有可
+回复的完成映射（`ctx.hasReplyableCompletionMapping`）则整体当作 no-op，否则 Telegram 直接
+回复会因会话不在而 `session_not_live`。`src/agent-runtime-main.js` 对官方 SessionEnd 真正删掉
+的本地 Codex sid 记一个有界墓碑（200，参照 turn fence）：之后该 sid 的 JSONL 事件除回合开始
+（`event_msg:task_started`，或 `syntheticBackfill && turnBoundaryOpen` 且带 turnId）外一律丢弃、
+不建会话，quota / context 照常摄入；解除墓碑只看 fences 接受的新回合开始或该 sid 的官方
+SessionStart / UserPromptSubmit，被 fence 拒掉的旧回合开始不解除；SessionEnd 不清 turn fence。
+新增该 hook 需要用户在 Codex `/hooks` 里重新批准后才生效。
 
 本机 Codex 会话标题：现有 JSONL monitor 每轮为已观察到生命周期的会话合并读取一次
 `session_index.jsonl`（沿用 512 KiB tail 上限）。新标题/改名以 `session_index:title`
@@ -48,10 +134,36 @@ monitor 当前标题与索引不一致时也会重发，覆盖索引恢复场景
 标题通道跳过带 host 或 WSL 标记的会话；刷新覆盖仍在活动或退休记录中的会话
 （最多 50 个活动、100 个退休 rollout）。超出后与既有行为相同，标题等下一次快照广播或生命周期事件更新。
 
+Codex 压缩开始通过 official `PreCompact` hook 触发既有 `sweeping` 动画，
+同时覆盖 `manual` / `auto` trigger。`state.js` 按 conversation ID 保留私有显示持有记录，
+压缩持有只在没有其他对话工作/思考时选择清扫；完成、错误和审批提示仍正常播放，
+提示结束后按仍存活的持有记录恢复清扫。共用 Desktop PID 的对话各自持有、各自释放，
+开始/完成清扫和持有记录重算都须让位于其他会话的活跃工作；完成重播不能清掉
+最小显示时长内排队的完成、错误或输入提示。此规则只保护进入清扫的请求，
+不会把完成提示改写成清扫，设置动画预览继续保持其显式展示行为。
+不改 session snapshot 合约。official `PostCompact` 和 JSONL completion 共用完成清扫，
+同一已识别回合的两种通道只重播一次；实际记录时间早于下一次压缩开始的 JSONL 完成不能释放新持有。
+完成、同会话恢复工作/思考、SessionStart、Stop/Interrupt/abort/end、
+过期清理、隐藏/禁用/移除会话均释放；缺失完成事件最多持有 10 分钟，重复开始不延长。
+headless 压缩不占全局动画；DND、禁用清扫、确认审批锁与更高优先级显示仍受保护。
+手动压缩可发生在回合结束后，turn fence 将精确的开始/完成清扫事件视为 housekeeping，
+不重开回合、不放行旧工具尾事件；新回合已打开时，带不同 turn ID 的压缩信号不能覆盖
+新回合，只有当前回合或无 ID 的兼容信号可进入。JSONL timestamp/backfill 保护不变。
+本机非 WSL 会话失败后的 JSONL terminal 即使遇到 recent official hook，也可结束仍在压缩的当前回合；
+本机 rollout 不释放相同 raw ID 的 WSL/远程持有，所属 official hook 仍可释放。
+已关闭回合的重复 terminal 只在回合 ID 与当前持有相同、且记录时间不早于压缩开始时
+释放清扫，不重开回合、不重新播完成、不更新时间或历史；其他会话和无法确认的旧事件不受影响。
+已删除后重建的 owner 不受旧计时回调影响，重复开始不延长原有上限。
+它不结束回合、不产生控制决定。已有安装在下次集成同步时
+增量注册 `PostCompact` 和 `Interrupt`，保留用户 hook；新增命令仍须遵守 Codex 原生 hook review。
+`Interrupt` 超时遵循上游的 3 秒上限，不发审批决定或完成声音。
 Codex 压缩完成同时兼容旧 `event_msg:context_compacted` 与新版
 `event_msg:item_completed`（`payload.item.type === "ContextCompaction"`）。本地与
 Remote SSH monitor 共用 `hooks/codex-log-event.js`，把后者归一化到旧事件键，沿用
-`sweeping` 映射、timestamp/backfill 保护与 hook 仲裁；它不是 turn completion，也不清理
+`sweeping` 映射、timestamp/backfill 保护与 hook 仲裁。完成事件即使遇到仍显示的开始清扫，
+也会重播动画并重新计入主题的最小显示时长，避免随后 `SessionStart` / 工作事件直接盖掉
+完成提示；普通重复状态仍去重，待显示的更高优先级告警与审批锁仍受保护。
+它不是 turn completion，也不清理
 待回答问题。`compacted` 检查点、`response_item:compaction` 与其他 item 事件不作为实时压缩信号。
 
 Local Codex archive lifecycle (#655)：Codex 归档会把该 thread 的 rollout 从
@@ -169,6 +281,8 @@ WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
   所以挂在 workbuddy-session-title 观察器上：一次轮询读到这两种生命周期就对该会话 dismissSession 撤卡（不响提示音、不算完成），并让 updateSessionFromServer 对随后的迟到事件
   同步重读当时判定用的那个所属库；仍是归档/删除就丢弃，取消归档或读不到就恢复正常接收。生命周期只认拥有 transcript 的那个库（transcript 不在任何已知家目录下、或没有 transcript 一律算“不知道”，
   绝不用别的库推断）；别的家目录里的同 ID 归档副本不参与判断；读不到数据库一律按“不知道”处理，绝不撤卡。
+  Windows WorkBuddy 的进程快照使用有界 5 秒超时（其他 adapter 默认仍为 3 秒）：5.7.6 真机观测到约 4.17 秒的快照，3 秒会丢失主 PID、无法按应用退出撤卡。
+  hook 先输出 `{}` 再探测；输出后的退出 backstop 为 7.5 秒，给快照后的 HTTP 上报留出时间。超过上限仍不返回降级 PID，按既有状态/超时逻辑处理。
 
   WorkBuddy's native `Notification` subtypes `idle_prompt` and `auth_success` are acknowledged with `{}` locally, before process resolution or HTTP delivery. `idle_prompt` is a "send another message" reminder, observed on 5.2.6 about 60 seconds after Stop (5.6.2's per-turn host exits before it can fire, so it was not observed there); `auth_success` is the login-success toast, emitted by 5.6.2 at the start of every turn. Forwarding either would create or settle a session — a phantom idle row before the first UserPromptSubmit, or knocking a running turn back to idle. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
 
@@ -443,8 +557,9 @@ WSL 状态同步（本机 loopback，但 PID 属于 Linux VM）：
 权限决策流（Codex official PermissionRequest command hook，阻塞）：
   Codex PermissionRequest
     → hooks/codex-hook.js POST /permission { tool_name, tool_input, tool_input_description, session_id, turn_id }
-    → 默认 intercept 模式：main.js 创建普通 Allow / Deny bubble，用户点击后 codex-hook.js stdout 输出官方 JSON decision
-    → 显式 native 模式：server 记录 notification 并立即返回 no-decision，Codex AutoReview / 原生审批继续处理
+    → 默认 auto 模式：准确的本机 session / turn 记录确认 user reviewer 时才由 Clawd 展示 Allow / Deny；自动 reviewer、MCP / app 覆盖、远程 / WSL、无法确认或过期记录立即 no-decision，Codex 继续处理
+    → 显式 intercept 模式：main.js 创建普通 Allow / Deny bubble，用户点击后 codex-hook.js stdout 输出官方 JSON decision
+    → 旧 native 偏好规范化为 auto；升级时旧 intercept / native 统一迁到 Auto 一次，之后重新选择的 Intercept 会保留。General 权限区提供 Agents → Codex 路由设置入口
     → DND / disabled / bubble hidden / Clawd unavailable 时 stdout "{}"，Codex 回到原生审批提示
 ```
 
@@ -511,7 +626,27 @@ DND remains an interaction/visual gate and does not stop recap or coverage. Susp
 | 双窗口与浮层 | `src/pet-window-runtime.js` 创建/定位 render + hit window；`src/floating-window-runtime.js` / `src/topmost-runtime.js` 管浮层重排与 z-order |
 | Settings 写入与副作用 | `settings-controller` 是唯一写入者；`settings-actions*` 是 pre-commit gates；`settings-effect-router` 是 post-commit runtime effects |
 | Settings UI | `settings-ui-core` 持有 shared UI state，`settings-renderer` 是侧栏/tab shell，业务页在 `settings-tab-*` |
+| Quota reminders | `quota-alerts-runtime` reads source-separated account snapshots; `quota-alerts` owns bounded hashed dedup history; `quota-notifications` acknowledges native delivery. Controls live in General's Quota ring and use the Settings controller. |
 | Theme | `theme-loader` 是 stateless loader；`theme-runtime` 是唯一 active-theme owner |
+
+Quota reminders remain disabled until explicitly enabled. They use existing quota collection,
+require fresh per-window confirmation after startup, and never make account requests.
+DND or failed notification delivery preserves eligibility. The settings-only test notification
+is owner-gated, does not mutate quota/history, and uses the same settings i18n as native alerts.
+See `docs/guides/quota-reminders.md` for thresholds, recovery and retention.
+
+Only Claude Code and Antigravity slot names supply a display window (FiveHour or
+Weekly) when their reports omit windowMinutes; Codex-family slot names are never
+guessed, because the "primary" slot is not reliably the 5-hour window (see the
+comment at the top of `hooks/codex-rate-limits.js`). An explicit reported
+duration remains authoritative. Failed delivery retries after 30 seconds,
+doubles to a 15-minute cap, and never consumes eligibility. Cooldown is private
+in-memory state per source/window and only for the last failed candidate; a new
+window or a different candidate (such as a more urgent threshold) starts fresh,
+and it is discarded with its history owner.
+DND suppresses attempts without extending cooldown. Native show acknowledges
+system acceptance; the localized Test result points to OS notification settings
+when no banner appears. The Windows balloon fallback still acknowledges dispatch.
 
 `state.js` 的 session snapshot 是共享 schema：Dashboard、Session HUD（含 Orbit quota ring）以及可选 Telegram completion、Discord presence、LAN PWA 等 consumer 都会读取它。新增、重命名或删除字段时必须检查全部 consumer，不能只看 Dashboard/HUD。
 
@@ -524,6 +659,8 @@ After a local WorkBuddy session has been accepted, `src/agent-runtime-main.js` o
 When SQLite is unavailable or the database cannot supply a title, the observer reads session-scoped `ai-title` / `custom-title` JSONL metadata using `src/jsonl-session-title.js`, the incremental reader shared with Qoder. Only SQLite can report the archive/delete lifecycle; the JSONL fallback supplies a title only. WorkBuddy reads at most 1 MiB of new transcript bytes per scan, retains bounded partial lines, and ignores other sessions and message records. A two-second poll discovers delayed generated titles and idle renames without requiring a new hook. Immediate reads are rate-limited to one per poll window per session, and a `SessionStart` (WorkBuddy 5.6.x sends one every turn) replaces the observer identity — so a read started before the turn cannot annotate the resumed lifecycle — while carrying the rate-limit window over. It keeps the JSONL reader's accumulated progress only for the same file, not merely the same path: the observer samples the transcript's `dev`+`ino` once per event, records exactly that sample, and resets the reader when the file was replaced or the identity cannot be read — while preserving the conversation's rate-limit window. At most 256 surviving local sessions are observed; `track` and `beginTurn` share that cap. End, disable/uninstall, eviction, same-id resume, and shutdown invalidate pending reads; remote, WSL, and headless sessions never read local WorkBuddy storage.
 
 Native titles enter `updateSessionMetadata` with an explicit WorkBuddy ownership guard. They use the existing session snapshot consumed by HUD/Dashboard and do not refresh activity timestamps, change state, replay completion, or create missing sessions.
+
+The same two-second observer also reads `session_usage.used` and `session_usage.size` through the already-open read-only database handle, after matching the session row and cwd. Context is taken only from the known transcript-owning or pinned home; another home's same-id row can supply a title but never context. Missing cwd retains the existing exact-session/home scope, while a known contradictory cwd is rejected. These are WorkBuddy's native displayed context gauge and effective budget, including its own estimates and compaction resets, rather than accumulated billing tokens. `sessions.context_window` is an optional override, not the effective denominator; neither model limits nor transcript cache counters are guessed. Safe integer `used >= 0` and `size > 0` become `contextUsage` with source `workbuddy`; over-budget percentages clamp to 100. Native numeric `0/0` is a cost-only event ignored by WorkBuddy's UI, so an older backend persisting it preserves the last-known gauge (or stays unknown before the first gauge); `0/positive-size` is a real 0%. Other readable missing or invalid usage rows clear only prior `workbuddy-native` context, while unavailable SQLite, missing usage tables/columns, and read failures preserve it. Archived/deleted rows retire before any context callback. Context can update without a title or another hook, with the existing async lifecycle/scope fences, cap and local-only gates. It annotates live sessions through `updateSessionMetadata` without changing state or activity timestamps; HTTP/remote usage never gains the native provenance merely by naming WorkBuddy.
 
 ## Cursor Hook Commands And Session Titles
 
@@ -708,6 +845,13 @@ opencode、MiMo Code、OpenClaw、Hermes 和 DeepSeek Harness 是 plugin 形式�
 
 - CJS hook 脚本通过 `hooks/shared-process.js` 的 `createPidResolver()` 与 lifecycle context 遍历进程树定位终端应用 PID（Windows Terminal、VS Code、iTerm2 等）；opencode-family plugin 保留自己的内部 resolver
 - 不要用 `process.ppid` 做轻量替代：Claude Code / hook 进程链里它通常只是临时 shell PID，不稳定也不可持久化
+- 本机 Windows Codex Desktop 的 lifecycle context 会以已验证的 app-server `agentPid` 作为 `source_pid` 和 v2 cache 的 `stablePid`，避免 `SessionStart` 的短命 PowerShell wrapper 退出后让 cache-only prompt 丢失身份。Desktop 判定只认 `codex-originator.js` 的已知 originator；本机 Windows 无 transcript 的 ephemeral hook 缺少 originator/source 且不是 headless/subagent 时，可用同一 allowlist 验证 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`，并上报 originator 供同进程多聊天去重与 server-side process routing 使用；显式 CLI / unknown originator 优先，环境变量不得把来源不明的 child permission 提升为交互式。WSL / interop / remote / headless 不走该偏好；其他 agent 和 Codex CLI 仍保持 terminal-first 与双 PID liveness，prompt / SessionEnd 永不补做快照，Stop 不删 cache。
+- official `SessionStart` payload 的 `source` 是生命周期原因，不是 session provenance：只有事件名精确为 `SessionStart` 且值精确为 `startup` / `resume` / `clear` / `compact` / `fork` 时，才不阻止上述 audited Desktop env 预热；该原因留在原 payload，不写入 `codex_source`。`session_meta.source` 始终是 provenance，显式 originator、未知/非字符串 source、headless/subagent 与 remote/WSL gate 不变；`PermissionRequest` 不获得该例外。五个值由 official [rust-v0.162.0-alpha.2 SessionStart source（commit 74e804d）](https://github.com/openai/codex/blob/74e804deeb1241d5fe699b31fb319f7d46454c42/codex-rs/hooks/src/events/session_start.rs) 的 enum 和 serializer 核实；[release hook reference](https://learn.chatgpt.com/docs/hooks#sessionstart) 目前仍列四个值，并说明 main schema 可能先于 release docs。
+- Windows shared resolver 的全量快照在 `Get-CimInstance Win32_Process` 用 server-side `-Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate` 请求实际需要的属性，避免取回所有 CIM 属性后再丢弃。原 foreground interop、Windows Terminal HWND、`Select-Object` 和 UTC ticks `StartIdentity` 输出保留；noarg、CLI、其他 adapter 的 PID walk / shape / gates 不变。
+- Codex adapter 的 Windows 全量进程快照对普通事件使用共享 resolver 已有的 `windowsSnapshotTimeoutMs:5000`（上限 5 秒），`Interrupt` 保持 3000ms 以遵守其 upstream 3 秒外层 timeout；其他调用者的默认值仍为 3 秒。timeout 后保持无进程元数据，不重试、不伪造 PID。Windows `UserPromptSubmit` / `SessionEnd` 仍只读 cache，不增加快照。生命周期 source 误判和 fresh query 超时是独立故障：正确识别 `fork` 不能修复一次超时的预热，有界 timeout 也不保证查询必能完成。真实 HUD 首轮聚焦仍需 native hook 和 GUI 验证。
+- macOS / Linux 的 shared resolver 在读取 `preferAgentPid` 之前走 `!isWin` early return；每个 lifecycle 仍沿用 terminal-first 的内存快照，不访问 Windows v2 disk cache。已有显式 Desktop originator 的 hook 回包可继续选 `agentPid` 作为 outgoing `source_pid`，这不等于 POSIX resolver/cache anchor 被提升。
+- Desktop provenance 会保留不同 SID 的独立 HUD 会话，不能据 app-server PID 将它们合并。两个固定 ambient prompt 若变化，未识别工作线程可能各自留下一个按 SID 更新的可见会话；这比已识别 ambient 的隐藏保证弱。未知会话仅受现有全局 20-session capacity eviction 与普通 stale/SessionEnd 规则约束；已识别 ambient suppression set 的 200 项边界不控制这些未知会话。可回复的本地 Codex completion mapping 仍可能令 SessionEnd 成为 no-op，不能承诺每行必在 SessionEnd 消失。
+- 普通无 transcript 的 Desktop sidechat 不具备自动 queue 投递资格：main 只从权威 rollout transcript 推导该会话的 `codexHome`，缺失时保持 null；选择 Desktop queue adapter 仍须经过真实 `canDeliver` admission，环境中的 Codex home 不补为会话存储来源。被拒绝的 Direct Send 仅复制供手动粘贴，不执行 `codex queue` 或注入 Enter。此边界不判断临时线程被外部提供有效存储来源后的 CLI 能力，也不把 OS 接受 thread URL 等同于实际选择了正确侧边聊天。
 - `source_pid` 跟随状态更新送到 `main.js`，用于 Sessions 菜单聚焦
 - 右键 Sessions 子菜单点击后，`focusTerminalWindow()` 会用 PowerShell（Windows）或 `osascript`（macOS）聚焦终端
 - Windows 的 Cursor / VS Code 父进程窗口优先按项目标题唯一匹配；标题不匹配或缺少 cwd 时，仅在该进程的可见候选窗口唯一时兜底唤起。多窗口歧义或无可见候选时不以 `MainWindowHandle` 猜选。兜底不写 session HWND cache，`editor-parent-pid-window` / `editor-parent-pid-window-no-title` 即使成为前台也保持 `confirmed=false`：HUD / Dashboard 可以唤起 IDE，Telegram Direct Send 仍走手动粘贴回退，不能据此确认具体聊天或输入框。
