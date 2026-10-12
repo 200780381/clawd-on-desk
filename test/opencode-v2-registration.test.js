@@ -50,7 +50,7 @@ function managedRoots(home) {
 }
 
 describe("opencode v2 plugins-key registration", () => {
-  it("registers both keys into one generation; foreign v2 shapes survive verbatim", () => {
+  it("registers only the v2 plugins key on a v2 host; foreign v2 shapes survive verbatim", () => {
     const home = makeHome();
     const foreignObject = { package: "some-opencode-plugin", options: { strict: true } };
     const foreignTuple = ["/opt/other-tools/legacy-plugin", { mode: "x" }];
@@ -63,18 +63,13 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(result.status, "ok", result.message);
 
     const cfg = readConfig(home);
-    const v1Entry = cfg.plugin.find((entry) => String(entry).includes("opencode-plugin"));
+    // opencode 2.x rejects the v1 function entry, so the legacy `plugin` key is
+    // never written on a v2 host.
+    assert.ok(!Object.hasOwn(cfg, "plugin") || cfg.plugin.length === 0, "v1 plugin key is not registered on a v2 host");
     const v2Entry = cfg.plugins.find((entry) => typeof entry === "string" && entry.includes("opencode-plugin-v2"));
-    assert.ok(v1Entry, "v1 plugin entry registered");
     assert.ok(v2Entry, "v2 plugins entry registered");
-    assert.ok(v1Entry.includes("/generations/"), "v1 entry points at the managed generation");
+    assert.ok(v2Entry.includes("/generations/"), "v2 entry points at the managed generation");
     assert.strictEqual(path.basename(String(v2Entry)), "opencode-plugin-v2");
-    // Same generation, sibling entry dirs.
-    assert.strictEqual(
-      path.dirname(String(v2Entry)),
-      path.dirname(String(v1Entry)),
-      "both entries live in the same generation"
-    );
     assert.deepStrictEqual(
       cfg.plugins.filter((entry) => entry !== v2Entry),
       ["oh-my-openagent@latest", foreignObject, foreignTuple],
@@ -112,20 +107,22 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(owned.length, 1, "duplicates converge");
   });
 
-  it("re-register after external plugins-key removal restores the v2 entry", () => {
+  it("sweeps a leftover owned v1 entry and restores the v2 entry on a v2 host", () => {
     const home = makeHome();
     assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) }).status, "ok");
 
-    // Simulate the pre-#1039 state: the v1 entry exists but the v2 key was
-    // never written (older Clawd), then the new Clawd repairs.
+    // Simulate a pre-#1039 install: the v1 `plugin` entry exists (pointing at
+    // the sibling v1 dir of the same generation) but the v2 key was never
+    // written. opencode 2.x rejects that v1 function entry, so Repair must
+    // sweep it and restore the v2 key.
     const cfg = readConfig(home);
-    writeConfig(home, {
-      $schema: cfg.$schema,
-      plugin: cfg.plugin,
-    });
+    const v1Entry = path.join(path.dirname(cfg.plugins[0]), "opencode-plugin").replace(/\\/g, "/");
+    writeConfig(home, { $schema: cfg.$schema, plugin: [v1Entry] });
+
     const repair = registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) });
     assert.strictEqual(repair.status, "ok", repair.message);
     const repaired = readConfig(home);
+    assert.deepStrictEqual(repaired.plugin || [], [], "leftover v1 entry swept");
     assert.ok(
       (repaired.plugins || []).some((entry) => String(entry).includes("opencode-plugin-v2")),
       "v2 entry restored"
@@ -145,7 +142,7 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(result.activeEntryRemaining, false);
 
     const cfg = readConfig(home);
-    assert.deepStrictEqual(cfg.plugin, [], "v1 key swept");
+    assert.deepStrictEqual(cfg.plugin || [], [], "v1 key swept");
     assert.deepStrictEqual(cfg.plugins, ["third-party@latest", foreignObject], "v2 owned swept, foreign kept");
   });
 
@@ -184,7 +181,8 @@ describe("opencode v2 plugins-key registration", () => {
       registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) });
       const before = readConfig(home);
       const owned = JSON.stringify(before.plugins[0]);
-      const plugin = `"plugin": ${JSON.stringify(before.plugin)}`;
+      // A foreign v1 entry must survive the key surgery untouched.
+      const plugin = `"plugin": ["third-party@latest"]`;
       const v2 = `"plugins" /* key note */ : [ /* list note */ ${owned} /* entry note */ ]`;
       const fields = position === "first" ? [v2, plugin, '"theme": "keep"']
         : position === "middle" ? [plugin, v2, '"theme": "keep"']
@@ -199,7 +197,10 @@ describe("opencode v2 plugins-key registration", () => {
       const parsed = require("jsonc-parser").parse(after, errors);
       assert.deepStrictEqual(errors, [], after);
       assert.strictEqual(Object.hasOwn(parsed, "plugins"), false, after);
-      assert.deepStrictEqual(parsed.plugin, before.plugin);
+      // The v1-host register sweeps the v2 key and registers its own v1 entry;
+      // the pre-existing foreign entry keeps its position untouched.
+      assert.strictEqual(parsed.plugin[0], "third-party@latest");
+      assert.ok(parsed.plugin.some((entry) => String(entry).includes("opencode-plugin")), "v1 entry registered");
       assert.strictEqual(parsed.theme, "keep");
       for (const note of ["key note", "list note", "entry note", "before fields", "between fields", "after fields"]) {
         assert.ok(after.includes(note), `${position}: lost ${note}`);
@@ -308,17 +309,13 @@ describe("opencode v2 plugins-key registration", () => {
     assert.deepStrictEqual(cfg.plugins, ["/b/opencode-plugin-v2"]);
   });
 
-  it("PR #1045 follow-up: duplicate plugins keys abort uninstall before removing an owned v1 entry", () => {
+  it("PR #1045 follow-up: duplicate plugins keys abort uninstall with a byte-identical config", () => {
     const home = makeHome();
     assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) }).status, "ok");
-    // The config now carries a Clawd-owned v1 entry that uninstall WOULD remove
-    // (plus the v2 key). Insert a duplicate top-level `plugins` key by text edit
-    // — JSON.parse cannot express one.
+    // The config now carries a Clawd-owned v2 entry that uninstall WOULD remove.
+    // Insert a duplicate top-level `plugins` key by text edit — JSON.parse
+    // cannot express one.
     const registered = readConfig(home);
-    assert.ok(
-      registered.plugin.some((entry) => String(entry).includes("opencode-plugin")),
-      "an owned v1 entry is present and removable"
-    );
     assert.strictEqual(registered.plugins.length, 1);
     const text = fs.readFileSync(configPath(home), "utf8");
     const duplicated = text.replace(
@@ -332,8 +329,7 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(result.status, "error");
     assert.strictEqual(result.reason, "config-corrupt");
     assert.strictEqual(result.registrationRemoved, false);
-    // Byte-identical proves the guard fired BEFORE the v1 entry was removed:
-    // the owned entry would otherwise have been swept from the file above.
+    // Byte-identical proves the guard fired BEFORE any sweep mutated the file.
     assert.strictEqual(fs.readFileSync(configPath(home), "utf8"), duplicated, "config is never touched");
   });
 

@@ -97,7 +97,12 @@ function parseJsoncStrict(text, configPath) {
 }
 
 function freshConfigText(cfg, pluginDir) {
-  const settings = cfg.schema ? { $schema: cfg.schema, plugin: [pluginDir] } : { plugin: [pluginDir] };
+  // A null pluginDir creates the default config with NO Clawd v1 entry. The
+  // sweep-only register path (a detected opencode v2 host, where the v1
+  // function entry fails the strict v2 loader) creates the file so the v2
+  // `plugins` key has an object-root config to land in.
+  const settings = cfg.schema ? { $schema: cfg.schema } : {};
+  if (pluginDir) settings.plugin = [pluginDir];
   return `${JSON.stringify(settings, null, 2)}\n`;
 }
 
@@ -545,7 +550,7 @@ function applyAppend(text, value) {
 }
 
 // Read-only pre-scan used by the installer before it takes the target lock.
-function inspectManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, legacyMissingRecheck }) {
+function inspectManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, legacyMissingRecheck, sweepOnly = false }) {
   const states = candidates;
   const effective = selectEffective(states);
   const perFile = [];
@@ -556,14 +561,26 @@ function inspectManagedRegister({ cfg, configPath, candidates, makeContext, cano
   for (const state of states) {
     const isEffective = state === effective;
     if (!candidateHasPluginArray(state)) {
-      if (isEffective) needsMutation = true; // effective is absent / non-array → (re)write
+      // sweepOnly (opencode v2 host, the v1 key must end up Clawd-free) never
+      // fabricates a `plugin` array: an existing file without one is already
+      // clean, so only a MISSING effective config needs a write (to create it).
+      if (isEffective && !sweepOnly) needsMutation = true; // effective is absent / non-array → (re)write
       continue;
     }
     const ctx = makeContext(state.path);
     const classification = entryOwnership.classifyPluginEntries(state.tree.plugin, ctx);
     perFile.push({ path: state.path, isEffective, classification });
 
-    if (isEffective) {
+    if (isEffective && sweepOnly) {
+      // Remove proven-owned v1 entries, append nothing. A fail-closed entry
+      // (modified / corrupt / unknown) is left in place with a warning: a
+      // leftover v1 entry must never fail the concurrent v2-key registration.
+      const plan = entryOwnership.planUnregisterArray(state.tree.plugin, ctx, {});
+      if (plan.remove.length) needsMutation = true;
+      for (const entry of plan.failClosed) {
+        warnings.push(`active ${entry.category} entry at ${state.path}[${entry.index}] retained (${JSON.stringify(entry.rawEntry)})`);
+      }
+    } else if (isEffective) {
       const plan = entryOwnership.planEffectiveArray(state.tree.plugin, ctx, { canonicalEntry, configPath: state.path });
       if (plan.action === "needs-review" || plan.action === "ownership-conflict") {
         needsReview = plan;
@@ -591,7 +608,7 @@ function inspectManagedRegister({ cfg, configPath, candidates, makeContext, cano
 // The COMPLETE plan (masked-lower cleanups + effective edit) is validated
 // BEFORE any file is written, so an ownership/conflict failure can never be
 // reported after a destructive partial write.
-function applyManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, options = {}, tupleContractVerified = false }) {
+function applyManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, options = {}, tupleContractVerified = false, sweepOnly = false }) {
   const fsImpl = options.fs || fs;
   const states = candidates;
   const effective = selectEffective(states);
@@ -614,9 +631,17 @@ function applyManagedRegister({ cfg, configPath, candidates, makeContext, canoni
   if (!effective) {
     effectiveEdit = { kind: "create" };
   } else if (!isObjectRoot(effective.tree)) {
-    effectiveEdit = { kind: "rewrite-object" };
+    // sweepOnly never clobbers a config it cannot understand: a non-object
+    // root is left byte-identical (the v1 key is simply not touched).
+    effectiveEdit = sweepOnly ? { kind: "noop" } : { kind: "rewrite-object" };
   } else if (!Array.isArray(effective.tree.plugin)) {
-    effectiveEdit = { kind: "rewrite-plugin" };
+    effectiveEdit = sweepOnly ? { kind: "noop" } : { kind: "rewrite-plugin" };
+  } else if (sweepOnly) {
+    const ctx = makeContext(effective.path);
+    const plan = entryOwnership.planUnregisterArray(effective.tree.plugin, ctx, {});
+    effectiveEdit = plan.remove.length
+      ? { kind: "edit", plan: { replace: [], remove: plan.remove } }
+      : { kind: "noop" };
   } else {
     const ctx = makeContext(effective.path);
     const classification = entryOwnership.classifyPluginEntries(effective.tree.plugin, ctx);
@@ -681,14 +706,14 @@ function applyManagedRegister({ cfg, configPath, candidates, makeContext, canoni
       mutatedPaths.push(edit.state.path);
     }
     if (effectiveEdit.kind === "create") {
-      writeTextAtomic(configPath, freshConfigText(cfg, canonicalEntry));
+      writeTextAtomic(configPath, freshConfigText(cfg, sweepOnly ? null : canonicalEntry));
       mutatedPaths.push(configPath);
-      added = true;
+      added = !sweepOnly;
       created = true;
     } else if (effectiveEdit.kind === "rewrite-object") {
-      writeTextAtomic(effective.path, freshConfigText(cfg, canonicalEntry), { mode: fileMode(effective.path) });
+      writeTextAtomic(effective.path, freshConfigText(cfg, sweepOnly ? null : canonicalEntry), { mode: fileMode(effective.path) });
       mutatedPaths.push(effective.path);
-      added = true;
+      added = !sweepOnly;
     } else if (effectiveEdit.kind === "rewrite-plugin") {
       const text = applyEdits(effective.text, modify(effective.text, ["plugin"], [canonicalEntry], formattingFor(effective.text)));
       writeTextAtomic(effective.path, text, { mode: fileMode(effective.path) });
@@ -707,7 +732,7 @@ function applyManagedRegister({ cfg, configPath, candidates, makeContext, canoni
       if (effectiveEdit.plan.remove.length) text = removeEntriesFromText(text, effectiveEdit.plan.remove);
       writeTextAtomic(effective.path, text, { mode: fileMode(effective.path) });
       mutatedPaths.push(effective.path);
-      added = true;
+      added = !sweepOnly;
     }
   } catch (err) {
     return {
