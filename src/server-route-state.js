@@ -49,6 +49,13 @@ const { extractPermissionToolInput } = require("../hooks/kimi-hook");
 const { normalizeCodexUserInputWire } = require("../hooks/codex-user-input");
 const { sanitizeShadowRecord } = require("./windows-process-chain-shadow-log");
 
+const NATIVE_TERMINAL_ANSWER_OPTIONS = Object.freeze({
+  disposition: Object.freeze({ reason: "handed_to_terminal", decided: true }),
+});
+const SESSION_ENDED_OPTIONS = Object.freeze({
+  disposition: Object.freeze({ reason: "agent_gone", decided: false }),
+});
+
 // /state POST body size cap. Raised 1024 → 4096 → 16384: a CJK
 // assistant_last_output (3 UTF-8 bytes/char) on a Stop completion blew past
 // 4096, and the server's headerless 413 made the hook read posted=false, so the
@@ -983,7 +990,12 @@ function handleStatePost(req, res, options) {
           const behavior = typeof behaviorFor === "function"
             ? behaviorFor(candidates[0])
             : behaviorFor;
-          ctx.resolvePermissionEntry(candidates[0], behavior, message);
+          ctx.resolvePermissionEntry(
+            candidates[0],
+            behavior,
+            message,
+            NATIVE_TERMINAL_ANSWER_OPTIONS
+          );
         };
         const permissionLifecycleEvent = event === "PostToolUse"
           || event === "PostToolUseFailure"
@@ -1007,7 +1019,12 @@ function handleStatePost(req, res, options) {
             allowSingletonFallback: event === "Stop" && !isRetiredClaudePhase,
           });
           if (perm) {
-            ctx.resolvePermissionEntry(perm, stateSweepBehaviorFor(perm), "User answered in terminal");
+            ctx.resolvePermissionEntry(
+              perm,
+              stateSweepBehaviorFor(perm),
+              "User answered in terminal",
+              NATIVE_TERMINAL_ANSWER_OPTIONS
+            );
           }
           // A later hook event may be the only evidence that the user answered
           // a decision in the agent's native terminal UI. Never sweep across
@@ -1043,7 +1060,12 @@ function handleStatePost(req, res, options) {
           for (const stale of sessionEndPending.filter((entry) => (
             isDecisionInteraction(entry.interaction)
           ))) {
-            ctx.resolvePermissionEntry(stale, "no-decision", "Session ended");
+            ctx.resolvePermissionEntry(
+              stale,
+              "no-decision",
+              "Session ended",
+              SESSION_ENDED_OPTIONS
+            );
           }
         } else if (hasExplicitPermissionLifecycleSession && !isRetiredClaudePhase && (
           event === "UserPromptSubmit"

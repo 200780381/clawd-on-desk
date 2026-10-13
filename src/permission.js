@@ -16,12 +16,14 @@ const { MAC_TOPMOST_LEVEL } = require("./topmost-runtime");
 const { redactSecrets } = require("./secret-redact");
 const path = require("path");
 const http = require("http");
-const { timingSafeEqual } = require("crypto");
+const crypto = require("crypto");
+const { timingSafeEqual } = crypto;
 const {
   CLAWD_SERVER_HEADER,
   CLAWD_SERVER_ID,
 } = require("../hooks/server-config");
 const { isOpencodeFamilyEntry, getFamilyConfig } = require("../agents/opencode-family");
+const { getAgent } = require("../agents/registry");
 const { isPassiveNotifyEntry } = require("./passive-notify-entry");
 const { validateQuestionAnswers } = require("./agent-question-wire");
 const { reminderHolds } = require("./permission-reminder");
@@ -814,6 +816,13 @@ const t = createTranslator(() => ctx.lang);
 // Each entry: { res, abortHandler, suggestions, sessionId, bubble, hideTimer, toolName, toolInput, resolvedSuggestion, createdAt, measuredHeight }
 const pendingPermissions = [];
 let expandedPermissionEntry = null;
+// Presentation/projection state is owned beside pendingPermissions. Raw
+// permission entries never cross this boundary: consumers receive only frozen,
+// scalar-only records from permissionObservation below.
+const presentationByEntry = new WeakMap();
+const mobilePermissionProjection = new Map();
+const mobilePermissionSubscribers = new Set();
+let mobilePermissionObservationEnabled = false;
 // Keep windows independently of pendingPermissions so Orbit continues avoiding
 // a bubble during its 250ms fade-out after the request has already been removed
 // from the pending list.
@@ -904,6 +913,190 @@ function isHotkeyActionablePermission(permission) {
     )
     && !isDecisionInteraction(permission.interaction)
   );
+}
+
+function isActionablePermissionEntry(entry) {
+  return !isPassiveNotifyEntry(entry)
+    && isValidInteraction(entry && entry.interaction)
+    && entry.interaction.capabilities.allowDeny === true
+    && !isDecisionInteraction(entry.interaction);
+}
+
+function frozenMobilePermissionFeature() {
+  return Object.freeze({
+    supported: true,
+    enabled: mobilePermissionObservationEnabled,
+  });
+}
+
+function frozenProjectionRecords() {
+  const records = [...mobilePermissionProjection.values()];
+  records.sort((left, right) => (
+    left.presentedAt - right.presentedAt
+    || left.requestId.localeCompare(right.requestId)
+  ));
+  return Object.freeze(records);
+}
+
+function mobilePermissionLog(message) {
+  try {
+    permLog(message);
+  } catch {
+    // Observation diagnostics must not affect permission decision/fallback
+    // semantics, even if the optional rotating debug log is unavailable.
+  }
+}
+
+function emitMobilePermissionObservation(event) {
+  const frozenEvent = Object.freeze(event);
+  for (const listener of [...mobilePermissionSubscribers]) {
+    try {
+      listener(frozenEvent);
+    } catch {
+      mobilePermissionLog(`mobile permission observer callback failed type=${event.type}`);
+    }
+  }
+}
+
+function isCurrentMobilePresentation(entry, marker = presentationByEntry.get(entry)) {
+  if (!entry || !marker || !pendingPermissions.includes(entry)) return false;
+  if (!isActionablePermissionEntry(entry)) return false;
+  if (entry.remoteOnly === true || entry._delayedResolve === true) return false;
+  if (isPermissionEntryHeadless(entry)) return false;
+  const agent = getAgent(typeof entry.agentId === "string" ? entry.agentId : "");
+  if (!agent || agent.capabilities.mobilePermissionObservation !== true) return false;
+  if (!entry.bubble || marker.bubble !== entry.bubble) return false;
+  try {
+    if (typeof marker.bubble.isDestroyed === "function" && marker.bubble.isDestroyed()) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function buildMobilePermissionRecord(entry, marker) {
+  const session = ctx.sessions && typeof ctx.sessions.get === "function"
+    ? ctx.sessions.get(entry.sessionId)
+    : null;
+  return Object.freeze({
+    requestId: marker.requestId,
+    agentId: compactRemoteApprovalText(entry.agentId || "", 80),
+    toolName: compactRemoteApprovalText(entry.toolName || t("approvalUnknownTool"), 80),
+    summary: buildRemoteApprovalSummary(entry),
+    folder: compactRemoteApprovalText(
+      basenameForDisplay((session && session.cwd) || entry.cwd || ""),
+      80
+    ),
+    presentedAt: marker.presentedAt,
+  });
+}
+
+function publishMobilePermissionEntry(entry, { emit = true } = {}) {
+  if (!mobilePermissionObservationEnabled) return null;
+  const marker = presentationByEntry.get(entry);
+  if (!isCurrentMobilePresentation(entry, marker)) return null;
+  if (mobilePermissionProjection.has(marker.requestId)) {
+    return mobilePermissionProjection.get(marker.requestId);
+  }
+  let record;
+  try {
+    record = buildMobilePermissionRecord(entry, marker);
+  } catch {
+    mobilePermissionLog(`mobile permission publish failed requestId=${marker.requestId}`);
+    return null;
+  }
+  mobilePermissionProjection.set(marker.requestId, record);
+  mobilePermissionLog(`mobile permission publish requestId=${record.requestId} agent=${record.agentId} tool=${record.toolName}`);
+  if (emit) emitMobilePermissionObservation({ type: "upsert", record });
+  return record;
+}
+
+function markMobilePermissionPresented(entry, bubble) {
+  try {
+    let marker = presentationByEntry.get(entry);
+    if (!marker) {
+      marker = Object.freeze({
+        bubble,
+        requestId: crypto.randomBytes(16).toString("hex"),
+        presentedAt: Date.now(),
+      });
+      presentationByEntry.set(entry, marker);
+    }
+    publishMobilePermissionEntry(entry);
+    return marker;
+  } catch {
+    // Observation is strictly advisory. Marker generation/projection failures
+    // must never affect the blocking permission request or its fallback path.
+    mobilePermissionLog("mobile permission presentation marker failed");
+    return null;
+  }
+}
+
+function replaceMobilePermissionProjection(enabled) {
+  mobilePermissionProjection.clear();
+  if (enabled) {
+    for (const entry of pendingPermissions) publishMobilePermissionEntry(entry, { emit: false });
+  }
+  const feature = frozenMobilePermissionFeature();
+  const records = frozenProjectionRecords();
+  mobilePermissionLog(`mobile permission replace enabled=${feature.enabled} count=${records.length}`);
+  emitMobilePermissionObservation({ type: "replace", feature, records });
+}
+
+const permissionObservation = Object.freeze({
+  setEnabled(enabled) {
+    const next = enabled === true;
+    if (next === mobilePermissionObservationEnabled) return;
+    mobilePermissionObservationEnabled = next;
+    replaceMobilePermissionProjection(next);
+  },
+  snapshot() {
+    return Object.freeze({
+      feature: frozenMobilePermissionFeature(),
+      records: frozenProjectionRecords(),
+    });
+  },
+  subscribe(listener) {
+    if (typeof listener !== "function") throw new TypeError("permissionObservation.subscribe requires a listener");
+    mobilePermissionSubscribers.add(listener);
+    return () => mobilePermissionSubscribers.delete(listener);
+  },
+});
+
+function observationDisposition(reason, decided, changeReason) {
+  return Object.freeze({ reason, decided: decided === true, changeReason });
+}
+
+function resolutionOptions(reason, decided) {
+  return Object.freeze({
+    disposition: Object.freeze({ reason, decided: decided === true }),
+  });
+}
+
+function retractMobilePermissionEntry(entry, disposition) {
+  const marker = presentationByEntry.get(entry);
+  if (!marker || !mobilePermissionProjection.delete(marker.requestId)) return;
+  const reason = disposition && disposition.reason ? disposition.reason : "cancelled";
+  const decided = !!(disposition && disposition.decided === true);
+  mobilePermissionLog(`mobile permission retract requestId=${marker.requestId} reason=${reason} decided=${decided}`);
+  emitMobilePermissionObservation({
+    type: "retract",
+    requestId: marker.requestId,
+    reason,
+    decided,
+  });
+}
+
+function detachPendingPermission(entry, disposition) {
+  const idx = pendingPermissions.indexOf(entry);
+  if (idx === -1) return false;
+  pendingPermissions.splice(idx, 1);
+  retractMobilePermissionEntry(entry, disposition);
+
+  notifyPermissionsChanged(
+    disposition && disposition.changeReason ? disposition.changeReason : "removed"
+  );
+  return true;
 }
 
 function getActionablePermissions() {
@@ -1119,7 +1312,7 @@ function hotkeyResolve(behavior, message) {
   const perm = getHotkeyTargetPermission();
   if (!perm) return;
   captureFrontApp((appName) => {
-    resolvePermissionEntry(perm, behavior, message);
+    resolvePermissionEntry(perm, behavior, message, resolutionOptions("resolved", true));
     if (appName) {
       setTimeout(() => restoreFrontApp(appName), RESTORE_FOCUS_DELAY_MS);
     }
@@ -2454,7 +2647,12 @@ function maybeAutoApprovePermission(permEntry) {
   }
 
   permLog(`permission automation: mode=${mode} action=${action} intent=${permEntry.interaction.intent} tool=${permEntry.toolName} session=${permEntry.sessionId} agent=${permEntry.agentId || "claude-code"}`);
-  resolvePermissionEntry(permEntry, "allow");
+  resolvePermissionEntry(
+    permEntry,
+    "allow",
+    undefined,
+    resolutionOptions("resolved", true)
+  );
   return true;
 }
 
@@ -2470,7 +2668,12 @@ function handlePermissionBubbleFailure(permEntry, reason) {
     return true;
   }
   permLog(`permission bubble failed; returning no-decision: ${reason} tool=${permEntry.toolName} session=${permEntry.sessionId} agent=${permEntry.agentId || "unknown"}`);
-  resolvePermissionEntry(permEntry, "no-decision", reason);
+  resolvePermissionEntry(
+    permEntry,
+    "no-decision",
+    reason,
+    resolutionOptions("cancelled", false)
+  );
   return true;
 }
 
@@ -2556,7 +2759,15 @@ function showPermissionBubble(permEntry) {
       // stale partition-persisted factor must never win over prefs.
       const geometry = createPresentationGeometry();
       if (geometry) applyZoomToWindow(bub, geometry.scale);
-      syncPermissionBubbleContent(permEntry);
+      let contentSent = false;
+      try {
+        contentSent = syncPermissionBubbleContent(permEntry) === true;
+      } catch {
+        // Observation must never turn a renderer-send failure into a permission
+        // decision or fallback. The existing request remains pending.
+        mobilePermissionLog("mobile permission presentation sync failed");
+      }
+      if (contentSent) markMobilePermissionPresented(permEntry, bub);
       // Loading provides another natural placement attempt if the owner or a
       // native bounds write was temporarily unavailable during creation.
       reconcilePermissionPresentation("bubble-ready");
@@ -2587,7 +2798,14 @@ function showPermissionBubble(permEntry) {
           || permEntry.isDsh
           || isOpencodeFamilyEntry(permEntry)
         ) ? "no-decision" : "deny";
-        resolvePermissionEntry(permEntry, behavior, "Bubble window closed by user");
+        resolvePermissionEntry(
+          permEntry,
+          behavior,
+          "Bubble window closed by user",
+          behavior === "deny"
+            ? resolutionOptions("resolved", true)
+            : resolutionOptions("handed_to_terminal", false)
+        );
       }
       repositionDependentBubbles();
     });
@@ -2730,7 +2948,12 @@ function dismissPermissionWithoutDecision(permEntry, message) {
   const idx = pendingPermissions.indexOf(permEntry);
   if (idx === -1) return;
   permLog(`auto-close dismiss: tool=${permEntry.toolName} session=${permEntry.sessionId} agent=${permEntry.agentId || "claude-code"}`);
-  resolvePermissionEntry(permEntry, "no-decision", message || "Auto-closed");
+  resolvePermissionEntry(
+    permEntry,
+    "no-decision",
+    message || "Auto-closed",
+    resolutionOptions("timeout", false)
+  );
 }
 
 function notifyPermissionsChanged(reason) {
@@ -2790,11 +3013,10 @@ function addPendingPermission(permEntry, reason = "added") {
 }
 
 function removePendingPermission(permEntry, reason = "removed") {
-  const idx = pendingPermissions.indexOf(permEntry);
-  if (idx === -1) return false;
-  pendingPermissions.splice(idx, 1);
-  notifyPermissionsChanged(reason);
-  return true;
+  return detachPendingPermission(
+    permEntry,
+    observationDisposition("cancelled", false, reason)
+  );
 }
 
 // Called by settings-effect-router after permissionBubbleAutoCloseSeconds
@@ -3458,7 +3680,12 @@ function hidePermissionBubbleSafely(permEntry) {
 function dismissPermissionForTerminal(perm) {
   if (!perm) return;
   if (perm.remoteOnly) {
-    resolvePermissionEntry(perm, "no-decision", "Go to terminal from remote approval");
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      "Go to terminal from remote approval",
+      resolutionOptions("handed_to_terminal", false)
+    );
     ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
     return;
   }
@@ -3473,10 +3700,10 @@ function dismissPermissionForTerminal(perm) {
     outcome: remoteOutcome,
     skipClientName: perm.remoteApprovalSkipClientName,
   });
-  const idx = pendingPermissions.indexOf(perm);
-  if (idx !== -1) {
-    pendingPermissions.splice(idx, 1);
-    notifyPermissionsChanged("deny-and-focus");
+  if (detachPendingPermission(
+    perm,
+    observationDisposition("handed_to_terminal", false, "deny-and-focus")
+  )) {
     notifyPermissionResolved(perm, "deny-and-focus");
   }
   const { res, abortHandler } = perm;
@@ -3536,7 +3763,12 @@ function maybeStartRemoteApproval(permEntry) {
     if (settledWithoutDecision < remoteRequests.length) return;
     if (pendingPermissions.indexOf(permEntry) === -1) return;
     permLog(`remote-only approval: all remote requests settled without a decision, falling back (tool=${permEntry.toolName} session=${permEntry.sessionId})`);
-    resolvePermissionEntry(permEntry, "no-decision", "Remote approval unavailable; no client returned a decision");
+    resolvePermissionEntry(
+      permEntry,
+      "no-decision",
+      "Remote approval unavailable; no client returned a decision",
+      resolutionOptions("cancelled", false)
+    );
   }
 
   for (const { name, client } of clients) {
@@ -3743,15 +3975,30 @@ function handleRemoteApprovalDecision(
         // Hermes treats an explicit deny as "clarification cancelled"; only a
         // no-decision (204) falls back to its native terminal prompt, which is
         // what "go to terminal" means here.
-        resolvePermissionEntry(permEntry, "no-decision", "Go to terminal from remote approval");
+        resolvePermissionEntry(
+          permEntry,
+          "no-decision",
+          "Go to terminal from remote approval",
+          resolutionOptions("handed_to_terminal", false)
+        );
         ctx.focusTerminalForSession(permEntry.sessionId, { fallbackEntry: buildPermissionFocusEntry(permEntry) });
         return true;
       }
-      resolvePermissionEntry(permEntry, "deny", "User answered in terminal");
+      resolvePermissionEntry(
+        permEntry,
+        "deny",
+        "User answered in terminal",
+        resolutionOptions("handed_to_terminal", false)
+      );
       return true;
     }
     if (permEntry.isCodex || permEntry.isQwenCode || permEntry.isAntigravity || permEntry.isZcode || permEntry.isDsh) {
-      resolvePermissionEntry(permEntry, "no-decision", "Go to terminal from remote approval");
+      resolvePermissionEntry(
+        permEntry,
+        "no-decision",
+        "Go to terminal from remote approval",
+        resolutionOptions("handed_to_terminal", false)
+      );
       ctx.focusTerminalForSession(permEntry.sessionId, { fallbackEntry: buildPermissionFocusEntry(permEntry) });
     } else {
       dismissPermissionForTerminal(permEntry);
@@ -3785,7 +4032,12 @@ function handleRemoteApprovalDecision(
       actionLabel: "提交输入",
       source,
     }, sourceName);
-    resolvePermissionEntry(permEntry, "allow");
+    resolvePermissionEntry(
+      permEntry,
+      "allow",
+      undefined,
+      resolutionOptions("resolved", true)
+    );
     return true;
   }
 
@@ -3800,7 +4052,12 @@ function handleRemoteApprovalDecision(
       actionLabel: label,
       source,
     }, sourceName);
-    resolvePermissionEntry(permEntry, "allow");
+    resolvePermissionEntry(
+      permEntry,
+      "allow",
+      undefined,
+      resolutionOptions("resolved", true)
+    );
     return true;
   }
 
@@ -3809,7 +4066,12 @@ function handleRemoteApprovalDecision(
     actionLabel: remoteApprovalDecisionLabel(decision),
     source,
   }, sourceName);
-  resolvePermissionEntry(permEntry, decision);
+  resolvePermissionEntry(
+    permEntry,
+    decision,
+    undefined,
+    resolutionOptions("resolved", true)
+  );
   return true;
 }
 
@@ -3839,7 +4101,7 @@ function applyPermissionSuggestion(perm, index, options = {}) {
   return resolved || !options.requireResolved;
 }
 
-  function resolvePermissionEntry(permEntry, behavior, message) {
+  function resolvePermissionEntry(permEntry, behavior, message, options = {}) {
     // Codex notify bubbles have no HTTP connection — route to dedicated cleanup
     if (isPassiveNotifyEntry(permEntry)) {
       dismissPassiveNotify(permEntry, `resolve:${behavior || "unknown"}`);
@@ -3884,12 +4146,20 @@ function applyPermissionSuggestion(perm, index, options = {}) {
   const isAutoResolve = message === "Client disconnected";
   if (isAutoResolve && permEntry.bubble && age < MIN_BUBBLE_DISPLAY_MS && !permEntry._delayedResolve) {
     permEntry._delayedResolve = true;
-    permEntry._delayTimer = setTimeout(() => resolvePermissionEntry(permEntry, behavior, message), MIN_BUBBLE_DISPLAY_MS - age);
+    permEntry._delayTimer = setTimeout(
+      () => resolvePermissionEntry(permEntry, behavior, message, options),
+      MIN_BUBBLE_DISPLAY_MS - age
+    );
     return;
   }
 
-  pendingPermissions.splice(idx, 1);
-  notifyPermissionsChanged("resolved");
+  const disposition = options && options.disposition && typeof options.disposition === "object"
+    ? options.disposition
+    : { reason: "cancelled", decided: false };
+  if (!detachPendingPermission(
+    permEntry,
+    observationDisposition(disposition.reason, disposition.decided, "resolved")
+  )) return;
   notifyPermissionResolved(permEntry, "resolved");
 
   if (permEntry.autoCloseTimer) {
@@ -4716,6 +4986,10 @@ function handleDecide(event, behavior) {
   const perm = pendingPermissions.find(p => p.bubble === senderWin);
   permLog(`IPC permission-decide: behavior=${behavior} matched=${!!perm}`);
   if (!perm) return;
+  const resolvedDecisionOptions = resolutionOptions("resolved", true);
+  const unsupportedActionOptions = behavior === "deny-and-focus"
+    ? resolutionOptions("handed_to_terminal", false)
+    : resolutionOptions("cancelled", false);
   if (perm.isCodexUserInputNotify) {
     dismissPassiveNotify(perm, "ipc-decide");
     if (behavior === "codex-user-input-focus" && !perm.host) {
@@ -4761,13 +5035,18 @@ function handleDecide(event, behavior) {
   }
   if (perm.isCodex) {
     if (behavior === "allow" || behavior === "deny") {
-      resolvePermissionEntry(perm, behavior);
+      resolvePermissionEntry(perm, behavior, undefined, resolvedDecisionOptions);
       return;
     }
     // Codex is blocking on the hook socket. UI actions that mean "handle it
     // elsewhere" must answer no-decision immediately instead of leaving the
     // hook parked until its long timeout.
-    resolvePermissionEntry(perm, "no-decision", `Unsupported Codex bubble action: ${String(behavior)}`);
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      `Unsupported Codex bubble action: ${String(behavior)}`,
+      unsupportedActionOptions
+    );
     if (behavior === "deny-and-focus") {
       ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
     }
@@ -4775,10 +5054,15 @@ function handleDecide(event, behavior) {
   }
   if (perm.isQwenCode) {
     if (behavior === "allow" || behavior === "deny") {
-      resolvePermissionEntry(perm, behavior);
+      resolvePermissionEntry(perm, behavior, undefined, resolvedDecisionOptions);
       return;
     }
-    resolvePermissionEntry(perm, "no-decision", `Unsupported Qwen bubble action: ${String(behavior)}`);
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      `Unsupported Qwen bubble action: ${String(behavior)}`,
+      unsupportedActionOptions
+    );
     if (behavior === "deny-and-focus") {
       ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
     }
@@ -4797,7 +5081,7 @@ function handleDecide(event, behavior) {
   }
   if (perm.isCopilotCli) {
     if (behavior === "allow" || behavior === "deny") {
-      resolvePermissionEntry(perm, behavior);
+      resolvePermissionEntry(perm, behavior, undefined, resolvedDecisionOptions);
       return;
     }
     // Mirror Codex/Qwen: any non-allow/deny UI action (deny-and-focus,
@@ -4805,14 +5089,24 @@ function handleDecide(event, behavior) {
     // simple {behavior, message} wire format. Resolve as no-decision so
     // the hook returns empty stdout and Copilot's native menu owns the
     // call rather than the bubble parking until timeout.
-    resolvePermissionEntry(perm, "no-decision", `Unsupported Copilot bubble action: ${String(behavior)}`);
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      `Unsupported Copilot bubble action: ${String(behavior)}`,
+      unsupportedActionOptions
+    );
     if (behavior === "deny-and-focus") {
       ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
     }
     return;
   }
   if (perm.isAntigravity && behavior !== "allow" && behavior !== "deny") {
-    resolvePermissionEntry(perm, "no-decision", `Unsupported Antigravity bubble action: ${String(behavior)}`);
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      `Unsupported Antigravity bubble action: ${String(behavior)}`,
+      unsupportedActionOptions
+    );
     if (behavior === "deny-and-focus") {
       ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
     }
@@ -4820,15 +5114,20 @@ function handleDecide(event, behavior) {
   }
   if (perm.isDsh) {
     if (behavior === "allow" || behavior === "deny") {
-      resolvePermissionEntry(perm, behavior);
+      resolvePermissionEntry(perm, behavior, undefined, resolvedDecisionOptions);
       return;
     }
-    resolvePermissionEntry(perm, "no-decision", `Unsupported DSH bubble action: ${String(behavior)}`);
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      `Unsupported DSH bubble action: ${String(behavior)}`,
+      unsupportedActionOptions
+    );
     return;
   }
   if (perm.isHermes) {
     if (behavior === "allow" || behavior === "deny") {
-      resolvePermissionEntry(perm, behavior);
+      resolvePermissionEntry(perm, behavior, undefined, resolvedDecisionOptions);
       return;
     }
     if (
@@ -4846,21 +5145,31 @@ function handleDecide(event, behavior) {
       );
       if (!validatedAnswers.ok) {
         permLog(`desktop Hermes elicitation rejected: ${validatedAnswers.reason}`);
-        resolvePermissionEntry(perm, "no-decision", validatedAnswers.reason);
+        resolvePermissionEntry(
+          perm,
+          "no-decision",
+          validatedAnswers.reason,
+          resolutionOptions("cancelled", false)
+        );
         return;
       }
       perm.resolvedUpdatedInput = buildElicitationUpdatedInput(
         wireInput,
         validatedAnswers.answers
       );
-      resolvePermissionEntry(perm, "allow");
+      resolvePermissionEntry(perm, "allow", undefined, resolvedDecisionOptions);
       return;
     }
     // Hermes' opt-in permission gate has no native approval prompt. The plugin
     // maps no-decision to a retryable block, while clarify elicitation maps it
     // to Hermes' native clarification UI. This branch backstops unknown/legacy
     // actions without fabricating allow or deny.
-    resolvePermissionEntry(perm, "no-decision", `Unsupported Hermes bubble action: ${String(behavior)}`);
+    resolvePermissionEntry(
+      perm,
+      "no-decision",
+      `Unsupported Hermes bubble action: ${String(behavior)}`,
+      unsupportedActionOptions
+    );
     if (behavior === "deny-and-focus") {
       ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
     }
@@ -4881,14 +5190,19 @@ function handleDecide(event, behavior) {
     );
     if (!validatedAnswers.ok) {
       permLog(`desktop elicitation rejected: ${validatedAnswers.reason}`);
-      resolvePermissionEntry(perm, "no-decision", validatedAnswers.reason);
+      resolvePermissionEntry(
+        perm,
+        "no-decision",
+        validatedAnswers.reason,
+        resolutionOptions("cancelled", false)
+      );
       return;
     }
     perm.resolvedUpdatedInput = buildElicitationUpdatedInput(
       wireInput,
       validatedAnswers.answers
     );
-    resolvePermissionEntry(perm, "allow");
+    resolvePermissionEntry(perm, "allow", undefined, resolvedDecisionOptions);
     return;
   }
   // Plan feedback: "Tell Claude what to change" textarea submitted from the
@@ -4912,27 +5226,45 @@ function handleDecide(event, behavior) {
     }
     if (feedback.length > PLAN_FEEDBACK_MAX_LENGTH) {
       permLog(`desktop plan feedback rejected: exceeds ${PLAN_FEEDBACK_MAX_LENGTH} characters`);
-      resolvePermissionEntry(perm, "no-decision", "Plan feedback is too long");
+      resolvePermissionEntry(
+        perm,
+        "no-decision",
+        "Plan feedback is too long",
+        resolutionOptions("cancelled", false)
+      );
       return;
     }
-    resolvePermissionEntry(perm, "deny", feedback);
+    resolvePermissionEntry(perm, "deny", feedback, resolvedDecisionOptions);
     return;
   }
   // opencode-family "Always" button — map to reply="always" via resolvePermissionEntry
   if (behavior === "family-always") {
     perm.familyAlwaysPicked = true;
-    resolvePermissionEntry(perm, "allow");
+    resolvePermissionEntry(perm, "allow", undefined, resolvedDecisionOptions);
     return;
   }
   // "suggestion:N" — user picked a permission suggestion
   if (typeof behavior === "string" && behavior.startsWith("suggestion:")) {
     const idx = parseInt(behavior.split(":")[1], 10);
-    if (!applyPermissionSuggestion(perm, idx)) { resolvePermissionEntry(perm, "deny", "Invalid suggestion index"); return; }
-    resolvePermissionEntry(perm, "allow");
+    if (!applyPermissionSuggestion(perm, idx)) {
+      resolvePermissionEntry(
+        perm,
+        "deny",
+        "Invalid suggestion index",
+        resolutionOptions("resolved", true)
+      );
+      return;
+    }
+    resolvePermissionEntry(perm, "allow", undefined, resolvedDecisionOptions);
   } else if (behavior === "deny-and-focus") {
     dismissPermissionForTerminal(perm);
   } else {
-    resolvePermissionEntry(perm, behavior === "allow" ? "allow" : "deny");
+    resolvePermissionEntry(
+      perm,
+      behavior === "allow" ? "allow" : "deny",
+      undefined,
+      resolvedDecisionOptions
+    );
   }
 }
 
@@ -5126,13 +5458,14 @@ function findKimiNotifyEntryBySession(sessionId) {
 }
 
 function dismissPassiveNotify(permEntry, reason = "unknown") {
-  const idx = pendingPermissions.indexOf(permEntry);
-  if (idx === -1) return;
+  if (!pendingPermissions.includes(permEntry)) return;
   permLog(
     `passive notify dismiss: agent=${getPassiveNotifyAgentId(permEntry)} session=${permEntry.sessionId || "(none)"} reason=${reason}`
   );
-  pendingPermissions.splice(idx, 1);
-  notifyPermissionsChanged("passive-dismissed");
+  detachPendingPermission(
+    permEntry,
+    observationDisposition("cancelled", false, "passive-dismissed")
+  );
   if (permEntry.autoExpireTimer) clearTimeout(permEntry.autoExpireTimer);
   if (permEntry.hideTimer) clearTimeout(permEntry.hideTimer);
   hidePermissionBubbleSafely(permEntry);
@@ -5183,11 +5516,10 @@ function refreshPassiveNotifyAutoClose() {
 }
 
 function dismissInteractivePermissionWithoutDecision(perm, reason) {
-  const idx = pendingPermissions.indexOf(perm);
-  if (idx !== -1) {
-    pendingPermissions.splice(idx, 1);
-    notifyPermissionsChanged("dismissed");
-  }
+  detachPendingPermission(
+    perm,
+    observationDisposition("suppressed", false, "dismissed")
+  );
   cancelRemoteApproval(perm);
   if (perm._delayTimer) { clearTimeout(perm._delayTimer); perm._delayTimer = null; }
   if (perm.autoCloseTimer) { clearTimeout(perm.autoCloseTimer); perm.autoCloseTimer = null; }
@@ -5290,9 +5622,12 @@ function dismissOpencodeFamilyPermissionResolvedExternally(identity) {
   // Establish non-liveness first for every exact duplicate. A late click,
   // hotkey, automation callback, or timer will now fail its pending-membership
   // guard before any slower renderer/notification teardown runs.
+  const externalDisposition = observationDisposition("handed_to_terminal", true, "resolved-externally");
   for (const entry of matches) {
     const index = pendingPermissions.indexOf(entry);
-    if (index !== -1) pendingPermissions.splice(index, 1);
+    if (index === -1) continue;
+    pendingPermissions.splice(index, 1);
+    retractMobilePermissionEntry(entry, externalDisposition);
   }
   notifyPermissionsChanged("resolved-externally");
 
@@ -5453,6 +5788,7 @@ function cleanup() {
 
 return {
   showPermissionBubble, resolvePermissionEntry,
+  permissionObservation,
   sendPermissionResponse, repositionBubbles, permLog,
   pendingPermissions, PASSTHROUGH_TOOLS,
   getVisibleBubbleBounds,

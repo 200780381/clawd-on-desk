@@ -55,6 +55,9 @@ const {
 const { sanitizeShadowRecord } = require("./windows-process-chain-shadow-log");
 
 const MAX_PERMISSION_BODY_BYTES = 524288;
+const CLIENT_DISCONNECTED_OPTIONS = Object.freeze({
+  disposition: Object.freeze({ reason: "agent_gone", decided: false }),
+});
 
 // opencode v2 sends a single shell command as tool_input.resource
 // (hooks/opencode-family-plugin/core.mjs buildV2PermissionBody), while the
@@ -529,7 +532,12 @@ function tryRemoteOnlyApproval(ctx, fields) {
     // denied anything. The socket is already closed so no response is sent
     // either way; this only keeps the remote-card status line honest
     // ("no decision" instead of "denied") when the card is cancelled.
-    ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+    ctx.resolvePermissionEntry(
+      permEntry,
+      "no-decision",
+      "Client disconnected",
+      CLIENT_DISCONNECTED_OPTIONS
+    );
   };
   permEntry.abortHandler = abortHandler;
   res.on("close", abortHandler);
@@ -633,13 +641,10 @@ function addPendingPermission(ctx, permEntry) {
 }
 
 function removePendingPermission(ctx, permEntry, reason) {
-  if (typeof ctx.removePendingPermission === "function") {
-    return ctx.removePendingPermission(permEntry, reason);
+  if (typeof ctx.removePendingPermission !== "function") {
+    throw new TypeError("permission route requires ctx.removePendingPermission");
   }
-  const idx = ctx.pendingPermissions.indexOf(permEntry);
-  if (idx === -1) return false;
-  ctx.pendingPermissions.splice(idx, 1);
-  return true;
+  return ctx.removePendingPermission(permEntry, reason);
 }
 
 function handlePermissionPost(req, res, options) {
@@ -1352,7 +1357,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("abortHandler fired (codex)");
-          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -1469,7 +1474,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("abortHandler fired (qwen)");
-          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -1781,7 +1786,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("abortHandler fired (copilot)");
-          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -1940,7 +1945,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("dsh abortHandler fired");
-          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -2092,7 +2097,7 @@ function handlePermissionPost(req, res, options) {
           const abortHandler = () => {
             if (res.writableFinished) return;
             ctx.permLog("hermes abortHandler fired (elicitation)");
-            ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+            ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
           };
           permEntry.abortHandler = abortHandler;
           res.on("close", abortHandler);
@@ -2160,7 +2165,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("hermes abortHandler fired");
-          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -2372,7 +2377,7 @@ function handlePermissionPost(req, res, options) {
         const abortHandler = () => {
           if (res.writableFinished) return;
           ctx.permLog("abortHandler fired (elicitation)");
-          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+          ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
         };
         permEntry.abortHandler = abortHandler;
         res.on("close", abortHandler);
@@ -2425,7 +2430,7 @@ function handlePermissionPost(req, res, options) {
       const abortHandler = () => {
         if (res.writableFinished) return;
         ctx.permLog("abortHandler fired");
-        ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected");
+        ctx.resolvePermissionEntry(permEntry, "no-decision", "Client disconnected", CLIENT_DISCONNECTED_OPTIONS);
       };
       permEntry.abortHandler = abortHandler;
       res.on("close", abortHandler);
