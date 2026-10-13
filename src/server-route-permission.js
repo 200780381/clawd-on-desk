@@ -162,10 +162,11 @@ function shouldInterceptCodexPermission(ctx, data) {
     && ctx.isCodexPermissionInterceptEnabled();
 }
 
-// Auto hands shell/file requests without human-reviewer evidence (remote,
-// WSL, automatic reviewer, missing transcript) back to Codex. When the
-// user's global automation would allow the request on the spot, Clawd
-// answers it instead, as Intercept did before Auto (#1186). Anything that
+// Auto hands remote and WSL shell/file requests back to Codex because their
+// transcript is not readable here. When the user's global automation would
+// allow such a request on the spot, Clawd answers it instead, as Intercept
+// did before Auto (#1186). Only the nonlocal reason qualifies: a local
+// automatic reviewer was chosen in Codex and stays in charge. Anything that
 // would wait for a human still goes to Codex, and MCP/app requests stay
 // native because they can carry their own reviewer.
 function shouldClaimCodexPermissionForAutomation(ctx, data, probe) {
@@ -174,9 +175,8 @@ function shouldClaimCodexPermissionForAutomation(ctx, data, probe) {
     || ctx.getCodexPermissionMode() !== "auto") return false;
   if (typeof ctx.wouldAutoAllowPermission !== "function") return false;
   if (shouldBypassCodexBubble(ctx)) return false;
-  if (ctx.wouldAutoAllowPermission(probe) !== true) return false;
-  // A human-reviewed turn takes the ordinary Auto path below.
-  return resolveCodexApprovalRoute(data).owner !== "clawd";
+  if (resolveCodexApprovalRoute(data).reason !== "nonlocal") return false;
+  return ctx.wouldAutoAllowPermission(probe) === true;
 }
 
 function shouldMuteCodexNativeNotificationSound(ctx) {

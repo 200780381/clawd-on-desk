@@ -2592,10 +2592,10 @@ function buildAutoApproveElicitationAnswers(toolInput) {
   return answers;
 }
 
-// Codex Auto routing hands a request back to Codex when Clawd cannot see
-// a human reviewer (remote/WSL, automatic reviewer, missing transcript). A
-// user who turned on global automation still expects Clawd to allow those
-// tool requests, as Intercept did before Auto (#1186). The route asks this
+// Codex Auto routing hands remote/WSL requests back to Codex because their
+// transcript is not readable here. A user who turned on global automation
+// still expects Clawd to allow those tool requests, as Intercept did before
+// Auto (#1186). The route asks this
 // before claiming such a request: only an immediate global auto-allow
 // qualifies. Session overrides and interactive subagents need the live gate
 // on a real pending entry, and a held or deferred request must stay with

@@ -80,3 +80,34 @@ test("Auto lets global automation allow a WSL Bash request", async (t) => {
   assert.equal(native.body, "");
   assert.equal(h.permission.pendingPermissions.length, 0);
 });
+
+test("Auto keeps a local automatic reviewer in charge even with global automation on", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-routing-http-"));
+  const prior = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  fs.mkdirSync(path.join(home, "sessions"));
+  const sid = "01a119d3-1893-7f42-aadc-fa33ca4166a8";
+  const turn = "01a119d7-24b5-7010-9da2-d8791ff8a1d1";
+  const file = path.join(home, "sessions", "rollout-" + sid + ".jsonl");
+  fs.writeFileSync(file, [
+    JSON.stringify({ type: "session_meta", payload: { id: sid } }),
+    JSON.stringify({ type: "turn_context", payload: { turn_id: turn,
+      approvals_reviewer: "auto_review", approval_policy: "on-request" } }),
+  ].join("\n") + "\n");
+  const h = await createPermissionIngressHarness({ render: true, ctxOverrides: {
+    getCodexPermissionMode: () => "auto",
+    getEffectivePermissionAutomationMode: () => "auto-tools",
+  } });
+  t.after(async () => {
+    await h.close();
+    if (prior === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prior;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const native = await postPermission(h.port, { agent_id: "codex", hook_source: "codex-official",
+    session_id: "codex:" + sid, turn_id: turn, permission_mode: "default", transcript_path: file,
+    tool_name: "Bash", tool_input: { command: "echo harmless" } }).response;
+  assert.equal(native.status, 204);
+  assert.equal(native.body, "");
+  assert.equal(h.permission.pendingPermissions.length, 0);
+});
