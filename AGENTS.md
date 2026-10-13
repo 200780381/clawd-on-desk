@@ -252,6 +252,7 @@ Copilot CLI 同步走 `<COPILOT_HOME 或 ~/.copilot>/hooks/hooks.json`，marker-
 ## High-Risk Gotchas
 
 - `src/pet-window-runtime.js` 的 `hitWin` 在 Windows 有原生 activation controller 时必须以 Electron `focusable:false` 创建，并只用 `src/win-hit-window-activation.js` 切换 `WS_EX_NOACTIVATE`；controller / Koffi 不可用时回退到旧的 `focusable:true` 构造以保住桌面点击与拖拽，但该降级不提供全屏防抢焦点保证。不得在运行时改回 `BrowserWindow.setFocusable(false)`，其 `Focus(false)` 副作用会打断前台全屏应用。Linux 保持 non-focusable；macOS 保持既有构造后 `setFocusable(false)` 路径
+- Linux/X11 上桌宠 render window 是 sticky 窗口（#979），必须带 ICCCM `WM_HINTS` input=False（`src/linux-x11-input-hint.js`，在 `createRenderWindow()` 里写入）：否则它一旦获得焦点，mutter 会把它排到所有工作区 MRU 的最前面，之后每次切换工作区都把键盘焦点交给桌宠（#980）。不要改用构造参数 `focusable:false`，Chromium 会把它建成 override-redirect 窗口，z-order 与位置钳制都会变
 - `miniTransitioning` 期间，所有窗口定位路径都必须先检查保护标志，否则 `setPosition()` 可能并发崩
 - DND 会屏蔽 hook 事件并压住 bubble，但**不应替用户做权限决定**：opencode 走 silent drop 回到 TUI 提示，Claude Code / CodeBuddy 走断连回到内置聊天/终端确认，Codex official hook 走 no-decision `{}` 回到原生审批提示；Pi 是 state-only，不进入权限审批链路
 - 隐藏桌宠（petHidden）≠ 免打扰：隐藏只收起宠物/HUD/update bubble/当时 pending 的权限气泡，**隐藏期间新到的权限请求仍照常弹气泡，这是有意设计、不要当 bug 修**；要静默权限气泡走 DND（见上条）。详见 `docs/project/theme-state-ui.md` State Machine 节

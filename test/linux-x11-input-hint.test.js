@@ -8,11 +8,14 @@ const path = require("node:path");
 
 const {
   createLinuxX11InputHint,
+  loadXcbBindings,
   readXid,
   encodeNoInputWmHints,
-  WM_HINTS_INPUT_HINT,
-  WM_HINTS_FIELD_COUNT,
 } = require("../src/linux-x11-input-hint");
+
+// Pinned wire values: ICCCM WM_HINTS is nine CARD32 fields, and InputHint is
+// (1L << 0) in Xutil.h. Only the input field is valid, and it is False.
+const NO_INPUT_WM_HINTS = [1, 0, 0, 0, 0, 0, 0, 0, 0];
 
 // Electron hands back the X11 Window id as a native-endian unsigned long.
 function handleFor(xid, size = 8) {
@@ -83,9 +86,7 @@ function makeBindings({ connectionError = 0, requestError = null } = {}) {
 
 describe("linux-x11-input-hint", () => {
   it("encodes ICCCM WM_HINTS with only the input field set, to False", () => {
-    const fields = decodeFields(encodeNoInputWmHints());
-    assert.equal(fields.length, WM_HINTS_FIELD_COUNT);
-    assert.deepStrictEqual(fields, [WM_HINTS_INPUT_HINT, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepStrictEqual(decodeFields(encodeNoInputWmHints()), NO_INPUT_WM_HINTS);
   });
 
   it("reads the X11 window id from a native-endian handle", () => {
@@ -119,8 +120,8 @@ describe("linux-x11-input-hint", () => {
         property: 35,
         type: 35,
         format: 32,
-        length: WM_HINTS_FIELD_COUNT,
-        fields: [WM_HINTS_INPUT_HINT, 0, 0, 0, 0, 0, 0, 0, 0],
+        length: 9,
+        fields: NO_INPUT_WM_HINTS,
       }],
       ["requestCheck", true, true],
       ["disconnect", true],
@@ -167,7 +168,7 @@ describe("linux-x11-input-hint", () => {
 
     assert.equal(hint.applyNoInputHint(makeWindow()), false);
     assert.deepStrictEqual(bindings.calls.map((call) => call[0]), ["connect", "hasError", "disconnect"]);
-    assert.deepStrictEqual(errors, ["X11 connection failed"]);
+    assert.deepStrictEqual(errors, ["X11 connection failed (xcb_connection_has_error 1)"]);
   });
 
   it("frees and reports a refused request, then disconnects", () => {
@@ -196,33 +197,83 @@ describe("linux-x11-input-hint", () => {
     assert.deepStrictEqual(errors, ["native call failed"]);
   });
 
-  // Binds the real Koffi signatures against the system libxcb, so a typo in a
-  // declaration fails here instead of at runtime. Uses a display that cannot
-  // exist, so it never touches a real X server.
+  // Calls the real Koffi declarations against the system libxcb. Koffi does
+  // not reject a wrong argument count, so the prototypes are compared with the
+  // libxcb C signatures, and the write and check are made on an error
+  // connection (an impossible display): libxcb answers those without I/O, so
+  // the by-value cookie is marshalled both ways without touching an X server.
+  // A Koffi that fails to load on Linux fails this test instead of skipping it.
+  let koffi = null;
+  let koffiLoadError = null;
   let libxcbLoadable = false;
   if (process.platform === "linux") {
     try {
-      require("koffi").load("libxcb.so.1");
-      libxcbLoadable = true;
-    } catch {}
+      koffi = require("koffi");
+    } catch (error) {
+      koffiLoadError = error;
+    }
+    if (koffi) {
+      try {
+        koffi.load("libxcb.so.1");
+        libxcbLoadable = true;
+      } catch {}
+    }
   }
-  it("binds the real libxcb signatures on Linux", { skip: !libxcbLoadable && "needs Linux with libxcb.so.1" }, () => {
+  const realBindingSkip = process.platform !== "linux"
+    ? "Linux only"
+    : (!koffiLoadError && !libxcbLoadable && "needs libxcb.so.1");
+  it("calls the real libxcb bindings with the C prototypes on Linux", { skip: realBindingSkip }, () => {
+    if (koffiLoadError) throw koffiLoadError;
+    const bindings = loadXcbBindings(koffi);
+    const prototype = (fn) => ({
+      args: fn.info.arguments.map((type) => koffi.introspect(type).name),
+      result: koffi.introspect(fn.info.result),
+    });
+
+    assert.deepStrictEqual(prototype(bindings.connect).args, ["char *", "int *"]); // Koffi "str"
+    assert.deepStrictEqual(prototype(bindings.hasError).args, ["void *"]);
+    const change = prototype(bindings.changePropertyChecked);
+    assert.deepStrictEqual(change.args, [
+      "void *", "uint8_t", "uint32_t", "uint32_t", "uint32_t", "uint8_t", "uint32_t", "void *",
+    ]);
+    assert.equal(change.result.size, 4); // xcb_void_cookie_t { unsigned int sequence; }
+    assert.deepStrictEqual(Object.keys(change.result.members), ["sequence"]);
+    const check = prototype(bindings.requestCheck);
+    assert.equal(check.args.length, 2);
+    assert.equal(koffi.introspect(bindings.requestCheck.info.arguments[1]).size, 4);
+    assert.deepStrictEqual(prototype(bindings.freeError).args, ["void *"]);
+    assert.deepStrictEqual(prototype(bindings.disconnect).args, ["void *"]);
+
+    const connection = bindings.connect(":65535", null);
+    try {
+      assert.notEqual(bindings.hasError(connection), 0);
+      const cookie = bindings.changePropertyChecked(
+        connection, 0, 0x1234, 35, 35, 32, 9, encodeNoInputWmHints(),
+      );
+      assert.equal(typeof cookie.sequence, "number");
+      assert.equal(bindings.requestCheck(connection, cookie), null);
+    } finally {
+      bindings.disconnect(connection);
+    }
+
     const errors = [];
     const hint = createLinuxX11InputHint({
       isLinuxX11: true,
       displayName: ":65535",
+      koffi,
       onError: (e) => errors.push(e.message),
     });
-    assert.equal(hint.available, true, errors.join("; "));
+    assert.equal(hint.available, true);
     assert.equal(hint.applyNoInputHint(makeWindow()), false);
-    assert.deepStrictEqual(errors, ["X11 connection failed"]);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /^X11 connection failed \(xcb_connection_has_error [1-7]\)$/);
   });
 
   it("is wired into main.js only for the X11 backend and handed to the render window", () => {
     const mainSource = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
     assert.match(
       mainSource,
-      /createLinuxX11InputHint\(\{\s*isLinuxX11:\s*isLinux && app\.commandLine\.getSwitchValue\("ozone-platform"\) === "x11",/,
+      /createLinuxX11InputHint\(\{\s*isLinuxX11:\s*isLinux && app\.commandLine\.getSwitchValue\("ozone-platform"\) === "x11",\s*displayName:\s*app\.commandLine\.getSwitchValue\("display"\),\s*onError:/,
     );
     const start = mainSource.indexOf("petWindowRuntime.createRenderWindow({");
     const end = mainSource.indexOf("});", start);

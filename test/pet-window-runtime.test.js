@@ -3004,8 +3004,11 @@ describe("pet-window-runtime", () => {
     });
 
     // The sticky render window must never take WM keyboard focus, or mutter's
-    // MRU focus hands it the keyboard on every workspace switch.
-    it("marks the Linux render window no-input before showInactive()", () => {
+    // MRU focus hands it the keyboard on every workspace switch. Today the
+    // constructor has already mapped the window (show defaults to true) and
+    // mutter re-reads the hint; keeping the hint ahead of showInactive() also
+    // puts it before the first map if the window is ever created hidden.
+    it("marks the Linux render window no-input during creation, ahead of showInactive()", () => {
       const harness = createRuntime(LINUX);
       const BrowserWindow = makePatchedBrowserWindow();
       const hinted = [];

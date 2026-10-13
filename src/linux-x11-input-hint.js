@@ -20,9 +20,14 @@ const os = require("os");
 // Chromium create an override-redirect window instead (x11_window.cc: "An
 // in-activatable window should not interact with the system wm"), which would
 // also take the window out of WM stacking and placement. So write ICCCM
-// WM_HINTS { flags: InputHint, input: False } directly. Chromium's own
-// WM_HINTS write (the urgency bit in SetFlashFrameHint) is read-modify-write,
-// so it keeps this flag.
+// WM_HINTS { flags: InputHint, input: False } directly. Replacing the whole
+// property loses nothing: Chromium sets no WM_HINTS when it creates the
+// window, and its only later write (the urgency bit in SetFlashFrameHint) is
+// read-modify-write, so it keeps this flag.
+//
+// The render window is already mapped when this runs (show defaults to true),
+// so mutter picks the hint up from PropertyNotify: it decides every later
+// focus question, not the focus-on-map at creation.
 //
 // XCB rather than Xlib: a failed request comes back from xcb_request_check()
 // as a value, instead of reaching Xlib's default error handler, which exits
@@ -118,8 +123,13 @@ function createLinuxX11InputHint(options = {}) {
       // xcb_connect() never returns NULL: a failure is an error connection,
       // which still has to be disconnected.
       connection = bindings.connect(displayName, null);
-      if (!connection || bindings.hasError(connection)) {
+      if (!connection) {
         reportError(new Error("X11 connection failed"));
+        return false;
+      }
+      const connectionError = bindings.hasError(connection);
+      if (connectionError) {
+        reportError(new Error(`X11 connection failed (xcb_connection_has_error ${connectionError})`));
         return false;
       }
       const cookie = bindings.changePropertyChecked(
@@ -132,8 +142,8 @@ function createLinuxX11InputHint(options = {}) {
         WM_HINTS_FIELD_COUNT,
         encodeNoInputWmHints(),
       );
-      // Round trip: the hint is in place before the caller goes on to show
-      // the window, even though the show happens on Chromium's connection.
+      // Round trip, so a refused write is reported here instead of being
+      // dropped along with the connection.
       const error = bindings.requestCheck(connection, cookie);
       if (error) {
         let code = null;
@@ -161,6 +171,7 @@ function createLinuxX11InputHint(options = {}) {
 
 module.exports = {
   createLinuxX11InputHint,
+  loadXcbBindings,
   readXid,
   encodeNoInputWmHints,
   XA_WM_HINTS,
