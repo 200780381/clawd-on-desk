@@ -125,15 +125,40 @@ function orcaPaneKeyFromEnv(env = process.env) {
   return normalizeOrcaPaneKey(env.ORCA_PANE_KEY);
 }
 
+// herdr (#1139) sets HERDR_ENV=1 and HERDR_PANE_ID ("w5:p4") in every pane, and
+// `herdr agent focus <pane id>` switches the server to it. TERM_PROGRAM is the
+// OUTER terminal's (herdr passes it through), so unlike Orca it cannot say who
+// the innermost host is; HERDR_ENV is the marker, and the same nested-terminal
+// veto applies: tmux/zellij/screen started inside a herdr pane own the session
+// from there on, and so does a terminal launched from it. Remote hooks never
+// send it: the pane belongs to a herdr server on the remote host, which the
+// local CLI cannot reach (the server strips it as well).
+function herdrPaneFromEnv(env = process.env) {
+  if (!env || env.HERDR_ENV !== "1") return null;
+  if (isRemoteHookMode({ env })) return null;
+  if (NESTED_TERMINAL_ENV.some((key) => env[key])) return null;
+  const paneId = normalizeOrcaPaneKey(env.HERDR_PANE_ID);
+  if (!paneId) return null;
+  return { paneId, socket: normalizeTmuxSocketPath(env.HERDR_SOCKET_PATH) };
+}
+
 // Deliberately NOT part of the resolver result: the #674 red line freezes the
 // no-arg resolve() shape, and this value owes nothing to the process walk
 // anyway. Reading it per body instead also means it survives a cache hit or a
 // failed snapshot, both of which return a walk-derived object with no room for
 // it. `env` is injectable so a body-shape assertion stays hermetic instead of
 // depending on whether the suite happens to be running inside Orca.
+//
+// Also carries the herdr pane (#1139) for the same reasons, so every adapter
+// that already ships the Orca key ships this one without another call site.
 function applyOrcaPaneKey(body, env = process.env) {
   const orcaPaneKey = orcaPaneKeyFromEnv(env);
   if (orcaPaneKey) body.orca_pane_key = orcaPaneKey;
+  const herdr = herdrPaneFromEnv(env);
+  if (herdr) {
+    body.herdr_pane_id = herdr.paneId;
+    if (herdr.socket) body.herdr_socket = herdr.socket;
+  }
   return body;
 }
 
@@ -256,7 +281,7 @@ if ($fg -ne [IntPtr]::Zero) {
   [void][ClawdWin32]::GetClassName($fg, $sb, $sb.Capacity)
   $fgClass = $sb.ToString()
 }
-$processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId, Name, CommandLine, @{Name='StartIdentity';Expression={try { $_.CreationDate.ToUniversalTime().Ticks.ToString() } catch { $null }}})
+$processes = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId, Name, CommandLine, @{Name='StartIdentity';Expression={try { $_.CreationDate.ToUniversalTime().Ticks.ToString() } catch { $null }}})
 [pscustomobject]@{
   processes = $processes
   foreground = [pscustomobject]@{
@@ -537,6 +562,54 @@ function claudePromote(pidCache, namespace, sessionId, cacheCwd, deriveHeadless)
   return cacheHitMetadata(sanitized, "v1");
 }
 
+// Resolves the terminal that hosts a herdr client (#1139). herdr exposes no CLI
+// that maps a pane to the client showing it, so every `herdr` process other than
+// the server is a candidate. Processes re-parented to launchd/init are skipped:
+// that is what a detached server looks like, including servers on other sockets.
+//
+// One client: its walk is appended to pidChain exactly like the tmux bridge, so
+// the Ghostty / iTerm focus helpers can pick the right surface by pid or tty.
+// Several clients all inside the same terminal app (several Ghostty windows):
+// raise that app but append no client pid, since nothing says which window shows
+// this pane and a wrong guess would select someone else's surface. Several
+// clients in different terminals: refuse to guess.
+function findHerdrHostTerminal(execFileSync, serverPid, terminalNames) {
+  let table;
+  try {
+    table = execFileSync("ps", ["-A", "-o", "pid=,ppid=,comm="], { encoding: "utf8", timeout: 1000 });
+  } catch {
+    return null;
+  }
+  const procs = new Map();
+  for (const line of String(table || "").split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+    if (!m) continue;
+    procs.set(Number(m[1]), { ppid: Number(m[2]), name: normalizePosixProcessName(m[3]) });
+  }
+  const hosts = [];
+  for (const [pid, info] of procs) {
+    if (pid === serverPid || info.name !== "herdr" || info.ppid <= 1) continue;
+    const walked = [];
+    let walkPid = pid;
+    for (let t = 0; t < 6; t++) {
+      const cur = procs.get(walkPid);
+      if (!cur) break;
+      walked.push(walkPid);
+      if (terminalNames.has(cur.name)) {
+        hosts.push({ terminalPid: walkPid, chainAdds: walked });
+        break;
+      }
+      if (!cur.ppid || cur.ppid <= 1 || cur.ppid === walkPid) break;
+      walkPid = cur.ppid;
+    }
+  }
+  if (hosts.length === 0) return null;
+  if (hosts.length === 1) return hosts[0];
+  const terminalPid = hosts[0].terminalPid;
+  if (!hosts.every((h) => h.terminalPid === terminalPid)) return null;
+  return { terminalPid, chainAdds: [terminalPid] };
+}
+
 function createPidResolver(options) {
   const { platformConfig } = options;
   const { terminalNames, systemBoundary, editorMap, editorPathChecks } = platformConfig;
@@ -622,6 +695,7 @@ function createPidResolver(options) {
     let agentPid = null;
     let agentProcessStartIdentity = null;
     let agentCommandLine = "";
+    let herdrServerPid = null;
     const pidChain = [];
 
     for (let i = 0; i < maxDepth; i++) {
@@ -677,6 +751,7 @@ function createPidResolver(options) {
       }
 
       if (systemBoundary.has(name)) break;
+      if (!herdrServerPid && name === "herdr") herdrServerPid = pid;
       if (terminalNames.has(name)) terminalPid = pid;
       lastGoodPid = pid;
       if (!parentPid || parentPid === pid || parentPid <= 1) break;
@@ -729,6 +804,21 @@ function createPidResolver(options) {
             }
           }
         } catch {}
+      }
+    }
+
+    // herdr (#1139) detaches its panes the same way tmux does, so the walk above
+    // ends at the `herdr server` and never meets the terminal. Unlike tmux there
+    // is no list-clients to ask, so read the process table once and walk up from
+    // every other `herdr` process. Only reached when HERDR_ENV is set AND the walk
+    // itself passed through a herdr process: a shell that merely inherited the
+    // env from a herdr pane (another terminal launched from it) has its own
+    // terminal in the chain and never gets here.
+    if (!isWin && !terminalPid && herdrServerPid && process.env.HERDR_ENV === "1") {
+      const host = findHerdrHostTerminal(execFileSync, herdrServerPid, terminalNames);
+      if (host) {
+        terminalPid = host.terminalPid;
+        pidChain.push(...host.chainAdds);
       }
     }
 
@@ -796,7 +886,7 @@ function createPidResolver(options) {
   // Reuses the prewarmed in-process _cached (SessionStart) so a `start` context
   // after a no-arg prewarm never spawns a second time. Spreads into a NEW object
   // (never mutates _cached) so the no-arg shape stays pristine.
-  function freshMetadata() {
+  function freshMetadata(preferAgentPid = false) {
     const meta = freshResolve();
     const result = {
       ...meta,
@@ -809,13 +899,20 @@ function createPidResolver(options) {
       // make the offline path indistinguishable from a real walk in logs.
       cacheSource: meta.snapshotOk ? "fresh" : "none",
     };
+    // A verified Codex Desktop client uses its persistent app-server as both
+    // source and cache anchor. A hook's terminal match can be its short-lived
+    // PowerShell wrapper; retaining that anchor would invalidate both cached
+    // PIDs as soon as the wrapper exits. Preserve the raw terminal observation
+    // and the no-arg result, and never promote a headless or failed walk.
+    const useAgentAnchor = preferAgentPid && meta.snapshotOk && meta.agentPid && !result.headless;
+    if (useAgentAnchor) result.stablePid = meta.agentPid;
     // Object spread deliberately skips the recovery-only non-enumerable
     // identities attached by computeFreshSnapshot(). Reattach them privately
     // so the hook can seed the durable lease from this one live snapshot while
     // keeping the public resolver shape and sanitized v2 cache unchanged.
     Object.defineProperties(result, {
       agentProcessStartIdentity: { value: meta.agentProcessStartIdentity, enumerable: false },
-      sourceProcessStartIdentity: { value: meta.sourceProcessStartIdentity, enumerable: false },
+      sourceProcessStartIdentity: { value: useAgentAnchor ? meta.agentProcessStartIdentity : meta.sourceProcessStartIdentity, enumerable: false },
     });
     return result;
   }
@@ -858,9 +955,9 @@ function createPidResolver(options) {
   // The walk-usable condition stays: a degraded walk writes nothing and keeps
   // v1, since promotion is then the session's only remaining cache path. No
   // extra fresh for the cleanup.
-  function startLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk) {
+  function startLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk, preferAgentPid) {
     if (canDisk) maybeSweep(pidCache);
-    const meta = freshMetadata();
+    const meta = freshMetadata(preferAgentPid);
     if (canDisk && meta.snapshotOk && meta.agentPid) {
       pidCache.writePidCacheV2(namespace, sessionId, cacheCwd, v2SubsetFrom(meta));
       claudeDropV1SameKey(pidCache, namespace, sessionId, cacheCwd);
@@ -897,7 +994,7 @@ function createPidResolver(options) {
   // event: a hit (or promotion) is zero spawn; a miss is at most ONE fresh, then
   // repopulate v2 if the walk was usable. Non-cacheable events may fresh (the
   // no-fallback contract is prompt/end only).
-  function eventLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk) {
+  function eventLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk, preferAgentPid) {
     if (canDisk) {
       const hit = readLiveV2(pidCache, namespace, sessionId, cacheCwd);
       if (hit) {
@@ -916,7 +1013,7 @@ function createPidResolver(options) {
       const promoted = claudePromote(pidCache, namespace, sessionId, cacheCwd, deriveHeadless);
       if (promoted) return promoted;
     }
-    const meta = freshMetadata();
+    const meta = freshMetadata(preferAgentPid);
     if (canDisk && meta.snapshotOk && meta.agentPid) {
       // v1 drop mirrors start: unconditional once a usable fresh walk is in
       // hand (privacy-first even when the v2 write fails — see startLifecycle).
@@ -986,13 +1083,17 @@ function createPidResolver(options) {
     // is the adapter's declaration; the path check guards a stray empty
     // ingredient. It never relaxes the prompt/end no-fallback contract below.
     const canDisk = cacheable && !!pidCache.cacheFilePathV2(namespace, sessionId, cacheCwd);
+    // Opt-in only: codex-hook verifies the known Desktop originator and local
+    // interactive provenance. Other namespaces retain terminal-first anchors
+    // and the existing double-liveness requirement, even with this flag set.
+    const preferAgentPid = namespace === "codex" && ctx.preferAgentPid === true;
 
     switch (lifecycle) {
-      case "start":  return startLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk);
+      case "start":  return startLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk, preferAgentPid);
       case "prompt": return promptLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk);
       case "end":    return endLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk);
       case "event":
-      default:       return eventLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk);
+      default:       return eventLifecycle(pidCache, namespace, sessionId, cacheCwd, canDisk, preferAgentPid);
     }
   }
 
@@ -1111,6 +1212,7 @@ module.exports = {
   tmuxSocketFromEnv,
   orcaPaneKeyFromEnv,
   applyOrcaPaneKey,
+  herdrPaneFromEnv,
   NESTED_TERMINAL_ENV,
   processAlive,
   WINDOWS_TERMINAL_WINDOW_CLASS,

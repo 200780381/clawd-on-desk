@@ -148,8 +148,10 @@ Checked on real hardware with the v1.2.0 draft assets:
 
 **Not tested**:
 - On the packaged Windows build: OpenCode 2.x; manual Allow, Deny and Always
-  decisions in OpenCode bubbles; the Claude hook-health badge and tray notice
-  after hooks are displaced; and WSL session PID handling.
+  decisions in OpenCode bubbles; a new permission request arriving while
+  fullscreen auto-hide is active; the pet keeping its size after sleep and
+  wake; the Claude hook-health badge and tray notice after hooks are
+  displaced; and WSL session PID handling.
 - On the packaged macOS build: the IME candidate window in bubbles, Ghostty
   cross-Space focus, and Dock pinning at the bottom with auto-hide. The code
   behind these did not change in this release.

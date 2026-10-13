@@ -1,6 +1,6 @@
 {
   "name": "clawd-on-desk",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "A desktop pet that reacts to your Claude Code sessions in real-time.",
   "main": "src/main.js",
   "scripts": {
@@ -34,6 +34,8 @@
     "install:antigravity-hooks": "node hooks/antigravity-install.js",
     "install:cursor-hooks": "node hooks/cursor-install.js",
     "install:kiro-hooks": "node hooks/kiro-install.js",
+    "install:kirocrew-hooks": "node hooks/kirocrew-install.js",
+    "uninstall:kirocrew-hooks": "node hooks/kirocrew-install.js --uninstall",
     "install:kimi-hooks": "node hooks/kimi-install.js",
     "install:qwen-hooks": "node hooks/qwen-code-install.js",
     "install:zcode-hooks": "node hooks/zcode-install.js",

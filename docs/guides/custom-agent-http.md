@@ -8,7 +8,7 @@ Custom HTTP agents are state-only in v1. They can drive animations and create se
 
 ## 1. Register the application
 
-Open **Settings → Agents**, add a discovery path, scan it, and select **Register** for the candidate. A candidate only means Clawd found a launchable executable; it is not proof that the application is an AI tool or that it already implements this HTTP contract.
+Open **Settings → AI Coding Tools**, add a discovery path, scan it, and select **Register** for the candidate. A candidate only means Clawd found a launchable executable; it is not proof that the application is an AI tool or that it already implements this HTTP contract.
 
 After registration, copy these values from the custom agent card:
 

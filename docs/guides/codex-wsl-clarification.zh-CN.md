@@ -23,7 +23,7 @@ Windows 与 WSL 默认使用独立的 Codex home。可以在 WSL 中设置 `CODE
 ## 推荐流程：独立 home + Pair
 
 1. 在目标 WSL2 发行版中安装 Codex 和 Linux Node，并在那里运行 Codex，建立独立 home。
-2. 启动 Windows Clawd，打开 **Settings → Agents → Connected → WSL Scan**，在 Codex 下找到该发行版并选择 **Pair**。Windows 本机没有 Codex 时，这一行可能位于 **Unavailable**。
+2. 启动 Windows Clawd，打开 **Settings → AI 编程工具 → Connected → WSL Scan**，在 Codex 下找到该发行版并选择 **Pair**。Windows 本机没有 Codex 时，这一行可能位于 **Unavailable**。
 3. 确认 Clawd 中的 Codex 已**启用**。WSL 配对与 Windows 本机集成安装是独立操作，通常不会替你启用被关闭的 agent。
 4. 分别核对安装与连通性结果，按需在 Codex 中审核/信任 hooks，然后启动新会话，确认它出现在 Clawd。探测失败或结果未知都不能视为连接成功。
 

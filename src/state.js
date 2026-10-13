@@ -11,6 +11,7 @@ const {
 } = require("./state-priority");
 const {
   buildStateBindings,
+  createStableVisualPicker,
   hasOwnVisualFiles: hasOwnVisualFilesWithBindings,
   resolveVisualBinding: resolveVisualBindingWithBindings,
   getSvgOverride: getSvgOverrideWithDeps,
@@ -88,6 +89,9 @@ let theme = null;
 let SVG_IDLE_FOLLOW = null;
 let STATE_SVGS = {};
 let STATE_BINDINGS = {};
+// One pick per long-running state (thinking / working / juggling) when the
+// theme lists several files; see createStableVisualPicker.
+const stableVisualPicker = createStableVisualPicker();
 let MIN_DISPLAY_MS = {};
 let AUTO_RETURN_MS = {};
 let DEEP_SLEEP_TIMEOUT = 0;
@@ -489,6 +493,19 @@ function mergeOrcaPaneKey(orcaPaneKey, existing, event, incoming) {
   return (existing && existing.orcaPaneKey) || null;
 }
 
+// The herdr pane (#1139) follows the Orca key's lifecycle, and its socket only
+// ever travels with the pane id it was captured alongside.
+function mergeHerdrPane(herdrPaneId, herdrSocket, existing, event, incoming, identityChanged) {
+  if (herdrPaneId) return { herdrPaneId, herdrSocket: herdrSocket || null };
+  if (identityChanged || SESSION_START_EVENTS.has(event) || terminalIdentityChanged(existing, incoming)) {
+    return { herdrPaneId: null, herdrSocket: null };
+  }
+  return {
+    herdrPaneId: (existing && existing.herdrPaneId) || null,
+    herdrSocket: (existing && existing.herdrPaneId && existing.herdrSocket) || null,
+  };
+}
+
 function resolveAwaitingInputSinceStop(existing, event) {
   if (isDoneEvent(event)) return true;
   if (!event || COMPLETION_HOUSEKEEPING_EVENTS.has(event)) return !!(existing && existing.awaitingInputSinceStop === true);
@@ -612,6 +629,7 @@ function refreshTheme() {
   SVG_IDLE_FOLLOW = theme.states.idle[0];
   STATE_SVGS = { ...theme.states };
   STATE_BINDINGS = buildStateBindings(theme);
+  stableVisualPicker.clear();
   // Sync back so settings-animation-overrides can resolve roam/fallback states
   theme._stateBindings = STATE_BINDINGS;
   if (theme.miniMode && theme.miniMode.states) {
@@ -902,6 +920,7 @@ function applyState(state, svgOverride, options = {}) {
 
   previousState = currentState;
   currentState = state;
+  stableVisualPicker.retainOnly(state);
   displayRevision += 1;
   currentVisualSource = applyOptions.settingsPreview === true
     ? VISUAL_SOURCE_SETTINGS_PREVIEW
@@ -1763,6 +1782,59 @@ function updateSessionMetadata(sessionId, opts = {}) {
   return true;
 }
 
+// Runtime-only, accepted late Codex initialization. Unlike a lifecycle update,
+// this cannot change phase, activity/history, completion/acknowledgement, recap,
+// or compaction ownership. Unlike statusline metadata it can enrich focus data.
+function updateCodexInitializationMetadata(sessionId, opts = {}) {
+  const session = sessions.get(sessionId);
+  if (!session || session.agentId !== "codex"
+    || (session.profileId || "local") !== "local"
+    || session.host || session.wslDistro || session.headless
+    || !isWorkingLikeState(session.state) || session.requiresCompletionAck === true
+    || opts.agentId !== "codex" || opts.profileId !== "local"
+    || opts.hookSource !== "codex-official"
+    || opts.host || opts.wslDistro || opts.headless
+    || opts.subagentId || opts.subagentType || opts.recapIsSubagent) return false;
+  const processMetadata = mergeSessionProcessMetadata(session, opts, {
+    replace: opts.replaceProcessMetadata === true,
+  });
+  Object.assign(session, {
+    sourcePid: processMetadata.sourcePid,
+    agentPid: processMetadata.agentPid,
+    wtHwnd: processMetadata.wtHwnd,
+    editor: processMetadata.editor,
+    pidChain: processMetadata.pidChain,
+    cwd: opts.cwd || session.cwd || "",
+    tmuxSocket: opts.tmuxSocket || session.tmuxSocket || null,
+    tmuxClient: opts.tmuxClient || session.tmuxClient || null,
+    orcaPaneKey: processMetadata.identityChanged && !opts.orcaPaneKey
+      ? null : mergeOrcaPaneKey(opts.orcaPaneKey, session, null, opts),
+    platform: opts.platform || session.platform || null,
+    provider: opts.provider || session.provider || null,
+    codexOriginator: opts.codexOriginator || session.codexOriginator || null,
+    codexSource: opts.codexSource || session.codexSource || null,
+    ghosttyTerminalId: normalizeGhosttyTerminalId(opts.ghosttyTerminalId) || session.ghosttyTerminalId || null,
+    transcriptPath: normalizeTranscriptPath(opts.transcriptPath) || session.transcriptPath || null,
+    sessionAutomationIdentity: normalizeSessionAutomationIdentity(opts.sessionAutomationIdentity)
+      || session.sessionAutomationIdentity || null,
+    pidReachable: resolvePidReachable(
+      opts.replaceProcessMetadata === true ? null : session,
+      processMetadata.agentPid,
+      processMetadata.sourcePid,
+    ),
+  });
+  updateSessionMetadata(sessionId, {
+    expectedAgentId: "codex",
+    sessionTitle: opts.sessionTitleFromPrompt ? null : opts.sessionTitle,
+    contextUsage: opts.contextUsage,
+    contextUsageOrigin: opts.contextUsageOrigin,
+    model: opts.model,
+  });
+  emitSessionSnapshot();
+  debugSession(`codex-initialization preserve ${describeSession(sessionId, session)}`);
+  return true;
+}
+
 function clearClaudeStatuslineAuthority(profileId = "local") {
   let cleared = 0;
   for (const session of sessions.values()) {
@@ -2225,6 +2297,8 @@ function updateSession(sessionId, state, event, opts = {}) {
     tmuxSocket = null,
     tmuxClient = null,
     orcaPaneKey = null,
+    herdrPaneId = null,
+    herdrSocket = null,
     agentPid = null,
     agentId = null,
     profileId = "local",
@@ -2372,7 +2446,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     const hasCodexPermissionMetadata = !!(
       sourcePid || wtHwnd || agentPid || (pidChain && pidChain.length) || cwd || host || wslDistro ||
       model || provider || codexOriginator || codexSource || platform || ghosttyTerminalId ||
-      tmuxSocket || tmuxClient || orcaPaneKey
+      tmuxSocket || tmuxClient || orcaPaneKey || herdrPaneId
     );
     const shouldPersistCodexPermissionFocus = permAgentId === "codex" && (
       hasCodexPermissionMetadata
@@ -2398,6 +2472,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       const srcOrcaPaneKey = processMetadata.identityChanged && !orcaPaneKey
         ? null
         : mergeOrcaPaneKey(orcaPaneKey, existing, event, { sourcePid, wtHwnd });
+      const srcHerdr = mergeHerdrPane(herdrPaneId, herdrSocket, existing, event, { sourcePid, wtHwnd }, processMetadata.identityChanged);
       const srcAgentPid = processMetadata.agentPid;
       const srcAgentId = resolveIncomingAgentId(existing, agentId, agentIdDefaulted);
       const srcHost = host || (existing && existing.host) || null;
@@ -2441,6 +2516,8 @@ function updateSession(sessionId, state, event, opts = {}) {
         tmuxSocket: srcTmuxSocket,
         tmuxClient: srcTmuxClient,
         orcaPaneKey: srcOrcaPaneKey,
+        herdrPaneId: srcHerdr.herdrPaneId,
+        herdrSocket: srcHerdr.herdrSocket,
         agentPid: srcAgentPid,
         agentId: srcAgentId,
         profileId: (existing && existing.profileId) || profileId || "local",
@@ -2537,6 +2614,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcOrcaPaneKey = processMetadata.identityChanged && !orcaPaneKey
     ? null
     : mergeOrcaPaneKey(orcaPaneKey, existing, event, { sourcePid, wtHwnd });
+  const srcHerdr = mergeHerdrPane(herdrPaneId, herdrSocket, existing, event, { sourcePid, wtHwnd }, processMetadata.identityChanged);
   const srcAgentPid = processMetadata.agentPid;
   const srcAgentId = resolveIncomingAgentId(existing, agentId, agentIdDefaulted);
   const srcSessionAutomationIdentity = normalizedSessionAutomationIdentity
@@ -2876,7 +2954,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     clearSubagentTracker(subagentTracker);
   }
 
-  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
+  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
   // Desktop apps can reopen a previous conversation on launch, so SessionStart
   // only means "opened" — not "used". Any other lifecycle event is a real action
   // and clears the marker. Only the listed agents carry the field; others are
@@ -3847,6 +3925,7 @@ function getSvgOverride(state) {
     displayHintMap: DISPLAY_HINT_MAP,
     theme,
     stateSvgs: STATE_SVGS,
+    pickVisualFile: stableVisualPicker.pick,
   });
 }
 
@@ -3993,6 +4072,7 @@ return {
   updateSessionFocusMetadata,
   touchSessionActivity,
   updateSessionMetadata,
+  updateCodexInitializationMetadata,
   hasCodexCompactionHold,
   releaseCodexCompactionOnTerminal,
   clearClaudeStatuslineAuthority,

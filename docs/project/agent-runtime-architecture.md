@@ -78,7 +78,7 @@ Cursor Agent 状态同步（command hook，stdin JSON，非阻塞）：
     → 同上状态机（agent_id: cursor-agent）
 
 Codex CLI 状态同步（official hooks primary + JSONL fallback）：
-  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / Stop / SessionEnd
+  Codex 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / PostCompact / Stop / Interrupt / SessionEnd
     → hooks/codex-hook.js（stdin JSON，session_id 优先与 transcript_path 的 rollout UUID 对齐）
     → HTTP POST 127.0.0.1:23333/state { state, session_id, event, turn_id, hook_source }
     → 同上状态机（agent_id: codex）
@@ -95,6 +95,14 @@ backfill、旧/未来时间、quota/title/文件 mtime、已结束或其他回�
 仅被 working-timeout 转 idle 的行保留私有 timeout 标记和最后真实活跃时间，当前回合新进度可按原 thinking/working
 恢复；普通 idle、Stop/abort/end 不可恢复，任一 accepted lifecycle 或恢复清掉标记。标记不进入 snapshot。
 无真实进度时仍遵守用户配置的 Codex inactivity timeout，不以 Desktop 长寿 PID 永久保活。
+本机非 headless 的 Codex 回合已被 turn fence 接受且仍在 thinking/working/juggling 时，
+迟到的 idle SessionStart 只合并初始化元数据，不改 phase、updatedAt、事件历史、完成/确认或小结。
+有效进程、目录、标题、模型和上下文仍正常合并；既有回合的真实进度继续刷新活跃时钟。
+冷启动、已结束/非忙碌行、不同回合、远程/WSL/子代理保持原生命周期路径。
+当前清扫持有不走这条初始化保护，保留既有 SessionStart 压缩完成语义。
+初始化来源和 PID 变化不作为新回合证明；真正的新回合仍由 prompt/task_started 开启。
+同 ID 的恢复若只剩未结束的旧 owner，初始化不延长它的活跃时间，仍由真实回合事件或既有超时清理收敛。
+此修复不改变 hook 命令、原生信任记录或公开 HTTP 字段。
 自动自由漫步同时检查 canonical in-progress session；临时 idle/roam 视觉不放行忙碌会话，取消走动时按
 resolveDisplayState 恢复真实显示。手动拖拽、设置预览、DND 与 Mini 的原有入口和 gate 保留。
 
@@ -567,7 +575,7 @@ WSL 状态同步（本机 loopback，但 PID 属于 Linux VM）：
     → hooks/codex-hook.js POST /permission { tool_name, tool_input, tool_input_description, session_id, turn_id }
     → 默认 auto 模式：准确的本机 session / turn 记录确认 user reviewer 时才由 Clawd 展示 Allow / Deny；自动 reviewer、MCP / app 覆盖、远程 / WSL、无法确认或过期记录立即 no-decision，Codex 继续处理
     → 显式 intercept 模式：main.js 创建普通 Allow / Deny bubble，用户点击后 codex-hook.js stdout 输出官方 JSON decision
-    → 旧 native 偏好规范化为 auto；显式 intercept 不被升级覆盖。General 权限区提供 Agents → Codex 路由设置入口
+    → 旧 native 偏好规范化为 auto；升级时旧 intercept / native 统一迁到 Auto 一次，之后重新选择的 Intercept 会保留。General 权限区提供 Agents → Codex 路由设置入口
     → DND / disabled / bubble hidden / Clawd unavailable 时 stdout "{}"，Codex 回到原生审批提示
 ```
 
@@ -694,7 +702,7 @@ CodeBuddy direct HTTP `PermissionRequest` 不经过 Clawd command hook，因此�
 
 ## Multi-Agent Registry
 
-每个 agent 定义为一个配置模块，导出事件映射、进程名、能力声明（`capabilities` 含 `httpHook` / `permissionApproval` / `sessionEnd` / `subagent`）：
+每个 agent 定义为一个配置模块，导出事件映射、进程名、能力声明（`capabilities` 含 `httpHook` / `permissionApproval` / `mobilePermissionObservation` / `sessionEnd` / `subagent`）：
 
 - `agents/claude-code.js` — Claude Code 事件映射 + 能力（hooks、permission、terminal focus）
 - `agents/codex.js` — Codex CLI official hook 事件映射 + JSONL fallback 轮询配置
@@ -777,6 +785,8 @@ CodeBuddy 的 PermissionRequest HTTP 所有权只认严格的本机 managed URL�
 - 支持 Allow / Deny / suggestion 决策，以及 `addRules` / `setMode` suggestion 类型
 - `permission-automation-policy.js` 的 off / auto-tools / unattended 与 `session-automation-coordinator.js` 的 per-session grant 会在 bubble 渲染前产生真实决定。auto-tools 对 Claude/Qwen 的未知 built-in（除有效 namespaced MCP）fail closed，但其他已知 adapter 对非空工具名不都使用逐工具 allowlist；unattended 在识别已知 decision tools 后仍有意对可作 Allow/Deny 的未知请求保留“handle every request”行为。新增 agent/tool/interaction 必须同时审查 policy 与 tests，不能笼统假设 unknown 一律 defer。身份未核验的请求，如果它自称的 `{agentId, sessionId}` 命中单会话记录，只取该记录模式与回落模式（全局模式或 session-only `off`）里更严格的一个，所以核验失败只会收紧、不会被全局放宽
 - Telegram 与飞书 / Lark 是和本地 bubble 并行的远程决策通道；关闭本地 bubble 不等于关闭远程审批。远程 client 超时、断连、未配置或启动失败不得产生决定或 deny：本地 bubble 存在时请求继续 pending；仅在 remote-only 且所有可用 client 都无决定时，整体请求才 no-decision 并让 agent 回原生 UI 重问
+- Mobile permission observation 是独立的只读 sibling seam，不进入 Telegram / 飞书的 decision-client registry，也不持有 hook response。`permission.js` 只在 bubble 内容 IPC 成功发送后建立随机 request ID，并按 `mobilePermissionObservation` capability、普通 Allow/Deny actionability、非 headless、非 remote-only 条件维护冻结的六字段脱敏 projection；所有 pending 移除统一经 owner 的 detach primitive 同步撤下。移动端只能消费该 projection，不能读取 `pendingPermissions` 或回传决定
+- Mobile permission observation 另有默认关闭的 consent pref；有效开关是 session preview 父开关与 permission preview 子开关同时开启。协议、安全披露、4001 consent refresh 与 1008 access reset 语义见 `docs/mobile-protocol-v1.md`
 - DND 只负责“不弹 bubble”，不替用户决定权限：opencode 与 MiMo Code 分支 silent drop，让 TUI 内置权限提示接管；Claude Code 分支 `res.destroy()`，让 CC 回到内置聊天/终端确认；Codex 分支返回 no-decision `{}`；DeepSeek Harness 分支返回带 server identity 的 204，让 plugin `next()` 交还 DSH 原生审批流程
 - Codex 审批只认 official `PermissionRequest` hook；JSONL fallback 不再根据 shell function_call 猜测审批，也不再创建 Codex passive approval notify bubble
 - 涉及 Claude Code 权限 payload 的改动（`permission_suggestions`、`updatedPermissions`、elicitation 输入等）必须至少用一次真实 Claude Code 验证；`curl` 自编请求历史上掩盖过字段结构 bug
@@ -853,6 +863,13 @@ opencode、MiMo Code、OpenClaw、Hermes 和 DeepSeek Harness 是 plugin 形式�
 
 - CJS hook 脚本通过 `hooks/shared-process.js` 的 `createPidResolver()` 与 lifecycle context 遍历进程树定位终端应用 PID（Windows Terminal、VS Code、iTerm2 等）；opencode-family plugin 保留自己的内部 resolver
 - 不要用 `process.ppid` 做轻量替代：Claude Code / hook 进程链里它通常只是临时 shell PID，不稳定也不可持久化
+- 本机 Windows Codex Desktop 的 lifecycle context 会以已验证的 app-server `agentPid` 作为 `source_pid` 和 v2 cache 的 `stablePid`，避免 `SessionStart` 的短命 PowerShell wrapper 退出后让 cache-only prompt 丢失身份。Desktop 判定只认 `codex-originator.js` 的已知 originator；本机 Windows 无 transcript 的 ephemeral hook 缺少 originator/source 且不是 headless/subagent 时，可用同一 allowlist 验证 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`，并上报 originator 供同进程多聊天去重与 server-side process routing 使用；显式 CLI / unknown originator 优先，环境变量不得把来源不明的 child permission 提升为交互式。WSL / interop / remote / headless 不走该偏好；其他 agent 和 Codex CLI 仍保持 terminal-first 与双 PID liveness，prompt / SessionEnd 永不补做快照，Stop 不删 cache。
+- official `SessionStart` payload 的 `source` 是生命周期原因，不是 session provenance：只有事件名精确为 `SessionStart` 且值精确为 `startup` / `resume` / `clear` / `compact` / `fork` 时，才不阻止上述 audited Desktop env 预热；该原因留在原 payload，不写入 `codex_source`。`session_meta.source` 始终是 provenance，显式 originator、未知/非字符串 source、headless/subagent 与 remote/WSL gate 不变；`PermissionRequest` 不获得该例外。五个值由 official [rust-v0.162.0-alpha.2 SessionStart source（commit 74e804d）](https://github.com/openai/codex/blob/74e804deeb1241d5fe699b31fb319f7d46454c42/codex-rs/hooks/src/events/session_start.rs) 的 enum 和 serializer 核实；[release hook reference](https://learn.chatgpt.com/docs/hooks#sessionstart) 目前仍列四个值，并说明 main schema 可能先于 release docs。
+- Windows shared resolver 的全量快照在 `Get-CimInstance Win32_Process` 用 server-side `-Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate` 请求实际需要的属性，避免取回所有 CIM 属性后再丢弃。原 foreground interop、Windows Terminal HWND、`Select-Object` 和 UTC ticks `StartIdentity` 输出保留；noarg、CLI、其他 adapter 的 PID walk / shape / gates 不变。
+- Codex adapter 的 Windows 全量进程快照对普通事件使用共享 resolver 已有的 `windowsSnapshotTimeoutMs:5000`（上限 5 秒），`Interrupt` 保持 3000ms 以遵守其 upstream 3 秒外层 timeout；其他调用者的默认值仍为 3 秒。timeout 后保持无进程元数据，不重试、不伪造 PID。Windows `UserPromptSubmit` / `SessionEnd` 仍只读 cache，不增加快照。生命周期 source 误判和 fresh query 超时是独立故障：正确识别 `fork` 不能修复一次超时的预热，有界 timeout 也不保证查询必能完成。真实 HUD 首轮聚焦仍需 native hook 和 GUI 验证。
+- macOS / Linux 的 shared resolver 在读取 `preferAgentPid` 之前走 `!isWin` early return；每个 lifecycle 仍沿用 terminal-first 的内存快照，不访问 Windows v2 disk cache。已有显式 Desktop originator 的 hook 回包可继续选 `agentPid` 作为 outgoing `source_pid`，这不等于 POSIX resolver/cache anchor 被提升。
+- Desktop provenance 会保留不同 SID 的独立 HUD 会话，不能据 app-server PID 将它们合并。两个固定 ambient prompt 若变化，未识别工作线程可能各自留下一个按 SID 更新的可见会话；这比已识别 ambient 的隐藏保证弱。未知会话仅受现有全局 20-session capacity eviction 与普通 stale/SessionEnd 规则约束；已识别 ambient suppression set 的 200 项边界不控制这些未知会话。可回复的本地 Codex completion mapping 仍可能令 SessionEnd 成为 no-op，不能承诺每行必在 SessionEnd 消失。
+- 普通无 transcript 的 Desktop sidechat 不具备自动 queue 投递资格：main 只从权威 rollout transcript 推导该会话的 `codexHome`，缺失时保持 null；选择 Desktop queue adapter 仍须经过真实 `canDeliver` admission，环境中的 Codex home 不补为会话存储来源。被拒绝的 Direct Send 仅复制供手动粘贴，不执行 `codex queue` 或注入 Enter。此边界不判断临时线程被外部提供有效存储来源后的 CLI 能力，也不把 OS 接受 thread URL 等同于实际选择了正确侧边聊天。
 - `source_pid` 跟随状态更新送到 `main.js`，用于 Sessions 菜单聚焦
 - 右键 Sessions 子菜单点击后，`focusTerminalWindow()` 会用 PowerShell（Windows）或 `osascript`（macOS）聚焦终端
 - Windows 的 Cursor / VS Code 父进程窗口优先按项目标题唯一匹配；标题不匹配或缺少 cwd 时，仅在该进程的可见候选窗口唯一时兜底唤起。多窗口歧义或无可见候选时不以 `MainWindowHandle` 猜选。兜底不写 session HWND cache，`editor-parent-pid-window` / `editor-parent-pid-window-no-title` 即使成为前台也保持 `confirmed=false`：HUD / Dashboard 可以唤起 IDE，Telegram Direct Send 仍走手动粘贴回退，不能据此确认具体聊天或输入框。

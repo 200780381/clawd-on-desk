@@ -247,6 +247,18 @@ const _hitWindowActivationRuntime = createHitWindowActivationRuntime({
   onError: (err) => console.warn("Clawd: win-hit-window-activation failed:", err && err.message),
 });
 
+// ── Linux/X11: keep the output-only pet render window out of WM focus ──
+// Best-effort; a no-op off the X11 backend or without koffi/libxcb. Chromium
+// writes its resolved Ozone backend back onto the command line, so the switch
+// reads "x11" under the XWayland relaunch and on an Xorg session alike, and
+// "wayland" on native Wayland, where there is no X11 window to hint.
+const { createLinuxX11InputHint } = require("./linux-x11-input-hint");
+const _linuxX11InputHint = createLinuxX11InputHint({
+  isLinuxX11: isLinux && app.commandLine.getSwitchValue("ozone-platform") === "x11",
+  displayName: app.commandLine.getSwitchValue("display"),
+  onError: (err) => console.warn("Clawd: linux-x11-input-hint failed:", err && err.message),
+});
+
 // ── Windows: DWM cloak inspection + un-cloak (#525 self-heal) ──
 // Best-effort; degrades to "never cloaked / recovery no-op" when koffi/dwmapi
 // or the virtual-desktop COM manager is unavailable.
@@ -582,6 +594,12 @@ const _settingsController = createSettingsController({
     getFeishuApprovalStatus: () => getFeishuApprovalStatus(),
     getFeishuApprovalSecretInfo: () => getFeishuApprovalSecretInfo(),
     sendFeishuApprovalTest: (persisted) => sendFeishuApprovalTest(persisted),
+    regenerateMobileToken: () => ensureMobilePreviewServer().regenerateToken(),
+    resetMobileAccess: () => ensureMobilePreviewServer().resetMobileAccess(),
+    disconnectMobilePreviewClients: () => ensureMobilePreviewServer().disconnectClients({
+      code: 4001,
+      reason: "Permission preview consent changed",
+    }),
     writeSlackNotifySecrets: (secrets) => writeSlackNotifySecrets(secrets),
     getSlackNotifyStatus: () => getSlackNotifyStatus(),
     getSlackNotifySecretInfo: () => getSlackNotifySecretInfo(),
@@ -2163,7 +2181,7 @@ const _permCtx = {
 };
 const _perm = initPermission(_permCtx);
 permissionPresentationRuntime = _perm;
-const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, isPermissionEntryLive, canAutoResolvePendingPermission, beginSessionTrustConfirmation, endSessionTrustConfirmation, syncPermissionBubbleContent, maybeStartRemoteApproval, clearCodexNotifyBubbles, showCodexUserInputBubble, clearCodexUserInputBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission, dismissOpencodeFamilyPermissionResolvedExternally } = _perm;
+const { showPermissionBubble, resolvePermissionEntry, sendPermissionResponse, repositionBubbles, permLog, PASSTHROUGH_TOOLS, addPendingPermission, removePendingPermission, isPermissionEntryLive, canAutoResolvePendingPermission, wouldAutoAllowPermission, beginSessionTrustConfirmation, endSessionTrustConfirmation, syncPermissionBubbleContent, maybeStartRemoteApproval, clearCodexNotifyBubbles, showCodexUserInputBubble, clearCodexUserInputBubbles, showKimiNotifyBubble, clearKimiNotifyBubbles, syncPermissionShortcuts, replyOpencodeFamilyPermission, dismissOpencodeFamilyPermissionResolvedExternally } = _perm;
 const pendingPermissions = _perm.pendingPermissions;
 let permDebugLog = null; // set after app.whenReady()
 let updateDebugLog = null; // set after app.whenReady()
@@ -2682,6 +2700,8 @@ function focusTerminalSession(session, sessionId, requestSource) {
     tmuxSocket: session.tmuxSocket,
     tmuxClient: session.tmuxClient,
     orcaPaneKey: session.orcaPaneKey,
+    herdrPaneId: session.herdrPaneId,
+    herdrSocket: session.herdrSocket,
     ghosttyTerminalId: session.ghosttyTerminalId,
     sessionId: String(sessionId),
     agentId: session.agentId,
@@ -3023,11 +3043,13 @@ const _serverCtx = {
   removePendingPermission,
   isPermissionEntryLive,
   canAutoResolvePendingPermission,
+  wouldAutoAllowPermission,
   maybeAutoResolveSessionPermission: (entry, options) =>
     !!(sessionAutomationCoordinator
       && sessionAutomationCoordinator.resolveIfAllowed(entry, options)),
   showPermissionBubble,
   showCodexUserInputBubble,
+  syncPermissionBubbleContent,
   clearCodexUserInputBubbles,
   handleTestResult: (result, context) => handleTestResult(result, context),
   maybeStartRemoteApproval,
@@ -3059,13 +3081,75 @@ const { startHttpServer, getHookServerPort } = _server;
 
 // ── LAN WebSocket bridge for PWA mobile clients (lazy-loaded) ──
 let _lanWss = null;
-if (_settingsController.get("mobilePreviewEnabled") === true) {
+let _mobilePreviewReconcileRevision = 0;
+let _mobilePreviewReconcileTail = Promise.resolve();
+
+function setMobilePermissionObservationEnabled(enabled) {
+  const observation = _perm && _perm.permissionObservation;
+  if (observation && typeof observation.setEnabled === "function") {
+    observation.setEnabled(enabled === true);
+  }
+}
+
+function ensureMobilePreviewServer() {
+  if (_lanWss) return _lanWss;
   const { initMobilePreviewServer } = require("./network/mobile-preview-server");
   _lanWss = initMobilePreviewServer({
     sessions,
-    getSettingsSnapshot: () => _settingsController.getSnapshot(),
-    isEnabled: () => _settingsController.get("mobilePreviewEnabled") === true,
+    permissionObservation: _perm && _perm.permissionObservation,
+    log: (message) => sessionLog(message),
   });
+  return _lanWss;
+}
+
+function enqueueMobilePreviewReconcile(snapshot = _settingsController.getSnapshot()) {
+  const desired = {
+    revision: ++_mobilePreviewReconcileRevision,
+    sessionEnabled: snapshot && snapshot.mobilePreviewEnabled === true,
+    permissionEnabled: !!(
+      snapshot
+      && snapshot.mobilePreviewEnabled === true
+      && snapshot.mobilePermissionPreviewEnabled === true
+    ),
+  };
+
+  _mobilePreviewReconcileTail = _mobilePreviewReconcileTail
+    .catch((err) => {
+      console.warn("Clawd: prior mobile preview reconcile failed:", err && err.message);
+    })
+    .then(async () => {
+      if (desired.revision !== _mobilePreviewReconcileRevision) return;
+      if (!desired.sessionEnabled) {
+        setMobilePermissionObservationEnabled(false);
+        if (_lanWss) await _lanWss.cleanup();
+        return;
+      }
+
+      const server = ensureMobilePreviewServer();
+      if (desired.revision !== _mobilePreviewReconcileRevision) return;
+      setMobilePermissionObservationEnabled(desired.permissionEnabled);
+      await startMobilePreviewServerSafely(server, {
+        source: "settings-reconcile",
+        onError: (err) => console.warn(
+          "Clawd mobile preview: start failed:",
+          err && err.message ? err.message : err,
+        ),
+      });
+
+      // A newer disable may have committed while listen() was in flight.
+      // Never leave that stale listener alive while the queued successor waits.
+      if (desired.revision !== _mobilePreviewReconcileRevision) {
+        const latest = _settingsController.getSnapshot();
+        if (!latest || latest.mobilePreviewEnabled !== true) await server.cleanup();
+      }
+    })
+    .catch((err) => {
+      console.warn("Clawd: mobile preview reconcile failed:", err && err.message);
+    });
+
+  // Synchronous facade: settings-effect-router must never receive a rejecting
+  // Promise because safeCall only contains synchronous throws.
+  return undefined;
 }
 
 function updateLog(msg) {
@@ -4742,6 +4826,8 @@ const settingsEffectRouter = createSettingsEffectRouter({
   refreshDisplayedVisual: refreshDisplayedVisualForLowPowerMode,
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
+  disableMobilePermissionObservation: () => setMobilePermissionObservationEnabled(false),
+  enqueueMobilePreviewReconcile,
   setRecapEnabled: (enabled) => recapRuntime.setEnabled(enabled),
   logWarn: console.warn,
 });
@@ -4819,28 +4905,6 @@ _settingsController.subscribeKey("feishuApproval", () => {
 _settingsController.subscribeKey("slackNotify", () => {
   broadcastSlackNotifyStatus();
 });
-_settingsController.subscribeKey("mobilePreviewEnabled", (enabled) => {
-  if (enabled) {
-    if (!_lanWss) {
-      const { initMobilePreviewServer } = require("./network/mobile-preview-server");
-      _lanWss = initMobilePreviewServer({
-        sessions,
-        getSettingsSnapshot: () => _settingsController.getSnapshot(),
-        isEnabled: () => _settingsController.get("mobilePreviewEnabled") === true,
-      });
-    }
-    void startMobilePreviewServerSafely(_lanWss, {
-      source: "settings-enable",
-      onError: (err) => console.warn(
-        "Clawd mobile preview: settings start failed:",
-        err && err.message ? err.message : err,
-      ),
-    });
-  } else if (_lanWss) {
-    _lanWss.cleanup();
-  }
-});
-
 animationOverridesMain = createSettingsAnimationOverridesMain({
   app,
   BrowserWindow,
@@ -5220,6 +5284,7 @@ function createWindow() {
     setRenderWindow: (createdWindow) => { win = createdWindow; },
     isQuitting: () => isQuitting,
     applyDockVisibility,
+    applyNoInputHint: (createdWindow) => _linuxX11InputHint.applyNoInputHint(createdWindow),
   });
   finalizePetAccessorySlotsDelivery(initialAccessoryDelivery, true);
 
@@ -5386,15 +5451,7 @@ function createWindow() {
       console.warn("Clawd remote-ssh: connect-on-launch failed:", err && err.message);
     });
   }).catch(() => {});
-  if (_settingsController.get("mobilePreviewEnabled") === true) {
-    void startMobilePreviewServerSafely(_lanWss, {
-      source: "app-startup",
-      onError: (err) => console.warn(
-        "Clawd mobile preview: startup failed:",
-        err && err.message ? err.message : err,
-      ),
-    });
-  }
+  enqueueMobilePreviewReconcile(_settingsController.getSnapshot());
   startStaleCleanup();
   // Wait for renderer to be ready before sending initial state
   // If hooks arrived during startup, respect them instead of forcing idle
@@ -5801,10 +5858,12 @@ if (!gotTheLock) {
     try {
       const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
       if (process.platform === "win32") {
+        const { getCodexHookNudgeKeys } = require("./codex-hook-health");
+        const keys = getCodexHookNudgeKeys(verdict);
         trayBalloonOwner.show(tray, {
           iconType: "warning",
-          title: t("codexHookHealthNudgeTitle"),
-          content: t("codexHookHealthNudgeBody"),
+          title: t(keys.title),
+          content: t(keys.body),
         });
       }
     } catch (err) {

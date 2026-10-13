@@ -2,12 +2,15 @@
 // opencode v2 `plugins` config-key registration (issue #1039).
 //
 // OpenCode 2.x reads the renamed top-level `plugins` key and requires the
-// `{ id, setup }` plugin form, so the installer registers a second, v2-only
-// entry beside the v1 `plugin` key entry (both point into the SAME managed
-// generation). Verified host tolerances that make dual-key coexistence safe —
+// `{ id, setup }` plugin form, so the installer registers a v2 entry pointing
+// into the SAME managed generation as the v1 entry. On a detected v2 host the
+// legacy `plugin` key is SWEPT, not written: opencode 2.0.26 loads that key
+// through the same strict loader and surfaces Clawd's v1 function entry as
+// "Plugin failed: <path>" (probed on 2.0.15 it was only a load warning, hence
+// the earlier dual-key design). Verified host tolerances —
 // docs/investigations/opencode-v2-e1-evidence.md:
-//   - opencode 2.0.15 loads `plugins` entries and merely logs a load warning
-//     for the legacy `plugin` key's v1 function entry (host stays healthy).
+//   - opencode 2.0.15+ loads `plugins` entries; since 2.0.26 it also hard-
+//     rejects the v1 function entry under the legacy `plugin` key.
 //   - opencode 1.18.32 silently DROPS an unknown `plugins` key (true for
 //     1.18.16+ only — see the version-bound note below); the v1 config keeps
 //     parsing and the v1 entry keeps loading.

@@ -112,3 +112,22 @@ E2E（TUI、失败会话、子代理）补查；未知事件一律忽略（fail-
 
 实现细节备注：同一工具调用的多个 ask 共用 `request_id`（源自 tool call id）——仅用于日志关联，
 决定经各自 HTTP 响应返回，无碰撞语义；无需修改。
+
+## E3 追加：opencode 2.0.26 对旧 `plugin` 键改为硬失败（2026-10-12）
+
+环境：Windows，opencode `v2.0.26`（npm `@opencode/cli`），真实用户配置。
+
+现象：Clawd 曾按 E1 的"双键并存"结论，在 v2 宿主上同时写入 `plugin`（v1 函数入口）与
+`plugins`（v2 对象入口）。E1 #3 探到的 2.0.15 只对该 v1 条目打 load warning；但 2.0.26 的
+加载器对遗留 `plugin` 键也套用同一套严格 schema（`default` 必须是带 `id` + `effect|setup` 的
+定义对象），v1 函数入口因此升级为**硬失败**：
+
+- TUI：`Plugin failed: <generation>/opencode-plugin`
+- `opencode plugin list`：该条目 ID 显示 `-`（加载失败），v2 条目正常显示 `clawd-on-desk-opencode`
+- `opencode debug config` 证明 2.0.26 仍读取 `plugin` 键并把条目并入 `plugins` 一起加载
+
+结论与修复：检测到 v2 宿主时，Clawd **只**注册 `plugins` 键，并把 `plugin` 键里属于 Clawd 的
+v1 条目清除（sweep-only register：移除 proven-owned 条目、不追加，并在无配置文件时补建对象根
+配置供 `plugins` 写入）。v1 宿主行为不变（只写 `plugin`，并清理遗留 `plugins`）；未知宿主
+维持 fail-safe（只写 `plugin`）。Doctor 在 v2 宿主上改为以 `plugins` 键判定健康度，并把任何
+遗留的 Clawd v1 `plugin` 条目标记为需修复。

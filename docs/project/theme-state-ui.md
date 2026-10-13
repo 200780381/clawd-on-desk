@@ -54,6 +54,7 @@ Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数�
 - 若 `sleepSequence.mode` 为 `full`（默认），需提供 `yawning / dozing / collapsing / waking`；`direct` 可直接进入 `sleeping`
 - 若 `miniMode.supported` 为 true，需提供 8 个基础 mini 状态；`mini-working`、`mini-peek-hold`、`mini-sleep-peek` 是可选增强，缺失时优雅降级
 - 能力缺失时走 `VISUAL_FALLBACK_STATES` 回退链
+- `thinking` / `working` / `juggling` 的视觉在每个 hook 事件都会经 `getSvgOverride` 重新解析。`states.thinking`、无 `workingTiers` 时的 `states.working`、无 `jugglingTiers` 时的 `states.juggling`，以及 tier 的 `files` 列出多个文件时随机抽一个；抽中结果由 `state-visual-resolver.js` 的 `createStableVisualPicker` 按状态保持：同一状态、同一候选列表下重复解析返回同一文件（否则每次工具调用都会换动画）。`applyState` 提交新状态时丢弃其他状态的抽签，候选列表变化（tier 随会话数 / 子代理数切换）或 `refreshTheme` 时重抽。tier 的 `files` 优先于 `file`；两者并存时 `file` 只供旧版本读取，并继续作为 Animation Override 的 tier 键。`displayHintMap` 命中时仍然优先
 - 默认配置集中在 `theme-loader.js` 顶部的 `DEFAULT_*` 常量；loader 保持 stateless，`src/theme-runtime.js` 是唯一 active-theme owner，主题 reload/sync/cache 不得另设模块级真相
 - 变体是白名单 deep-merge；数组和特定字段会整体替换
 - Animation override 是用户 per-slot 覆盖，和作者定义的 variants 正交
@@ -81,6 +82,73 @@ main 中的 displayed-visual projection 是文件、hitbox 和视觉来源的唯
 - committed visual 到达后触发原生 hit-window 同步。拖拽锁、窗口未 live 或 Linux sliver 导致的 deferred sync，由 drag release、窗口恢复和现有 transition-end sweep 补做
 
 ## Settings Panel
+
+### Tabs and segmented choices
+
+Settings navigation uses `helpers.buildTabs({ id, ariaLabel | labelledBy, orientation,
+options, value, onChange })`. Options have `value`, `label`, and optional `disabled`;
+`renderLabel(button, option)` adds trusted icons or badges. The result exposes
+`element` (tablist), `panels` (a Map of stable panel shells), `getValue`, `setValue`,
+`setDisabled`, `focus`, and idempotent `dispose`. `setValue` never invokes `onChange`.
+Pages mount only their active panel's content and retain ownership of rendering,
+exit cleanup, drafts, persistence and scrolling. An existing `panels` Map may be
+passed when rebuilding only the sidebar, preserving the mounted page.
+
+Tabs use manual activation: arrows/Home/End move focus; Enter/Space/click activate.
+Horizontal tabs leave Up/Down available for scrolling; the vertical sidebar uses
+Up/Down. Disabled options are skipped. Focus and selection are separate; leaving
+the tablist resets its Tab entry to the selected available option. Each tab has a
+stable `aria-controls`/`aria-labelledby` panel relationship. Sidebar ownership is
+separate from content disposal; Animation Overrides owns its persistent subtab
+controller across local body refreshes and disposes it on full render/exit.
+
+Animation/Sound, Remote Approval and Recap share `helpers.createSubpageHost({
+disposeBody })`. Its `render(panel, renderBody, { scrollTop })` replaces only the
+active body, cleans up outgoing body controls, restores lost keyed focus, and
+preserves the current scroll position unless the page supplies another one.
+Pages dispose the host and their navigation controller on full render/exit;
+global content teardown still owns final mounted-control disposal. Navigation
+must remain outside body disposal. `dispose()` invalidates queued scroll work.
+Tabs offer `onBeforeChange(next, previous)` for capturing outgoing scroll before
+the previous panel is hidden; Animation/Sound uses it for per-subpage positions.
+Remote Approval retains its Channels-to-LAN credential/lookup cleanup.
+
+Recap periods remain radios. A period change captures the requested period and
+fences stale responses, retains the previous chart as inert/busy until new data
+arrives, then commits only the data body. A loading badge appears after 150 ms
+for slow queries; fast queries do not flash a placeholder. Query errors replace
+only the data body with retry UI. Background refreshes likewise leave page chrome
+and recording controls mounted; leaving the page invalidates outstanding queries
+and cancels loading/peek timers. No period preference or response cache is added.
+Recap grids initialize keyboard navigation at the current date/hour (falling back
+to the latest activity), and show a single cell focus ring only for keyboard
+focus. All non-placeholder cells share the same popover for pointer and keyboard
+inspection, including empty/unknown/future coverage states; native title tooltips
+are omitted. Blur, Escape and body disposal dismiss the popover.
+
+Enumerated values use the existing `buildSegmentedRadio`: Codex permission mode,
+Feishu platform and ID type, Recap period, and the General/approval choices. Add a
+stable `id` for focus restoration and an accessible name (`ariaLabel` or
+`labelledBy`). Arrows select immediately. `onChange` may return synchronously or
+asynchronously; false/rejection rolls back unless a newer `setValue` snapshot has
+arrived. `setPending` and `setDisabled` are independent. Pending radios retain
+focus with `aria-disabled` and suppress activation; business-disabled options use
+native disabled. Disposal invalidates asynchronous completions. Pages retain
+cross-render command gates (including Codex permission mode); the primitive does
+not persist settings. `onValueSync(value, element)` can update the Codex pill's CSS
+position alongside checked state, including rollback and snapshot updates.
+
+`requestRender` captures stable focus keys before replacing sidebar or content and
+restores only lost focus after modal rendering. Removed/disabled choices fall back
+to the group's selected available option, then its first enabled option. It must
+not steal focus from an input or dialog opened by the interaction.
+
+The choice inventory test rejects handwritten tabs and segmented controls in
+Settings business modules. Theme Card's existing radio role, Asset Picker's
+listbox selection, and Recap row highlighting are deliberate specialized
+exceptions; they are not part of the segmented contract. Native QA should cover
+keyboard/Accessibility Tree, light/dark, zoom, language, reduced motion, failed
+saves and rerendered focus separately from browser-environment unit tests.
 
 Settings 是独立 `BrowserWindow`，采用 5 层结构：
 

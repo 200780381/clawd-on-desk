@@ -164,6 +164,57 @@ describe("createPidResolver()", () => {
   });
 });
 
+describe("createPidResolver() — POSIX Desktop preference boundary", () => {
+  const { loadSharedProcessWithMock } = require("./helpers/load-shared-process-with-mock");
+  const pidCache = require("../hooks/pid-cache");
+
+  for (const platform of ["darwin", "linux"]) {
+    it(`keeps the ${platform} terminal anchor before reading the Windows-only preference`, (t) => {
+      let preferenceReads = 0;
+      let windowsSnapshots = 0;
+      const tree = new Map([
+        [610, { name: "sh", parent: 620, command: "hook" }],
+        [620, { name: "codex", parent: 630, command: "codex app-server" }],
+        [630, { name: "terminal", parent: 640, command: "terminal" }],
+        [640, { name: "init", parent: 0, command: "init" }],
+      ]);
+      t.mock.method(pidCache, "cacheFilePathV2", () => { throw new Error("POSIX must not enter the V2 disk cache"); });
+      const { mod, cleanup } = loadSharedProcessWithMock({
+        platform,
+        env: { TMUX: undefined, TMUX_PANE: undefined },
+        execFileSyncMock(command, args) {
+          assert.strictEqual(command, "ps", "no real process command is allowed");
+          const row = tree.get(Number(args[3]));
+          assert.ok(row, `unexpected synthetic PID ${args[3]}`);
+          if (args[1] === "ppid=") return `${row.parent}\n`;
+          if (args[1] === "comm=") return `${row.name}\n`;
+          if (args[1] === "command=") return `${row.command}\n`;
+          throw new Error(`unexpected ps probe ${args[1]}`);
+        },
+      });
+      try {
+        const resolve = mod.createPidResolver({
+          startPid: 610,
+          platformConfig: { terminalNames: new Set(["terminal"]), systemBoundary: new Set(["init"]), editorMap: {}, editorPathChecks: [] },
+          agentNames: { mac: new Set(["codex"]), linux: new Set(["codex"]) },
+          readRuntimeIdentity: () => { throw new Error("POSIX must not read a Windows cache owner"); },
+          getWindowsProcessSnapshot: () => { windowsSnapshots++; throw new Error("POSIX must not take a Windows snapshot"); },
+        });
+        for (const lifecycle of ["start", "event", "prompt", "end"]) {
+          const result = resolve({ namespace: "codex", sessionId: "codex:posix-desktop", cacheCwd: "/synthetic/project",
+            cacheable: true, lifecycle, get preferAgentPid() { preferenceReads++; return true; } });
+          assert.strictEqual(result.stablePid, 630, lifecycle);
+          assert.strictEqual(result.terminalPid, 630, lifecycle);
+          assert.strictEqual(result.agentPid, 620, lifecycle);
+        }
+        assert.strictEqual(resolve().stablePid, 630);
+        assert.strictEqual(preferenceReads, 0, "!isWin must return before interpreting the preference");
+        assert.strictEqual(windowsSnapshots, 0);
+      } finally { cleanup(); }
+    });
+  }
+});
+
 describe("createPidResolver() — POSIX non-Node command-line probe", () => {
   const { loadSharedProcessWithMock } = require("./helpers/load-shared-process-with-mock");
 
@@ -517,6 +568,108 @@ describe("createPidResolver() — tmux bridge (mocked)", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// createPidResolver() — herdr bridge (#1139)
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("createPidResolver() — herdr bridge (mocked, #1139)", () => {
+  const { loadSharedProcessWithMock } = require("./helpers/load-shared-process-with-mock");
+
+  // claude (100) -> zsh (150) -> herdr server (200, re-parented to launchd).
+  const WALK = [
+    ["ps -o ppid= -p 100", "150\n"],
+    ["ps -o comm= -p 100", "claude\n"],
+    ["ps -o ppid= -p 150", "200\n"],
+    ["ps -o comm= -p 150", "-zsh\n"],
+    ["ps -o ppid= -p 200", "1\n"],
+    ["ps -o comm= -p 200", "/opt/homebrew/bin/herdr\n"],
+  ];
+
+  function run(table, env = { HERDR_ENV: "1" }) {
+    const calls = [];
+    const routes = new Map(WALK);
+    routes.set("ps -A -o pid=,ppid=,comm=", table);
+    const execFileSyncMock = (cmd, args) => {
+      const key = cmd + " " + args.join(" ");
+      calls.push(key);
+      if (routes.has(key)) return routes.get(key);
+      const err = new Error("ENOENT: no route for " + key);
+      err.code = "ENOENT";
+      throw err;
+    };
+    const { mod, cleanup } = loadSharedProcessWithMock({
+      execFileSyncMock,
+      env: { HERDR_ENV: undefined, ...env },
+      platform: "darwin",
+    });
+    try {
+      const cfg = mod.getPlatformConfig();
+      const result = mod.createPidResolver({ ...LIVE_GATE, platformConfig: cfg, startPid: 100 })();
+      return { result, calls };
+    } finally {
+      cleanup();
+    }
+  }
+
+  it("one client: stablePid is its terminal and the client walk joins pidChain", () => {
+    const { result } = run([
+      "  1 0 /sbin/launchd",
+      "200 1 /opt/homebrew/bin/herdr",
+      "150 200 -zsh",
+      "100 150 claude",
+      "900 1 /Applications/Ghostty.app/Contents/MacOS/ghostty",
+      "910 900 -zsh",
+      "920 910 /opt/homebrew/bin/herdr",
+    ].join("\n"));
+    assert.strictEqual(result.stablePid, 900);
+    assert.deepStrictEqual(result.pidChain, [100, 150, 200, 920, 910, 900]);
+  });
+
+  it("several clients in one terminal app: raise the app without picking a client", () => {
+    const { result } = run([
+      "200 1 herdr",
+      "900 1 /Applications/Ghostty.app/Contents/MacOS/ghostty",
+      "910 900 -zsh",
+      "920 910 herdr",
+      "930 900 -zsh",
+      "940 930 herdr",
+    ].join("\n"));
+    assert.strictEqual(result.stablePid, 900);
+    assert.deepStrictEqual(result.pidChain, [100, 150, 200, 900]);
+  });
+
+  it("clients in different terminals: refuse to guess", () => {
+    const { result } = run([
+      "200 1 herdr",
+      "900 1 ghostty",
+      "920 900 herdr",
+      "800 1 /Applications/iTerm.app/Contents/MacOS/iTerm2",
+      "820 800 herdr",
+    ].join("\n"));
+    assert.strictEqual(result.stablePid, 200, "falls back to lastGoodPid (herdr server)");
+    assert.deepStrictEqual(result.pidChain, [100, 150, 200]);
+  });
+
+  it("ignores other detached herdr servers and clients that reach no terminal", () => {
+    const { result } = run([
+      "200 1 herdr",
+      "300 1 herdr",
+      "900 1 ghostty",
+      "920 900 herdr",
+      "700 1 sshd",
+      "720 700 herdr",
+    ].join("\n"));
+    assert.strictEqual(result.stablePid, 900);
+    assert.deepStrictEqual(result.pidChain, [100, 150, 200, 920, 900]);
+  });
+
+  it("does not read the process table without HERDR_ENV", () => {
+    const { result, calls } = run("900 1 ghostty\n920 900 herdr\n", {});
+    assert.strictEqual(result.stablePid, 200);
+    assert.ok(!calls.includes("ps -A -o pid=,ppid=,comm="), "no process-table read outside herdr");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // buildElectronLaunchConfig()
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -603,6 +756,42 @@ describe("createPidResolver() — Windows PowerShell path", { skip: process.plat
       }
     });
     assert.deepStrictEqual(seen, [3000, 3000, 3000, 3000, 3000, 3000, 5000, 5000]);
+  });
+
+  it("requests only the required CIM properties while preserving full CLI and foreground metadata", () => {
+    let seen;
+    withMockedExec((file, args, options) => {
+      seen = { file, args, options };
+      return snapshotEnvelopeJson([
+        { pid: 300, name: "powershell.exe", ppid: 301, startIdentity: "wrapper-start" },
+        { pid: 301, name: "codex.exe", ppid: 302, cmd: "codex --model test", startIdentity: "agent-start" },
+        { pid: 302, name: "windowsterminal.exe", ppid: 303, startIdentity: "terminal-start" },
+        { pid: 303, name: "explorer.exe", ppid: 0 },
+      ], { hwnd: "123456", pid: 302, className: "CASCADIA_HOSTING_WINDOW_CLASS" });
+    }, () => {
+      const result = createPidResolver({ ...LIVE_GATE, platformConfig: getPlatformConfig(), startPid: 300,
+        agentNames: { win: new Set(["codex.exe"]) } })();
+      assert.strictEqual(seen.file, "powershell.exe");
+      assert.deepStrictEqual(seen.args.slice(0, 5), ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]);
+      const script = seen.args[5];
+      assert.strictEqual(script.includes("Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate -ErrorAction SilentlyContinue"), true, "CIM requests exactly the required five properties");
+      assert.match(script, /Select-Object ProcessId, ParentProcessId, Name, CommandLine, @\{Name='StartIdentity';Expression=\{try \{ \$_\.CreationDate\.ToUniversalTime\(\)\.Ticks\.ToString\(\)/);
+      assert.match(script, /Add-Type -TypeDefinition \$typeDef/);
+      assert.match(script, /\[ClawdWin32\]::GetForegroundWindow\(\)/);
+      assert.match(script, /\[ClawdWin32\]::GetWindowThreadProcessId/);
+      assert.strictEqual(result.stablePid, 302, "CLI/noarg retains the terminal anchor");
+      assert.strictEqual(result.agentPid, 301);
+      assert.strictEqual(result.agentCommandLine, "codex --model test");
+      assert.strictEqual(result.foregroundWtHwnd, "123456");
+      assert.deepStrictEqual(result.pidChain, [300, 301, 302, 303]);
+      assert.strictEqual(result.agentProcessStartIdentity, "win32:agent-start");
+      assert.strictEqual(result.sourceProcessStartIdentity, "win32:terminal-start");
+      assert.strictEqual(Object.getOwnPropertyDescriptor(result, "agentProcessStartIdentity").enumerable, false);
+      assert.strictEqual(Object.getOwnPropertyDescriptor(result, "sourceProcessStartIdentity").enumerable, false);
+      assert.strictEqual(seen.options.timeout, 3000, "generic default is unchanged");
+      assert.strictEqual(seen.options.windowsHide, true);
+      assert.strictEqual(seen.options.maxBuffer, 8 * 1024 * 1024);
+    });
   });
 
   it("populates pidChain by walking the snapshot Map", () => {

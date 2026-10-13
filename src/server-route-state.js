@@ -49,6 +49,13 @@ const { extractPermissionToolInput } = require("../hooks/kimi-hook");
 const { normalizeCodexUserInputWire } = require("../hooks/codex-user-input");
 const { sanitizeShadowRecord } = require("./windows-process-chain-shadow-log");
 
+const NATIVE_TERMINAL_ANSWER_OPTIONS = Object.freeze({
+  disposition: Object.freeze({ reason: "handed_to_terminal", decided: true }),
+});
+const SESSION_ENDED_OPTIONS = Object.freeze({
+  disposition: Object.freeze({ reason: "agent_gone", decided: false }),
+});
+
 // /state POST body size cap. Raised 1024 → 4096 → 16384: a CJK
 // assistant_last_output (3 UTF-8 bytes/char) on a Stop completion blew past
 // 4096, and the server's headerless 413 made the hook read posted=false, so the
@@ -116,6 +123,17 @@ function normalizeOrcaPaneKey(value) {
   const text = value.trim();
   if (!text || text.length > 256) return null;
   return /^[\w-]+:[\w-]+$/.test(text) ? text : null;
+}
+
+// herdr pane ids look like "w5:p4" (#1139); same shape check as the Orca key.
+const normalizeHerdrPaneId = normalizeOrcaPaneKey;
+
+// Absolute socket path only: it is handed to the herdr CLI as HERDR_SOCKET_PATH.
+function normalizeHerdrSocket(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || text.length > 4096 || !text.startsWith("/")) return null;
+  return /[\0\r\n]/.test(text) ? null : text;
 }
 
 function normalizeAssistantLastOutput(value) {
@@ -271,6 +289,8 @@ function handleStatePost(req, res, options) {
         editor,
         tmuxSocket,
         tmuxClient,
+        herdrPaneId,
+        herdrSocket,
       } = stripRemoteProcessMetadata({
         sourcePid: Number.isFinite(data.source_pid) && data.source_pid > 0 ? Math.floor(data.source_pid) : null,
         wtHwnd: rawWtHwnd,
@@ -279,6 +299,8 @@ function handleStatePost(req, res, options) {
         editor: (data.editor === "code" || data.editor === "cursor") ? data.editor : null,
         tmuxSocket: normalizeTmuxSocket(data.tmux_socket),
         tmuxClient: normalizeTmuxClient(data.tmux_client),
+        herdrPaneId: normalizeHerdrPaneId(data.herdr_pane_id),
+        herdrSocket: normalizeHerdrSocket(data.herdr_socket),
       }, remoteProfile, wslSourced);
       // Intentional exception to the WSL PID strip: per-session automation
       // eligibility only strips Remote SSH, never WSL, to preserve the pre-fix
@@ -983,7 +1005,12 @@ function handleStatePost(req, res, options) {
           const behavior = typeof behaviorFor === "function"
             ? behaviorFor(candidates[0])
             : behaviorFor;
-          ctx.resolvePermissionEntry(candidates[0], behavior, message);
+          ctx.resolvePermissionEntry(
+            candidates[0],
+            behavior,
+            message,
+            NATIVE_TERMINAL_ANSWER_OPTIONS
+          );
         };
         const permissionLifecycleEvent = event === "PostToolUse"
           || event === "PostToolUseFailure"
@@ -1007,7 +1034,12 @@ function handleStatePost(req, res, options) {
             allowSingletonFallback: event === "Stop" && !isRetiredClaudePhase,
           });
           if (perm) {
-            ctx.resolvePermissionEntry(perm, stateSweepBehaviorFor(perm), "User answered in terminal");
+            ctx.resolvePermissionEntry(
+              perm,
+              stateSweepBehaviorFor(perm),
+              "User answered in terminal",
+              NATIVE_TERMINAL_ANSWER_OPTIONS
+            );
           }
           // A later hook event may be the only evidence that the user answered
           // a decision in the agent's native terminal UI. Never sweep across
@@ -1043,7 +1075,12 @@ function handleStatePost(req, res, options) {
           for (const stale of sessionEndPending.filter((entry) => (
             isDecisionInteraction(entry.interaction)
           ))) {
-            ctx.resolvePermissionEntry(stale, "no-decision", "Session ended");
+            ctx.resolvePermissionEntry(
+              stale,
+              "no-decision",
+              "Session ended",
+              SESSION_ENDED_OPTIONS
+            );
           }
         } else if (hasExplicitPermissionLifecycleSession && !isRetiredClaudePhase && (
           event === "UserPromptSubmit"
@@ -1077,6 +1114,8 @@ function handleStatePost(req, res, options) {
             tmuxSocket,
             tmuxClient,
             orcaPaneKey,
+            herdrPaneId,
+            herdrSocket,
             agentPid: effectiveProcessMetadata.agentPid,
             agentId,
             ...(subagentId ? { subagentId } : {}),

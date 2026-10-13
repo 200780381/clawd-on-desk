@@ -648,6 +648,33 @@ class FakeElement {
   }
 }
 
+let nextFakeSettingRowId = 1;
+function buildFakeSettingRow(document, config = {}) {
+  const element = document.createElement("div");
+  element.className = ["row", config.className || ""].filter(Boolean).join(" ");
+  const textElement = document.createElement("div");
+  textElement.className = "row-text";
+  const labelElement = document.createElement("span");
+  labelElement.className = "row-label";
+  labelElement.id = `fake-row-label-${nextFakeSettingRowId++}`;
+  labelElement.textContent = config.label != null ? String(config.label) : (config.labelKey || "");
+  textElement.appendChild(labelElement);
+  let descriptionElement = null;
+  const description = config.description != null ? String(config.description) : (config.descriptionKey || "");
+  if (description) {
+    descriptionElement = document.createElement("span");
+    descriptionElement.className = "row-desc";
+    descriptionElement.id = `fake-row-description-${nextFakeSettingRowId++}`;
+    descriptionElement.textContent = description;
+    textElement.appendChild(descriptionElement);
+  }
+  const controlElement = document.createElement("div");
+  controlElement.className = ["row-control", config.controlClassName || ""].filter(Boolean).join(" ");
+  element.appendChild(textElement);
+  element.appendChild(controlElement);
+  return { element, textElement, labelElement, descriptionElement, controlElement };
+}
+
 function loadSharedButtonHelpersForTest(document, settingsAPI = {}, getTranslate = null) {
   const shared = loadSettingsCoreForTest(settingsAPI, { document }).helpers;
   const translateConfig = (config = {}) => {
@@ -662,6 +689,17 @@ function loadSharedButtonHelpersForTest(document, settingsAPI = {}, getTranslate
     buildButton: (config) => shared.buildButton(translateConfig(config)),
     setButtonState: (button, patch) => shared.setButtonState(button, translateConfig(patch)),
     buildSwitch: (config) => shared.buildSwitch(config),
+  };
+}
+
+function loadSharedChoiceHelpersForTest(document) {
+  const core = loadSettingsCoreForTest({}, { document });
+  return {
+    buildTabs: core.helpers.buildTabs,
+    createSubpageHost: core.helpers.createSubpageHost,
+    clearMountedControls: core.ops.clearMountedControls,
+    buildSegmentedRadio: core.helpers.buildSegmentedRadio,
+    registerMountedDisposable: core.helpers.registerMountedDisposable,
   };
 }
 
@@ -699,6 +737,7 @@ function loadRecapTabForTest({ data, agentMetadata = [], queryRecap } = {}) {
     state: { activeTab: "recap", snapshot: { lang: "en", recapEnabled: true } },
     runtime: { agentMetadata },
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => strings[key] || key,
       buildSwitch: sharedControls.buildSwitch,
       buildSection: (title, rows) => {
@@ -780,6 +819,58 @@ function sampleRecapView() {
       ],
     }],
   };
+}
+
+function setFakeTextInputState(input, nextState = {}) {
+  const state = { disabled: false, pending: false, invalid: false, lockWhilePending: true,
+    ...(input._settingsTextInputState || {}) };
+  for (const key of ["disabled", "pending", "invalid"]) {
+    if (Object.prototype.hasOwnProperty.call(nextState, key)) state[key] = nextState[key] === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextState, "lockWhilePending")) {
+    state.lockWhilePending = nextState.lockWhilePending !== false;
+  }
+  input._settingsTextInputState = state;
+  input.disabled = state.disabled || (state.pending && state.lockWhilePending);
+  input.classList.toggle("pending", state.pending);
+  input.classList.toggle("invalid", state.invalid);
+  input.setAttribute("aria-busy", state.pending ? "true" : "false");
+  input.setAttribute("aria-invalid", state.invalid ? "true" : "false");
+  if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
+    if (nextState.describedBy) input.setAttribute("aria-describedby", nextState.describedBy);
+    else input.removeAttribute("aria-describedby");
+  }
+  return input;
+}
+
+function buildFakeTextInput(document, config = {}) {
+  const input = document.createElement("input");
+  const size = config.size === "compact" ? "compact" : "regular";
+  input.type = config.type || "text";
+  input.className = [
+    "settings-text-input",
+    `settings-text-input-${size}`,
+    config.className || "",
+  ].filter(Boolean).join(" ");
+  if (config.value != null) input.value = String(config.value);
+  if (config.placeholder != null) input.placeholder = String(config.placeholder);
+  if (config.autocomplete != null) input.autocomplete = String(config.autocomplete);
+  if (config.spellcheck != null) input.spellcheck = config.spellcheck === true;
+  if (config.inputMode != null) input.inputMode = String(config.inputMode);
+  if (config.maxLength != null) input.maxLength = Number(config.maxLength);
+  if (config.pattern != null) input.pattern = String(config.pattern);
+  if (config.ariaLabel) input.setAttribute("aria-label", config.ariaLabel);
+  if (config.describedBy) input.setAttribute("aria-describedby", config.describedBy);
+  if (typeof config.onInput === "function") input.addEventListener("input", config.onInput);
+  if (config.stopPropagation === true) input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (config.stopPropagation === true) event.stopPropagation();
+    if (event.key !== "Enter" || typeof config.onEnter !== "function"
+      || event.isComposing === true || event.keyCode === 229) return;
+    event.preventDefault();
+    config.onEnter(event, input);
+  });
+  return setFakeTextInputState(input, config);
 }
 
 function loadSharedLanguagePickerForTest({
@@ -1650,6 +1741,7 @@ function loadAgentsTabForTest({
           dshNoticeFirstInstall: "Installed in DeepSeek Harness desktop. It loads automatically while the app is open; no restart needed.",
           dshNoticeManualCommand: "Run this in a terminal to finish. Clawd will not run it for you:",
           dshNoticeInstallFailed: "Not installed: {message}",
+          dshNoticeGenerationConflict: "DeepSeek Harness moved to a new version family. The Clawd plugin keeps working. To switch it to the new family, click Uninstall and then Install here, then restart any running dsh web.",
           dshNoticeUninstallFailed: "Not fully removed: {message}",
           dshNoticeOpenDoctor: "Open Doctor and click {fix}.",
           doctorFix: "Repair Now",
@@ -1946,7 +2038,11 @@ function loadTelegramApprovalTabForTest({
     },
     runtime: {},
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
+      buildSettingRow: (config) => buildFakeSettingRow(document, config),
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
       buildSwitch: buttonHelpers.buildSwitch,
@@ -1961,69 +2057,6 @@ function loadTelegramApprovalTabForTest({
         core.state.mountedControls.settingsSelects.add(control);
         return control;
       },
-      buildSegmentedRadio: (config) => {
-        const element = document.createElement("div");
-        element.className = `segmented settings-segmented-radio ${config.className || ""}`.trim();
-        element.setAttribute("role", "radiogroup");
-        element.setAttribute("aria-label", config.ariaLabel || "");
-        let currentValue = String(config.value);
-        const buttons = (config.options || []).map((option) => {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.dataset.value = String(option.value);
-          button.setAttribute("role", "radio");
-          const label = document.createElement("span");
-          label.className = "settings-segmented-radio-label";
-          label.textContent = String(option.label);
-          button.appendChild(label);
-          if (option.description) {
-            const description = document.createElement("span");
-            description.className = "settings-segmented-radio-description";
-            description.textContent = String(option.description);
-            button.appendChild(description);
-          }
-          element.appendChild(button);
-          return button;
-        });
-        const sync = () => {
-          for (const button of buttons) {
-            const selected = button.dataset.value === currentValue;
-            button.classList.toggle("active", selected);
-            button.setAttribute("aria-checked", selected ? "true" : "false");
-            button.tabIndex = selected ? 0 : -1;
-            button.disabled = config.disabled === true;
-          }
-        };
-        for (const button of buttons) {
-          button.addEventListener("click", () => {
-            const previous = currentValue;
-            currentValue = button.dataset.value;
-            sync();
-            let result;
-            try {
-              result = typeof config.onChange === "function"
-                ? config.onChange(currentValue)
-                : true;
-            } catch (_) {
-              result = false;
-            }
-            if (result === false) {
-              currentValue = previous;
-              sync();
-              return;
-            }
-            Promise.resolve(result).then((accepted) => {
-              if (accepted === false) currentValue = previous;
-              sync();
-            });
-          });
-        }
-        sync();
-        return { element };
-      },
-      // Mirror the real buildCollapsibleGroup just enough that header content,
-      // title/summary, and children all end up in the DOM tree; collapsed
-      // behaviour is exercised by the real component's own tests.
       buildCollapsibleGroup: ({
         id,
         title = "",
@@ -2103,6 +2136,7 @@ function loadTelegramApprovalTabForTest({
     tabs: {},
   };
   coreRef = core;
+  core.ops.clearMountedControls = core.helpers.clearMountedControls;
   context.ClawdSettingsTabTelegramApproval.init(core);
   function render() {
     content.innerHTML = "";
@@ -2253,7 +2287,11 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
       activeTab: "discord-presence",
     },
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
+      buildSettingRow: (config) => buildFakeSettingRow(document, config),
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
       buildSwitch: buttonHelpers.buildSwitch,
@@ -2383,7 +2421,10 @@ function assertVisibleFeishuLookupPreflight(card, lookupButton, expectedMessage)
   assert.equal(status.getAttribute("role"), "status");
   assert.equal(status.getAttribute("aria-live"), "polite");
   assert.equal(status.getAttribute("aria-atomic"), "true");
-  assert.equal(input.getAttribute("aria-describedby"), status.id);
+  const describedByIds = String(input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+  assert.ok(describedByIds.includes(status.id));
+  assert.ok(describedByIds.some((id) => id !== status.id),
+    "the field keeps its row description while adding preflight status");
   assert.equal(input.getAttribute("aria-invalid"), valueInvalid ? "true" : "false");
   assert.equal(lookupButton.getAttribute("aria-describedby"), status.id);
   assert.equal(lookupButton.title, "", "visible status must replace title-only feedback");
@@ -2450,6 +2491,7 @@ function loadAboutTabForTest({
     },
     runtime: { about: { infoCache: null, clickCount: 0, updateCheckSnapshot: { state: "idle" } } },
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
@@ -2536,7 +2578,10 @@ function loadAnimOverridesTabForTest({
     state: { activeTab: "animOverrides", mountedControls: {} },
     runtime,
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       createDisclosureChevron: (className) => {
         const chevron = document.createElement("span");
         chevron.className = className;
@@ -2658,6 +2703,30 @@ function createAnimOverridesRuntime(card, overrides = {}) {
 }
 
 describe("settings renderer browser environment", () => {
+  it("keeps recap chrome and chart mounted while a period query is pending", async () => {
+    let finish;
+    const harness = loadRecapTabForTest({
+      queryRecap: (period) => period === "today" ? Promise.resolve(sampleRecapView())
+        : new Promise((resolve) => { finish = resolve; }),
+    });
+    await harness.settle();
+    const header = harness.content.querySelector(".recap-page-header");
+    const chart = harness.content.querySelector(".recap-card");
+    const renders = harness.renderRequests.length;
+    header.querySelectorAll(".recap-period-button")[1].click();
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-page-header"), header,
+      "switching a period must not rebuild the page header");
+    assert.strictEqual(harness.content.querySelector(".recap-card"), chart,
+      "retain the chart geometry until replacement data is ready");
+    assert.strictEqual(harness.renderRequests.length, renders);
+    finish(sampleRecapView());
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-page-header"), header);
+    assert.notStrictEqual(harness.content.querySelector(".recap-card"), chart);
+    assert.strictEqual(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-week");
+  });
+
   it("defers recap recovery queries while the Settings document is hidden", async () => {
     let queryCount = 0;
     const harness = loadRecapTabForTest({
@@ -2680,6 +2749,161 @@ describe("settings renderer browser environment", () => {
     harness.core.tabs.recap.applyDataChanged();
     await harness.settle();
     assert.strictEqual(queryCount, 2);
+  });
+
+  it("keeps only the newest recap period result after rapid switches", async () => {
+    const requests = new Map();
+    const harness = loadRecapTabForTest({ queryRecap: (period) => {
+      if (period === "today") return Promise.resolve(sampleRecapView());
+      const deferred = createDeferred();
+      requests.set(period, deferred);
+      return deferred.promise;
+    } });
+    await harness.settle();
+    const choices = harness.content.querySelectorAll(".recap-period-button");
+    choices[1].click();
+    choices[2].click();
+    choices[3].click();
+    await harness.settle();
+    assert.deepStrictEqual([...requests.keys()], ["week", "month", "year"]);
+    assert.equal(harness.content.querySelector(".recap-data-body").inert, true);
+    requests.get("year").resolve(sampleRecapView());
+    await harness.settle();
+    const chart = harness.content.querySelector(".recap-card");
+    requests.get("month").reject(new Error("late failure"));
+    requests.get("week").resolve(sampleRecapView());
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-card"), chart);
+    assert.equal(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-year");
+    assert.equal(harness.content.querySelector(".recap-data-body").inert, false);
+    assert.equal(harness.content.querySelector(".recap-data-body").getAttribute("aria-busy"), "false");
+    assert.equal(choices[3].getAttribute("aria-checked"), "true");
+  });
+
+  it("starts each recap keyboard grid at the current date and shares empty-cell popovers", async () => {
+    for (const [index, period] of ["today", "week", "month", "year"].entries()) {
+      const harness = loadRecapTabForTest({ data: sampleRecapView() });
+      await harness.settle();
+      if (index) {
+        harness.content.querySelectorAll(".recap-period-button")[index].click();
+        await harness.settle();
+      }
+      const grid = harness.content.querySelector(".recap-grid");
+      const cells = grid.querySelectorAll(".recap-cell");
+      const current = cells.find((cell) => cell.id === grid.getAttribute("aria-activedescendant"));
+      assert.match(current.dataset.cellKey, /2026-08-29/, period);
+      assert.ok(cells.every((cell) => !cell.title), "native tooltips must not compete with the shared popover");
+      const empty = cells.find((cell) => cell.getAttribute("role") === "gridcell"
+        && !cell.classList.contains("recap-cell-activity"));
+      empty.dispatchEvent({ type: "mouseenter" });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      const popover = harness.content.querySelector(".recap-cell-popover");
+      assert.ok(popover, `${period} empty cells use the rounded popover`);
+      assert.equal(`${popover.querySelector("strong").textContent}: ${popover.querySelector(".recap-cell-popover-note").textContent}`,
+        empty.getAttribute("aria-label"), "date and status occupy separate lines without losing meaning");
+      if (period === "month") {
+        const today = grid.querySelectorAll(".recap-cell-current");
+        assert.equal(today.length, 1);
+        assert.match(today[0].dataset.cellKey, /2026-08-29/);
+        assert.equal(today[0].getAttribute("aria-current"), "date");
+      }
+      if (period === "week") {
+        assert.deepEqual(grid.querySelector(".recap-week-hours").children.map((node) => node.textContent).filter(Boolean),
+          ["00", "06", "12", "18"]);
+      }
+      empty.dispatchEvent({ type: "mouseleave" });
+      assert.equal(harness.content.querySelector(".recap-cell-popover"), null);
+      grid.dispatchEvent({ type: "keydown", key: "ArrowLeft", preventDefault() {} });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      assert.ok(harness.content.querySelector(".recap-cell-popover"), "keyboard uses the same popover");
+      grid.dispatchEvent({ type: "blur" });
+      assert.equal(harness.content.querySelector(".recap-cell-popover"), null);
+      harness.core.tabs.recap.onExit();
+    }
+  });
+
+  it("shows a local recap query failure and retries without replacing period controls", async () => {
+    let fail = true;
+    const harness = loadRecapTabForTest({ queryRecap: async (period) => {
+      if (period === "week" && fail) throw new Error("query failed");
+      return sampleRecapView();
+    } });
+    await harness.settle();
+    const header = harness.content.querySelector(".recap-page-header");
+    header.querySelectorAll(".recap-period-button")[1].click();
+    await harness.settle();
+    assert.ok(harness.content.querySelector(".recap-error"));
+    assert.equal(harness.content.querySelector(".recap-data-body").inert, false);
+    fail = false;
+    harness.content.querySelector(".recap-error button").click();
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-page-header"), header);
+    assert.ok(harness.content.querySelector(".recap-card"));
+  });
+
+  it("ignores a recap query that completes after leaving the page", async () => {
+    const pending = createDeferred();
+    const harness = loadRecapTabForTest({ queryRecap: (period) => period === "today"
+      ? Promise.resolve(sampleRecapView()) : pending.promise });
+    await harness.settle();
+    harness.content.querySelectorAll(".recap-period-button")[1].click();
+    await harness.settle();
+    const chart = harness.content.querySelector(".recap-card");
+    harness.core.tabs.recap.onExit();
+    harness.core.state.activeTab = "general";
+    pending.resolve(sampleRecapView());
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-card"), chart);
+    assert.equal(harness.renderRequests.length, 0);
+    harness.core.state.activeTab = "recap";
+    harness.content.innerHTML = "";
+    harness.core.tabs.recap.render(harness.content);
+    await harness.settle();
+    assert.equal(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-week");
+  });
+
+  it("re-queues a background recap refresh that was dropped by leaving the page", async () => {
+    const queries = [];
+    const harness = loadRecapTabForTest({ queryRecap: (period) => {
+      const deferred = createDeferred();
+      queries.push(deferred);
+      if (queries.length === 1) deferred.resolve(sampleRecapView());
+      return deferred.promise;
+    } });
+    await harness.settle();
+    assert.equal(queries.length, 1);
+    harness.core.tabs.recap.applyDataChanged();
+    await harness.settle();
+    assert.equal(queries.length, 2);
+    harness.core.tabs.recap.onExit();
+    harness.core.state.activeTab = "general";
+    queries[1].resolve(sampleRecapView());
+    await harness.settle();
+    assert.equal(queries.length, 2);
+    harness.core.state.activeTab = "recap";
+    harness.content.innerHTML = "";
+    harness.core.tabs.recap.render(harness.content);
+    await harness.settle();
+    assert.equal(queries.length, 3);
+  });
+
+  it("keeps Remote Approval chrome mounted while switching Channels and LAN", async () => {
+    const harness = loadTelegramApprovalTabForTest();
+    await Promise.resolve();
+    const heading = harness.content.children[0];
+    const tabs = harness.content.querySelector(".settings-tabs");
+    const choices = tabs.querySelectorAll("button");
+    const renders = harness.renderRequests.length;
+    choices[1].click();
+    assert.strictEqual(harness.content.children[0], heading);
+    assert.strictEqual(harness.content.querySelector(".settings-tabs"), tabs);
+    assert.equal(harness.core.runtime.remoteApprovalSubtab, "lan");
+    assert.equal(harness.renderRequests.length, renders);
+    choices[0].click();
+    assert.equal(harness.core.runtime.remoteApprovalSubtab, "channels");
+    assert.equal(choices[0].getAttribute("aria-selected"), "true");
+    assert.equal(harness.renderRequests.length, renders);
+    assert.strictEqual(harness.document.activeElement, choices[0]);
   });
 
   it("re-queries an unavailable recap page after the runtime recovery signal", async () => {
@@ -2927,7 +3151,7 @@ describe("settings renderer browser environment", () => {
     harness.core.tabs.recap.applyDataChanged();
     await harness.settle();
     assert.deepStrictEqual(focusKeys(), before);
-    assert.strictEqual(harness.renderRequests.at(-1).preserveScroll, true);
+    assert.strictEqual(harness.renderRequests.length, 0, "live data updates only the body");
   });
 
   it("keeps month and year placeholder cells out of the accessibility grid", async () => {
@@ -3079,7 +3303,9 @@ describe("settings renderer browser environment", () => {
 
     assert.equal(input.value, "");
     assert.equal(input.getAttribute("aria-invalid"), "false");
-    assert.equal(input.getAttribute("aria-describedby"), undefined);
+    const initialDescriptionIds = String(input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    assert.equal(initialDescriptionIds.length, 1, "the untouched field is described only by its row hint");
+    assert.notEqual(initialDescriptionIds[0], status.id);
     assert.equal(status.getAttribute("hidden") == null, true);
     assert.equal(status.textContent, "");
     assert.equal(saveButton.disabled, false);
@@ -3230,7 +3456,8 @@ describe("settings renderer browser environment", () => {
     assert.equal(lookupButton.disabled, false);
     assert.equal(status.getAttribute("hidden") == null, true);
     assert.equal(status.textContent, "");
-    assert.equal(input.getAttribute("aria-describedby"), undefined);
+    assert.ok(input.getAttribute("aria-describedby"), "the field keeps its row hint after preflight clears");
+    assert.notEqual(input.getAttribute("aria-describedby"), status.id);
     assert.equal(input.getAttribute("aria-invalid"), "false");
     assert.equal(lookupButton.getAttribute("aria-describedby"), undefined);
     lookupButton.dispatchEvent({ type: "click" });
@@ -3294,7 +3521,7 @@ describe("settings renderer browser environment", () => {
     );
     assert.equal(pendingStatus.textContent, "feishuApprovalLookupMissingContactScope");
     assert.equal(pendingStatus.getAttribute("hidden") == null, true);
-    assert.equal(pendingInput.getAttribute("aria-describedby"), pendingStatus.id);
+    assert.ok(String(pendingInput.getAttribute("aria-describedby")).split(/\s+/).includes(pendingStatus.id));
     assert.equal(cancelButton.disabled, true);
     assert.equal(harness.renderRequests.length, renderRequestCount);
 
@@ -5123,6 +5350,7 @@ describe("settings renderer browser environment", () => {
       ],
     }]);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.updates)), []);
+    await new Promise((resolve) => setImmediate(resolve));
     const offButton = select.querySelectorAll("button").find((button) => button.dataset.value === "off");
     assert.equal(offButton.getAttribute("aria-checked"), "true");
 
@@ -5891,7 +6119,10 @@ describe("settings renderer browser environment", () => {
       const returnedInput = returnedCard.querySelectorAll("input").at(-1);
       const returnedStatus = returnedCard.querySelector(".feishu-approval-lookup-preflight-status");
       assert.equal(returnedInput.value, "");
-      assert.equal(returnedInput.getAttribute("aria-describedby"), undefined);
+      const returnedDescriptionIds = String(returnedInput.getAttribute("aria-describedby") || "")
+        .split(/\s+/).filter(Boolean);
+      assert.equal(returnedDescriptionIds.length, 1);
+      assert.notEqual(returnedDescriptionIds[0], returnedStatus.id);
       assert.equal(returnedStatus.textContent, "");
     }
   });
@@ -6520,7 +6751,8 @@ describe("settings renderer browser environment", () => {
         retryInput.value = "retry@example.com";
         retryInput.dispatchEvent({ type: "input" });
         assert.equal(resultStatus.textContent, "", `${platform}/${code} should clear on input`);
-        assert.equal(retryInput.getAttribute("aria-describedby"), undefined);
+        assert.ok(retryInput.getAttribute("aria-describedby"));
+        assert.notEqual(retryInput.getAttribute("aria-describedby"), resultStatus.id);
       }
     }
   });
@@ -9385,7 +9617,7 @@ describe("settings renderer browser environment", () => {
     acceptChanges = false;
     buttons[0].dispatchEvent(createKeyboardEventForTest("End"));
     assert.equal(control.element.getAttribute("aria-busy"), "true");
-    assert.equal(buttons[0].disabled, true);
+    assert.equal(buttons[0].getAttribute("aria-disabled"), "true");
     await Promise.resolve();
     await Promise.resolve();
     assert.equal(buttons[0].getAttribute("aria-checked"), "true");
@@ -9394,6 +9626,39 @@ describe("settings renderer browser environment", () => {
     core.ops.clearMountedControls();
     assert.equal(buttons[0].eventListeners.click.length, 0);
     assert.equal(buttons[0].eventListeners.keydown.length, 0);
+  });
+
+  it("lets segmented radio and tab clicks reach document listeners unless a row opts out", () => {
+    const body = new FakeElement("body");
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const options = [{ value: "a", label: "A" }, { value: "b", label: "B" }];
+    const clickWithProbe = (button) => {
+      let stopped = false;
+      button.eventListeners.click[0]({ currentTarget: button, stopPropagation: () => { stopped = true; } });
+      return stopped;
+    };
+    const plain = core.helpers.buildSegmentedRadio({ value: "a", ariaLabel: "Plain", options, onChange: () => true });
+    const isolated = core.helpers.buildSegmentedRadio({
+      value: "a", ariaLabel: "Isolated", options, stopPropagation: true, onChange: () => true,
+    });
+    const tabs = core.helpers.buildTabs({
+      id: "probe-tabs",
+      ariaLabel: "Pages",
+      value: "a",
+      options,
+      onChange: () => true,
+    });
+    body.appendChild(plain.element);
+    body.appendChild(isolated.element);
+    body.appendChild(tabs.element);
+    assert.equal(clickWithProbe(plain.element.querySelectorAll("button")[1]), false);
+    assert.equal(clickWithProbe(isolated.element.querySelectorAll("button")[1]), true);
+    assert.equal(clickWithProbe(tabs.element.querySelectorAll("button")[1]), false);
   });
 
   it("restores segmented-control focus after a warning dialog closes", async () => {
@@ -9424,6 +9689,7 @@ describe("settings renderer browser environment", () => {
     const core = loadSettingsCoreForTest({}, { document });
     const control = core.helpers.buildSegmentedRadio({
       value: "off",
+      ariaLabel: "Automation",
       options: [{ value: "off", label: "Off" }, { value: "auto", label: "Auto" }],
       onChange: () => core.helpers.showSettingsConfirmModal({
         title: "Enable automation?",
@@ -9439,7 +9705,7 @@ describe("settings renderer browser environment", () => {
     source.focus();
     source.dispatchEvent({ type: "click" });
 
-    assert.equal(source.disabled, true);
+    assert.equal(source.getAttribute("aria-disabled"), "true");
     assert.notStrictEqual(document.activeElement, source);
     listeners.get("keydown")({ key: "Escape", preventDefault() {} });
     await Promise.resolve();
@@ -9760,6 +10026,96 @@ describe("settings renderer browser environment", () => {
     );
   });
 
+  it("builds Settings text inputs from one size, accessibility, state, and IME-safe Enter contract", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const submitted = [];
+    const input = core.helpers.buildTextInput({
+      type: "password",
+      size: "compact",
+      value: "secret",
+      placeholder: "API key",
+      autocomplete: "new-password",
+      spellcheck: false,
+      inputMode: "text",
+      ariaLabel: "Dedicated API key",
+      describedBy: "key-help",
+      pending: true,
+      lockWhilePending: false,
+      onEnter: (_event, element) => submitted.push(element.value),
+    });
+
+    assert.equal(input.classList.contains("settings-text-input"), true);
+    assert.equal(input.classList.contains("settings-text-input-compact"), true);
+    assert.equal(input.classList.contains("pending"), true);
+    assert.equal(input.type, "password");
+    assert.equal(input.value, "secret");
+    assert.equal(input.autocomplete, "new-password");
+    assert.equal(input.spellcheck, false);
+    assert.equal(input.disabled, false, "editable-pending fields stay editable");
+    assert.equal(input.getAttribute("aria-busy"), "true");
+    assert.equal(input.getAttribute("aria-invalid"), "false");
+    assert.equal(input.getAttribute("aria-label"), "Dedicated API key");
+    assert.equal(input.getAttribute("aria-describedby"), "key-help");
+
+    input.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+    input.dispatchEvent({ type: "keydown", key: "Enter", keyCode: 229 });
+    assert.deepStrictEqual(submitted, [], "IME composition must not submit");
+    const enter = { type: "keydown", key: "Enter" };
+    input.dispatchEvent(enter);
+    assert.deepStrictEqual(submitted, ["secret"]);
+    assert.equal(enter.defaultPrevented, true);
+
+    core.helpers.setTextInputState(input, {
+      invalid: true,
+      describedBy: "key-error",
+    });
+    assert.equal(input.disabled, false, "partial state updates preserve editable-pending mode");
+    assert.equal(input.getAttribute("aria-busy"), "true", "partial updates preserve pending state");
+    assert.equal(input.classList.contains("invalid"), true);
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(input.getAttribute("aria-describedby"), "key-error");
+
+    core.helpers.setTextInputState(input, { lockWhilePending: true });
+    assert.equal(input.disabled, true, "pending fields lock when requested");
+    const passive = core.helpers.buildTextInput({ ariaLabel: "Passive field" });
+    const passiveEnter = { type: "keydown", key: "Enter" };
+    passive.dispatchEvent(passiveEnter);
+    assert.notEqual(passiveEnter.defaultPrevented, true, "Enter remains untouched without an onEnter callback");
+
+    const canonical = core.helpers.buildTextInput({
+      ariaLabel: "Canonical description",
+      ariaDescribedBy: "canonical-help",
+    });
+    assert.equal(canonical.getAttribute("aria-describedby"), "canonical-help");
+    const canonicalEmpty = core.helpers.buildTextInput({
+      ariaLabel: "Canonical empty description",
+      ariaDescribedBy: "",
+      describedBy: "legacy-help",
+    });
+    assert.ok(!canonicalEmpty.getAttribute("aria-describedby"),
+      "an explicit empty canonical value must not fall back to the compatibility alias");
+    const canonicalEmptyLabel = core.helpers.buildTextInput({
+      ariaLabel: "Canonical empty label relationship",
+      ariaLabelledBy: "",
+      labelledBy: "legacy-label",
+    });
+    assert.ok(!canonicalEmptyLabel.getAttribute("aria-labelledby"),
+      "an explicit empty canonical label relationship must not fall back to the compatibility alias");
+    const compatibility = core.helpers.buildTextInput({
+      ariaLabel: "Compatibility description",
+      describedBy: "compatibility-help",
+    });
+    assert.equal(compatibility.getAttribute("aria-describedby"), "compatibility-help");
+    core.helpers.setTextInputState(compatibility, { describedBy: "" });
+    assert.equal(compatibility.getAttribute("aria-describedby"), null,
+      "an explicit empty compatibility value clears the relationship");
+  });
+
   it("builds a controlled Settings switch with unified input and accessibility state", () => {
     const document = {
       body: new FakeElement("body"),
@@ -9858,6 +10214,136 @@ describe("settings renderer browser environment", () => {
     const core = loadSettingsCoreForTest({}, { document });
     assert.throws(() => core.helpers.buildSwitch({ checked: false }), /requires ariaLabel or ariaLabelledBy/);
   });
+
+  it("builds Setting rows with stable label and description relationships", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const first = core.helpers.buildSettingRow({
+      label: "Host",
+      description: "Remote host name",
+      className: "remote-row",
+      controlClassName: "remote-control",
+    });
+    const second = core.helpers.buildSettingRow({ label: "Port" });
+
+    assert.equal(first.element.classList.contains("row"), true);
+    assert.equal(first.element.classList.contains("remote-row"), true);
+    assert.equal(first.textElement.classList.contains("row-text"), true);
+    assert.equal(first.labelElement.textContent, "Host");
+    assert.equal(first.descriptionElement.textContent, "Remote host name");
+    assert.equal(first.controlElement.classList.contains("row-control"), true);
+    assert.equal(first.controlElement.classList.contains("remote-control"), true);
+    assert.notEqual(first.labelElement.id, second.labelElement.id);
+    assert.equal(second.descriptionElement, null, "description-less rows do not mount an empty node");
+  });
+
+  it("controls Form Field state axes, validation relationships, callbacks, and disposal independently", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const calls = [];
+    const field = core.helpers.buildFormField({
+      type: "search",
+      value: "draft",
+      ariaLabelledBy: "field-label",
+      ariaDescribedBy: "field-help",
+      stopPropagation: true,
+      disabled: true,
+      pending: true,
+      onInput: ({ value }) => calls.push(value),
+    });
+
+    assert.equal(field.element.classList.contains("settings-form-field"), true);
+    assert.equal(field.element.getAttribute("aria-labelledby"), "field-label");
+    assert.equal(field.element.getAttribute("aria-describedby"), "field-help");
+    assert.equal(field.element.disabled, true);
+    assert.equal(field.element.getAttribute("aria-busy"), "true");
+    field.setState({ pending: false });
+    assert.equal(field.element.disabled, true, "ending pending does not clear business disabled");
+    field.setState({
+      disabled: false,
+      invalid: true,
+      validationMessage: "Host is required",
+    });
+    assert.equal(field.element.disabled, false);
+    assert.equal(field.element.getAttribute("aria-invalid"), "true");
+    assert.equal(field.validationElement.textContent, "Host is required");
+    assert.equal(field.validationElement.hidden, false);
+    assert.equal(field.element.getAttribute("aria-describedby"), `field-help ${field.validationElement.id}`);
+    assert.equal(document.body.contains(field.validationElement), true,
+      "validation messages must be mounted so aria-describedby resolves");
+
+    field.element.value = "new draft";
+    field.setState({ invalid: false });
+    assert.equal(field.getValue(), "new draft", "unspecified value does not overwrite an active draft");
+    field.element.dispatchEvent({ type: "input" });
+    assert.deepStrictEqual(calls, ["new draft"]);
+    field.setState({ validationMessage: "" });
+    assert.equal(field.element.getAttribute("aria-describedby"), "field-help",
+      "clearing validation keeps the row description relationship");
+
+    field.dispose();
+    assert.equal(document.body.contains(field.validationElement), false,
+      "disposed fields remove their validation node");
+    field.element.value = "ignored";
+    field.element.dispatchEvent({ type: "input" });
+    assert.deepStrictEqual(calls, ["new draft"], "disposed fields remove their callbacks");
+    assert.equal(core.state.mountedControls.formFields.size, 0);
+    const rerenderedField = core.helpers.buildFormField({ ariaLabel: "Rerendered field" });
+    assert.equal(core.state.mountedControls.formFields.size, 1);
+    core.ops.clearMountedControls();
+    rerenderedField.element.dispatchEvent({ type: "input" });
+    assert.equal(core.state.mountedControls.formFields.size, 0,
+      "Settings rerenders dispose every mounted Form Field controller");
+    assert.throws(() => core.helpers.buildFormField({ type: "text" }), /ariaLabel or ariaLabelledBy/);
+  });
+
+  it("routes every Settings single-line text surface through the shared primitive", () => {
+    const files = [
+      "settings-tab-agents.js",
+      "settings-tab-discord-presence.js",
+      "settings-tab-general.js",
+      "settings-tab-remote-ssh.js",
+      "settings-tab-telegram-approval.js",
+    ];
+    for (const file of files) {
+      const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+      assert.ok(source.includes("buildTextInput({"), `${file} should use the compatibility adapter`);
+      assert.doesNotMatch(source, /document\.createElement\("input"\)/, `${file} should not create raw inputs`);
+    }
+    const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
+    assert.ok(coreSource.includes("function buildFormField(config = {})"));
+    assert.ok(coreSource.includes("function buildSettingRow(config = {})"));
+    assert.ok(coreSource.includes("const control = buildFormField({"),
+      "the compatibility adapter must route through the Form Field controller");
+    assert.ok(coreSource.includes("state.mountedControls.formFields.add(control)"));
+    assert.ok(coreSource.includes("state.mountedControls.formFields.delete(control)"));
+    for (const file of [
+      "settings-tab-agents.js",
+      "settings-tab-discord-presence.js",
+      "settings-tab-telegram-approval.js",
+    ]) {
+      const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+      assert.ok(source.includes("buildSettingRow({"), `${file} should compose standard fields with Setting Row`);
+    }
+    const animSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-anim-overrides.js"), "utf8");
+    assert.match(animSource, /const range = document\.createElement\("input"\);[\s\S]*range\.type = "range";/,
+      "Range remains a documented P2 exception");
+    assert.match(animSource, /const number = document\.createElement\("input"\);[\s\S]*number\.type = "number";/,
+      "the number input paired with Range remains in the Range contract");
+    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
+    assert.match(css, /\.settings-text-input\s*\{[\s\S]*border-radius:\s*8px;[\s\S]*background:\s*var\(--panel-bg\);/);
+    assert.match(css, /\.settings-text-input:focus\s*\{[\s\S]*var\(--accent\)/);
+    assert.match(css, /\.settings-text-input\.invalid/);
+  });
+
 
   it("keeps interactive Settings switch DOM and semantics owned by the shared primitive", () => {
     const allowedOwner = "settings-ui-core.js";
@@ -10632,14 +11118,14 @@ describe("settings renderer browser environment", () => {
     assert.ok(generalSource.includes("notificationBubbleAutoCloseSeconds"));
     assert.ok(generalSource.includes("updateBubbleAutoCloseSeconds"));
     assert.ok(generalSource.includes("bubble-policy-prefix"));
-    assert.ok(generalSource.includes('input.type = "text"'));
-    assert.ok(generalSource.includes("input.maxLength = 4"));
-    assert.ok(generalSource.includes('input.pattern = "[0-9]*"'));
+    assert.ok(generalSource.includes("helpers.buildTextInput({"));
+    assert.ok(generalSource.includes("maxLength: 4"));
+    assert.ok(generalSource.includes('pattern: "[0-9]*"'));
     assert.ok(generalSource.includes('input.value.replace(/\\D+/g, "").slice(0, 4)'));
     assert.ok(generalSource.includes("showSettingsConfirmModal"));
     assert.ok(generalSource.includes("updateBubbleDisableConfirmTitle"));
-    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*42px;/.test(css));
-    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*box-sizing:\s*border-box;[\s\S]*text-align:\s*center;[\s\S]*padding:\s*0 3px;/.test(css));
+    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*58px;/.test(css));
+    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*text-align:\s*center;/.test(css));
     assert.ok(i18nSource.includes("rowHideBubbles"));
     assert.ok(i18nSource.includes("rowBubblePolicy"));
     assert.ok(i18nSource.includes("bubbleUpdateWarning"));
@@ -12698,6 +13184,23 @@ describe("settings renderer browser environment", () => {
     assert.match(collectText(rows[4]), /Desktop: Installed in DeepSeek Harness desktop\./);
   });
 
+  it("guides DeepSeek Harness generation changes through Uninstall and Install while repairable failures keep Doctor", async () => {
+    const harness = loadDshNoticesHarness({ notices: [
+      { id: "g", profile: "web", kind: "failed-target", operation: "install", reason: "generation-conflict", message: "raw installer error" },
+      { id: "r", profile: "web", kind: "failed-target", operation: "install", reason: "repair-pending", message: "repair interrupted" },
+    ] });
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.match(collectText(rows[0]), /The Clawd plugin keeps working.*click Uninstall and then Install here.*restart any running dsh web/);
+    assert.doesNotMatch(collectText(rows[0]), /Open Doctor|Not installed:|raw installer error/);
+    assert.match(collectText(rows[1]), /Not installed: repair interrupted Open Doctor and click Repair Now/);
+    assert.strictEqual(collectText(harness.content.querySelector(".agent-integration-action")), "Uninstall");
+    harness.core.state.snapshot = { agents: { "deepseek-harness": { integrationInstalled: false, enabled: false } } };
+    harness.core.ops.requestRender({ content: true });
+    assert.strictEqual(collectText(harness.content.querySelector(".agent-integration-action")), "Install");
+  });
+
   it("copies every manual command line from a DeepSeek Harness notice", async () => {
     const copied = [];
     const harness = loadDshNoticesHarness({
@@ -14715,12 +15218,19 @@ describe("settings renderer browser environment", () => {
     const input = connectSection.querySelector(".kimi-quota-key-input");
     assert.strictEqual(input.type, "password");
     assert.strictEqual(input.autocomplete, "new-password");
+    assert.ok(input.classList.contains("settings-text-input"));
     const connectPrimary = connectSection.querySelectorAll(".kimi-quota-primary");
     assert.strictEqual(connectPrimary.length, 1, "the connect card has exactly one primary action");
     assert.ok(connectPrimary[0].classList.contains("accent"));
     // The Console link is present but quiet — it never competes with Connect.
     assert.ok(connectSection.querySelector(".kimi-quota-console-link").classList.contains("quiet"));
 
+    input.dispatchEvent({ type: "keydown", key: "Enter" });
+    assert.strictEqual(input.getAttribute("aria-invalid"), "true", "empty Enter marks the key invalid");
+    input.value = "ime-draft";
+    input.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+    assert.strictEqual(connectedKey, null, "IME composition must not submit a key");
+    assert.strictEqual(input.value, "ime-draft");
     input.value = "sk-renderer-secret";
     connectPrimary[0].dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(input.value, "", "the DOM must drop the key immediately after submission");
@@ -14751,7 +15261,19 @@ describe("settings renderer browser environment", () => {
     replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(replacePanel.hidden, false);
     assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "true");
-    assert.ok(replacePanel.querySelector(".kimi-quota-key-input"));
+    const replaceInput = replacePanel.querySelector(".kimi-quota-key-input");
+    assert.ok(replaceInput);
+    replaceInput.value = "sk-replacement-secret";
+    replaceInput.dispatchEvent({ type: "keydown", key: "Enter" });
+    assert.strictEqual(replaceInput.value, "", "Enter clears replacement credentials immediately");
+    await flush();
+    assert.strictEqual(connectedKey, "sk-replacement-secret", "Enter uses the dedicated key IPC");
+
+    // The replacement submission closes the panel; reopening it exercises the
+    // explicit cancel path independently.
+    replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
+    assert.strictEqual(replacePanel.hidden, false);
+    assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "true");
     const replaceCancel = replacePanel.querySelectorAll("button")
       .find((button) => button.textContent === "kimiQuotaCancel");
     replaceCancel.dispatchEvent({ type: "click", stopPropagation() {} });
@@ -14971,6 +15493,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(group.classList.contains("collapsed"), "catalog starts collapsed");
     const search = group.querySelector(".agent-section-search");
     assert.ok(search, "the catalog header carries a search box");
+    assert.ok(search.classList.contains("settings-text-input"));
+    assert.ok(search.classList.contains("settings-text-input-compact"));
     assert.strictEqual(search.placeholder, "Search");
     assert.strictEqual(group.querySelector(".agent-section-count").textContent, "3");
 
@@ -15094,10 +15618,9 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.content.querySelector(".agent-custom-tools-section"), null);
 
     // Each banner belongs to the subtab it acts on.
-    const cleanupIndex = harness.content.children
-      .findIndex((node) => node.classList.contains("agent-cleanup-hint-banner"));
-    assert.ok(cleanupIndex >= 0, "a cleanup hint should render for the missing local agent");
-    assert.ok(cleanupIndex > harness.content.children.indexOf(subtabs));
+    const connectedPanel = harness.content.children.find((node) => node.getAttribute("role") === "tabpanel");
+    assert.equal(connectedPanel.hidden, false);
+    assert.ok(connectedPanel.querySelector(".agent-cleanup-hint-banner"), "cleanup hint belongs to the connected panel");
     assert.strictEqual(harness.content.querySelector(".agent-install-hint-banner"), null);
 
     pills[1].dispatchEvent({ type: "click", bubbles: false });
@@ -15328,7 +15851,6 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes('agent.id !== "gemini-cli"'));
     assert.ok(!agentsSource.includes("Gemini CLI"));
     assert.ok(!agentsSource.includes("if (disabled || btn.classList.contains(\"active\")) return;"));
-    assert.ok(agentsSource.includes("if (btn.disabled || btn.classList.contains(\"active\")) return;"));
     assert.ok(!agentsSource.includes("codex-permission-mode-transitioning"));
   });
 
@@ -15504,8 +16026,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(group.classList.contains("collapsed"));
     assert.deepStrictEqual(labelsFor(unavailable), ["Pi"]);
     assert.ok(
-      harness.content.children.indexOf(harness.content.querySelector(".agent-custom-tools-section"))
-      < harness.content.children.indexOf(unavailable)
+      unavailable.parentNode.children.indexOf(harness.content.querySelector(".agent-custom-tools-section"))
+      < unavailable.parentNode.children.indexOf(unavailable)
     );
   });
 
@@ -16416,7 +16938,7 @@ describe("settings renderer browser environment", () => {
       },
     });
 
-    assert.strictEqual(segmented.style.getPropertyValue("--codex-permission-mode-active-index"), "1");
+    assert.strictEqual(segmented.querySelectorAll("button")[0].getAttribute("aria-checked"), "true");
     harness.raf.flush();
     assert.strictEqual(segmented.style.getPropertyValue("--codex-permission-mode-active-index"), "0");
   });
@@ -19227,5 +19749,343 @@ describe("macOS platform detection (Settings shortcut labels)", () => {
     assert.strictEqual(isMac(""), false);
     assert.strictEqual(isMac(undefined), false);
     assert.strictEqual(isMac(null), false);
+  });
+});
+
+// A focused document model for real shared-controller and shell tests. Focus
+// events and attachment state matter here, unlike the layout-only harnesses.
+function createChoiceDocument() {
+  const body = new FakeElement("body");
+  const document = {
+    body, activeElement: body,
+    createElement(tag) {
+      const node = new FakeElement(tag);
+      node.focus = () => {
+        if (node.disabled || document.activeElement === node) return;
+        const previous = document.activeElement;
+        document.activeElement = node;
+        previous?.dispatchEvent({ type: "blur", relatedTarget: node, bubbles: false });
+        node.dispatchEvent({ type: "focus", relatedTarget: previous, bubbles: false });
+      };
+      return node;
+    },
+    getElementById(id) {
+      const visit = (node) => node.id === id ? node : node.children.map(visit).find(Boolean);
+      return visit(body) || null;
+    },
+  };
+  return document;
+}
+
+function mountChoice(document, control) {
+  document.body.appendChild(control.element);
+  for (const panel of control.panels?.values() || []) document.body.appendChild(panel);
+  return control.element.querySelectorAll("button");
+}
+
+const choiceOptions = () => [
+  { value: "a", label: "Alpha" },
+  { value: "b", label: "Beta", disabled: true },
+  { value: "c", label: "Gamma" },
+];
+const settleChoice = () => new Promise((resolve) => setImmediate(resolve));
+
+describe("Settings tabs and segmented choice contracts", () => {
+  it("replaces only subpage bodies, restores lost focus and invalidates disposed scroll work", () => {
+    const document = createChoiceDocument();
+    const frames = [];
+    const core = loadSettingsCoreForTest({}, { document, requestAnimationFrame: (cb) => frames.push(cb) });
+    const scroller = document.createElement("main");
+    scroller.id = "content";
+    document.body.appendChild(scroller);
+    const fallback = document.createElement("button");
+    fallback.setAttribute("data-settings-focus-key", "period");
+    scroller.appendChild(fallback);
+    const panel = document.createElement("div");
+    scroller.appendChild(panel);
+    let cleanups = 0;
+    const host = core.helpers.createSubpageHost({ disposeBody: () => { cleanups++; } });
+    const renderInput = (body) => {
+      const input = document.createElement("input");
+      input.setAttribute("data-settings-focus-key", "draft");
+      input.setAttribute("data-settings-focus-fallback-key", "period");
+      body.appendChild(input);
+    };
+    host.render(panel, renderInput);
+    panel.children[0].focus();
+    scroller.scrollTop = 90;
+    host.render(panel, renderInput);
+    assert.equal(cleanups, 1);
+    assert.strictEqual(document.activeElement, panel.children[0]);
+    assert.equal(scroller.scrollTop, 90);
+    host.render(panel, () => {});
+    assert.strictEqual(document.activeElement, fallback);
+    const modal = document.createElement("button");
+    document.body.appendChild(modal);
+    host.render(panel, (body) => { renderInput(body); modal.focus(); });
+    assert.strictEqual(document.activeElement, modal, "a dialog keeps its focus");
+    host.dispose();
+    scroller.scrollTop = 20;
+    frames.forEach((frame) => frame());
+    assert.equal(scroller.scrollTop, 20);
+    assert.equal(host.render(panel, () => { throw new Error("disposed host rendered"); }), false);
+  });
+
+  for (const orientation of ["horizontal", "vertical"]) {
+    it(`uses manual activation, wrapping and disabled skipping for ${orientation} tabs`, () => {
+      const document = createChoiceDocument();
+      const core = loadSettingsCoreForTest({}, { document });
+      const changes = [];
+      const control = core.helpers.buildTabs({ id: "test-tabs", ariaLabel: "Views", value: "a",
+        orientation, options: choiceOptions(), onChange: (value) => changes.push(value) });
+      const [a, b, c] = mountChoice(document, control);
+      assert.equal(control.element.getAttribute("role"), "tablist");
+      assert.equal(control.element.getAttribute("aria-orientation"), orientation);
+      for (const button of [a, b, c]) {
+        const panel = document.getElementById(button.getAttribute("aria-controls"));
+        assert.ok(panel);
+        assert.equal(panel.getAttribute("aria-labelledby"), button.id);
+        assert.equal(panel.getAttribute("role"), "tabpanel");
+      }
+      a.focus();
+      a.dispatchEvent(createKeyboardEventForTest(orientation === "vertical" ? "ArrowDown" : "ArrowRight"));
+      assert.strictEqual(document.activeElement, c);
+      assert.equal(control.getValue(), "a");
+      assert.deepEqual(changes, []);
+      assert.equal(c.tabIndex, 0);
+      assert.equal(a.tabIndex, -1);
+      assert.equal(b.tabIndex, -1);
+      assert.equal(control.panels.get("a").hidden, false);
+      c.dispatchEvent(createKeyboardEventForTest("Enter"));
+      c.dispatchEvent({ type: "click" });
+      assert.deepEqual(changes, ["c"], "native click after Enter cannot activate twice");
+      assert.equal(c.getAttribute("aria-selected"), "true");
+      assert.equal(control.panels.get("a").hidden, true);
+      assert.equal(control.panels.get("c").hidden, false);
+      c.dispatchEvent(createKeyboardEventForTest(orientation === "vertical" ? "ArrowDown" : "ArrowRight"));
+      assert.strictEqual(document.activeElement, a);
+      a.dispatchEvent(createKeyboardEventForTest("End"));
+      assert.strictEqual(document.activeElement, c);
+      c.dispatchEvent(createKeyboardEventForTest("Home"));
+      assert.strictEqual(document.activeElement, a);
+      const perpendicular = createKeyboardEventForTest(orientation === "vertical" ? "ArrowRight" : "ArrowDown");
+      a.dispatchEvent(perpendicular);
+      assert.ok(!perpendicular.defaultPrevented);
+      const outside = document.createElement("input");
+      document.body.appendChild(outside);
+      outside.focus();
+      assert.equal(c.tabIndex, 0, "reentry targets the selected tab");
+      assert.equal(a.tabIndex, -1);
+      control.setValue("a");
+      assert.deepEqual(changes, ["c"], "snapshot updates never call onChange");
+      control.setDisabled(true);
+      assert.ok([a, b, c].every((button) => button.disabled && button.tabIndex === -1));
+      control.setDisabled(false);
+      assert.equal(a.tabIndex, 0);
+      control.dispose();
+      control.dispose();
+      c.click();
+      assert.deepEqual(changes, ["c"]);
+      assert.ok(Object.values(c.eventListeners).every((listeners) => listeners.length === 0));
+    });
+  }
+
+  it("requires accessible names and handles empty/all-disabled groups", () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    assert.throws(() => core.helpers.buildTabs({ id: "unnamed" }), /accessible name/);
+    assert.throws(() => core.helpers.buildSegmentedRadio({}), /accessible name/);
+    for (const options of [[], choiceOptions().map((option) => ({ ...option, disabled: true }))]) {
+      const control = core.helpers.buildTabs({ id: "empty", ariaLabel: "Empty", options });
+      const buttons = mountChoice(document, control);
+      control.focus();
+      assert.ok(buttons.every((button) => button.tabIndex === -1));
+      assert.strictEqual(document.activeElement, document.body);
+    }
+  });
+
+  it("keeps radio keyboard selection synchronous, skips disabled values and rolls back rejection", () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    let accept = true;
+    const control = core.helpers.buildSegmentedRadio({ id: "choice", ariaLabel: "Mode", value: "a",
+      options: choiceOptions(), onChange: () => accept });
+    const [a, b, c] = mountChoice(document, control);
+    a.focus();
+    a.dispatchEvent(createKeyboardEventForTest("ArrowRight"));
+    assert.strictEqual(document.activeElement, c);
+    assert.equal(control.getValue(), "c");
+    assert.equal(control.element.getAttribute("aria-busy"), "false");
+    assert.equal(c.getAttribute("aria-checked"), "true");
+    assert.equal(b.tabIndex, -1);
+    accept = false;
+    c.dispatchEvent(createKeyboardEventForTest("Home"));
+    assert.equal(control.getValue(), "c");
+    assert.equal(c.tabIndex, 0);
+    assert.equal(a.getAttribute("aria-checked"), "false");
+  });
+
+  for (const outcome of ["reject", "throw", "accept"]) {
+    it(`keeps authoritative snapshots and independent locks after async ${outcome}`, async () => {
+      const document = createChoiceDocument();
+      const core = loadSettingsCoreForTest({}, { document });
+      const deferred = createDeferred();
+      let calls = 0;
+      const control = core.helpers.buildSegmentedRadio({ id: "race", ariaLabel: "Mode", value: "a",
+        options: choiceOptions(), onChange: () => { calls++; return deferred.promise; } });
+      const [a, , c] = mountChoice(document, control);
+      c.focus();
+      c.click();
+      a.click();
+      c.dispatchEvent(createKeyboardEventForTest("Home"));
+      assert.equal(calls, 1);
+      assert.strictEqual(document.activeElement, c, "pending must not discard focus");
+      control.setValue("b");
+      control.setPending(true);
+      control.setDisabled(true);
+      if (outcome === "throw") deferred.reject(new Error("save failed"));
+      else deferred.resolve(outcome === "accept");
+      await settleChoice();
+      assert.equal(control.getValue(), "b", "an old result cannot overwrite a newer snapshot");
+      assert.equal(control.element.getAttribute("aria-busy"), "true");
+      control.setPending(false);
+      assert.equal(c.disabled, true, "clearing pending preserves business disabled");
+      control.setDisabled(false);
+      assert.equal(c.disabled, false);
+    });
+  }
+
+  it("locks before invoking a callback and makes disposal invalidate asynchronous completion", async () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    const deferred = createDeferred();
+    let calls = 0;
+    let buttons;
+    const control = core.helpers.buildSegmentedRadio({ ariaLabel: "Mode", value: "a", options: choiceOptions(),
+      onChange() { calls++; buttons[0].click(); return deferred.promise; } });
+    buttons = mountChoice(document, control);
+    buttons[2].focus();
+    buttons[2].click();
+    assert.equal(calls, 1);
+    control.dispose();
+    const before = control.element.getAttribute("aria-busy");
+    const outside = document.createElement("input");
+    document.body.appendChild(outside);
+    outside.focus();
+    deferred.resolve(false);
+    await settleChoice();
+    assert.equal(control.getValue(), "c");
+    assert.equal(control.element.getAttribute("aria-busy"), before, "disposed DOM must not be patched");
+    assert.strictEqual(document.activeElement, outside);
+    assert.equal(core.state.mountedControls.segmentedRadios.size, 0);
+  });
+
+  it("does not steal focus after an asynchronous save while still mounted", async () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    const deferred = createDeferred();
+    const control = core.helpers.buildSegmentedRadio({ ariaLabel: "Mode", value: "a", options: choiceOptions(),
+      onChange: () => deferred.promise });
+    const buttons = mountChoice(document, control);
+    buttons[2].focus();
+    buttons[2].click();
+    const outside = document.createElement("input");
+    document.body.appendChild(outside);
+    outside.focus();
+    deferred.resolve(false);
+    await settleChoice();
+    assert.strictEqual(document.activeElement, outside);
+    assert.equal(control.getValue(), "a");
+  });
+
+  it("restores focused-but-unselected tabs on sidebar and content replacement without stealing modal focus", () => {
+    const document = createChoiceDocument();
+    const sidebar = document.createElement("aside"); sidebar.id = "sidebar";
+    const content = document.createElement("main"); content.id = "content";
+    document.body.append(sidebar, content);
+    const core = loadSettingsCoreForTest({}, { document });
+    let control;
+    let options = choiceOptions();
+    let modalFocus = null;
+    const render = () => {
+      control?.dispose();
+      sidebar.innerHTML = "";
+      content.innerHTML = "";
+      control = core.helpers.buildTabs({ id: "navigation", ariaLabel: "Pages", value: "a", options });
+      sidebar.appendChild(control.element);
+      for (const panel of control.panels.values()) content.appendChild(panel);
+    };
+    core.ops.installRenderHooks({ sidebar: render, content: () => {}, modal: () => modalFocus?.focus() });
+    core.ops.requestRender({ sidebar: true, content: true });
+    control.focus("c");
+    core.ops.requestRender({ sidebar: true, content: true });
+    assert.equal(document.activeElement.dataset.value, "c");
+    assert.equal(document.activeElement.getAttribute("aria-selected"), "false");
+    assert.equal(document.activeElement.tabIndex, 0);
+    options = choiceOptions().filter((option) => option.value !== "c");
+    core.ops.requestRender({ sidebar: true, content: true });
+    assert.equal(document.activeElement.dataset.value, "a", "removed focus falls back to selected tab");
+    modalFocus = document.createElement("input");
+    document.body.appendChild(modalFocus);
+    core.ops.requestRender({ sidebar: true, content: true, modal: true });
+    assert.strictEqual(document.activeElement, modalFocus);
+  });
+
+  it("integrates the actual sidebar shell without coupling sidebar disposal to content refresh", () => {
+    const document = createChoiceDocument();
+    const sidebar = document.createElement("aside"); sidebar.id = "sidebar";
+    const content = document.createElement("main"); content.id = "content";
+    document.body.append(sidebar, content);
+    const core = loadSettingsCoreForTest({}, { document });
+    let exits = 0;
+    for (const id of ["general", "agents", "theme", "animOverrides", "shortcuts", "telegram-approval", "discord-presence", "remote-ssh", "recap", "about"]) {
+      core.tabs[id] = { render(panel) { const heading = document.createElement("h1"); heading.textContent = id; panel.appendChild(heading); },
+        onExit() { exits++; } };
+    }
+    const source = fs.readFileSync(SETTINGS_RENDERER, "utf8");
+    vm.runInNewContext(source.slice(0, source.indexOf("globalThis.ClawdSettingsTabGeneral.init(core);")), {
+      ClawdSettingsCore: core, document,
+      ClawdSettingsDoctorModal: { renderSidebarIndicator(parent) { parent.appendChild(document.createElement("button")); } },
+    });
+    core.ops.requestRender({ sidebar: true, content: true });
+    const group = sidebar.children[1];
+    assert.equal(group.getAttribute("role"), "tablist");
+    const [general, agents] = group.querySelectorAll("button");
+    general.focus();
+    general.dispatchEvent(createKeyboardEventForTest("ArrowDown"));
+    assert.strictEqual(document.activeElement, agents);
+    assert.equal(core.state.activeTab, "general");
+    assert.equal(exits, 0);
+    core.ops.requestRender({ content: true });
+    agents.dispatchEvent(createKeyboardEventForTest("Enter"));
+    assert.equal(core.state.activeTab, "agents");
+    assert.equal(exits, 1);
+    assert.equal(document.activeElement.dataset.value, "agents");
+    assert.equal(document.activeElement.getAttribute("aria-selected"), "true");
+    assert.equal(content.children.filter((panel) => !panel.hidden).length, 1);
+    assert.equal(content.children.find((panel) => !panel.hidden).textContent, "agents");
+    assert.equal(general.eventListeners.click.length, 0, "old sidebar listeners are removed");
+  });
+
+  it("preserves the Codex pending gate across full rerenders and recovers after failure", async () => {
+    const pending = createDeferred();
+    let calls = 0;
+    const harness = loadAgentsTabForTest({ snapshot: { agents: { codex: { enabled: true, permissionMode: "native" } } },
+      agentMetadata: [{ id: "codex", name: "Codex", capabilities: { permissionApproval: true } }],
+      collapsedGroups: { "agents:codex": false },
+      settingsAPI: { command() { calls++; return pending.promise; } } });
+    harness.core.ops.requestRender({ content: true });
+    let group = harness.content.querySelector(".codex-permission-mode-segmented");
+    group.querySelectorAll("button")[1].click();
+    assert.equal(calls, 1);
+    harness.core.ops.requestRender({ content: true });
+    group = harness.content.querySelector(".codex-permission-mode-segmented");
+    assert.equal(group.getAttribute("aria-busy"), "true");
+    group.querySelectorAll("button")[1].click();
+    assert.equal(calls, 1);
+    pending.resolve({ status: "error", message: "failed" });
+    await settleChoice();
+    assert.equal(group.getAttribute("aria-busy"), "false");
+    assert.equal(group.querySelectorAll("button")[0].getAttribute("aria-checked"), "true");
   });
 });
