@@ -582,6 +582,12 @@ const _settingsController = createSettingsController({
     getFeishuApprovalStatus: () => getFeishuApprovalStatus(),
     getFeishuApprovalSecretInfo: () => getFeishuApprovalSecretInfo(),
     sendFeishuApprovalTest: (persisted) => sendFeishuApprovalTest(persisted),
+    regenerateMobileToken: () => ensureMobilePreviewServer().regenerateToken(),
+    resetMobileAccess: () => ensureMobilePreviewServer().resetMobileAccess(),
+    disconnectMobilePreviewClients: () => ensureMobilePreviewServer().disconnectClients({
+      code: 4001,
+      reason: "Permission preview consent changed",
+    }),
     writeSlackNotifySecrets: (secrets) => writeSlackNotifySecrets(secrets),
     getSlackNotifyStatus: () => getSlackNotifyStatus(),
     getSlackNotifySecretInfo: () => getSlackNotifySecretInfo(),
@@ -2081,6 +2087,7 @@ const _permCtx = {
     _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) =>
     _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () =>
     _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   // The permission layer consumes one normalized runtime mode. DND,
@@ -3006,6 +3013,7 @@ const _serverCtx = {
   isAgentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
+  getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
   isCodexPermissionInterceptEnabled: () => _runtimeAgentGate.isCodexPermissionInterceptEnabled(),
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
   setState,
@@ -3028,6 +3036,7 @@ const _serverCtx = {
       && sessionAutomationCoordinator.resolveIfAllowed(entry, options)),
   showPermissionBubble,
   showCodexUserInputBubble,
+  syncPermissionBubbleContent,
   clearCodexUserInputBubbles,
   handleTestResult: (result, context) => handleTestResult(result, context),
   maybeStartRemoteApproval,
@@ -3059,13 +3068,75 @@ const { startHttpServer, getHookServerPort } = _server;
 
 // ── LAN WebSocket bridge for PWA mobile clients (lazy-loaded) ──
 let _lanWss = null;
-if (_settingsController.get("mobilePreviewEnabled") === true) {
+let _mobilePreviewReconcileRevision = 0;
+let _mobilePreviewReconcileTail = Promise.resolve();
+
+function setMobilePermissionObservationEnabled(enabled) {
+  const observation = _perm && _perm.permissionObservation;
+  if (observation && typeof observation.setEnabled === "function") {
+    observation.setEnabled(enabled === true);
+  }
+}
+
+function ensureMobilePreviewServer() {
+  if (_lanWss) return _lanWss;
   const { initMobilePreviewServer } = require("./network/mobile-preview-server");
   _lanWss = initMobilePreviewServer({
     sessions,
-    getSettingsSnapshot: () => _settingsController.getSnapshot(),
-    isEnabled: () => _settingsController.get("mobilePreviewEnabled") === true,
+    permissionObservation: _perm && _perm.permissionObservation,
+    log: (message) => sessionLog(message),
   });
+  return _lanWss;
+}
+
+function enqueueMobilePreviewReconcile(snapshot = _settingsController.getSnapshot()) {
+  const desired = {
+    revision: ++_mobilePreviewReconcileRevision,
+    sessionEnabled: snapshot && snapshot.mobilePreviewEnabled === true,
+    permissionEnabled: !!(
+      snapshot
+      && snapshot.mobilePreviewEnabled === true
+      && snapshot.mobilePermissionPreviewEnabled === true
+    ),
+  };
+
+  _mobilePreviewReconcileTail = _mobilePreviewReconcileTail
+    .catch((err) => {
+      console.warn("Clawd: prior mobile preview reconcile failed:", err && err.message);
+    })
+    .then(async () => {
+      if (desired.revision !== _mobilePreviewReconcileRevision) return;
+      if (!desired.sessionEnabled) {
+        setMobilePermissionObservationEnabled(false);
+        if (_lanWss) await _lanWss.cleanup();
+        return;
+      }
+
+      const server = ensureMobilePreviewServer();
+      if (desired.revision !== _mobilePreviewReconcileRevision) return;
+      setMobilePermissionObservationEnabled(desired.permissionEnabled);
+      await startMobilePreviewServerSafely(server, {
+        source: "settings-reconcile",
+        onError: (err) => console.warn(
+          "Clawd mobile preview: start failed:",
+          err && err.message ? err.message : err,
+        ),
+      });
+
+      // A newer disable may have committed while listen() was in flight.
+      // Never leave that stale listener alive while the queued successor waits.
+      if (desired.revision !== _mobilePreviewReconcileRevision) {
+        const latest = _settingsController.getSnapshot();
+        if (!latest || latest.mobilePreviewEnabled !== true) await server.cleanup();
+      }
+    })
+    .catch((err) => {
+      console.warn("Clawd: mobile preview reconcile failed:", err && err.message);
+    });
+
+  // Synchronous facade: settings-effect-router must never receive a rejecting
+  // Promise because safeCall only contains synchronous throws.
+  return undefined;
 }
 
 function updateLog(msg) {
@@ -4742,6 +4813,8 @@ const settingsEffectRouter = createSettingsEffectRouter({
   refreshDisplayedVisual: refreshDisplayedVisualForLowPowerMode,
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
+  disableMobilePermissionObservation: () => setMobilePermissionObservationEnabled(false),
+  enqueueMobilePreviewReconcile,
   setRecapEnabled: (enabled) => recapRuntime.setEnabled(enabled),
   logWarn: console.warn,
 });
@@ -4819,28 +4892,6 @@ _settingsController.subscribeKey("feishuApproval", () => {
 _settingsController.subscribeKey("slackNotify", () => {
   broadcastSlackNotifyStatus();
 });
-_settingsController.subscribeKey("mobilePreviewEnabled", (enabled) => {
-  if (enabled) {
-    if (!_lanWss) {
-      const { initMobilePreviewServer } = require("./network/mobile-preview-server");
-      _lanWss = initMobilePreviewServer({
-        sessions,
-        getSettingsSnapshot: () => _settingsController.getSnapshot(),
-        isEnabled: () => _settingsController.get("mobilePreviewEnabled") === true,
-      });
-    }
-    void startMobilePreviewServerSafely(_lanWss, {
-      source: "settings-enable",
-      onError: (err) => console.warn(
-        "Clawd mobile preview: settings start failed:",
-        err && err.message ? err.message : err,
-      ),
-    });
-  } else if (_lanWss) {
-    _lanWss.cleanup();
-  }
-});
-
 animationOverridesMain = createSettingsAnimationOverridesMain({
   app,
   BrowserWindow,
@@ -5386,15 +5437,7 @@ function createWindow() {
       console.warn("Clawd remote-ssh: connect-on-launch failed:", err && err.message);
     });
   }).catch(() => {});
-  if (_settingsController.get("mobilePreviewEnabled") === true) {
-    void startMobilePreviewServerSafely(_lanWss, {
-      source: "app-startup",
-      onError: (err) => console.warn(
-        "Clawd mobile preview: startup failed:",
-        err && err.message ? err.message : err,
-      ),
-    });
-  }
+  enqueueMobilePreviewReconcile(_settingsController.getSnapshot());
   startStaleCleanup();
   // Wait for renderer to be ready before sending initial state
   // If hooks arrived during startup, respect them instead of forcing idle
@@ -5801,10 +5844,12 @@ if (!gotTheLock) {
     try {
       const tray = _menu && typeof _menu.getTray === "function" ? _menu.getTray() : null;
       if (process.platform === "win32") {
+        const { getCodexHookNudgeKeys } = require("./codex-hook-health");
+        const keys = getCodexHookNudgeKeys(verdict);
         trayBalloonOwner.show(tray, {
           iconType: "warning",
-          title: t("codexHookHealthNudgeTitle"),
-          content: t("codexHookHealthNudgeBody"),
+          title: t(keys.title),
+          content: t(keys.body),
         });
       }
     } catch (err) {

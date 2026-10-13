@@ -16,6 +16,7 @@ describe("Agent Registry", () => {
       "cursor-agent",
       "codebuddy",
       "kiro-cli",
+      "kirocrew",
       "kimi-cli",
       "qwen-code",
       "zcode",
@@ -447,6 +448,25 @@ describe("Agent Registry", () => {
     assert.strictEqual(traecode.capabilities.notificationHook, true);
     assert.strictEqual(traecode.capabilities.sessionEnd, false);
     assert.strictEqual(traecode.capabilities.subagent, false);
+  });
+
+  it("declares the mobile permission observation capability for every agent", () => {
+    const enabled = [];
+    for (const agent of registry.getAllAgents()) {
+      assert.strictEqual(
+        typeof agent.capabilities.mobilePermissionObservation,
+        "boolean",
+        `${agent.id} must explicitly declare mobilePermissionObservation`
+      );
+      if (agent.capabilities.mobilePermissionObservation) enabled.push(agent.id);
+    }
+    assert.deepStrictEqual(enabled.sort(), [
+      "claude-code",
+      "codebuddy",
+      "codex",
+      "hermes",
+      "qwen-code",
+    ]);
   });
 
   it("should have eventMap for hook-based agents", () => {

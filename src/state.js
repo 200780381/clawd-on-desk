@@ -11,6 +11,7 @@ const {
 } = require("./state-priority");
 const {
   buildStateBindings,
+  createStableVisualPicker,
   hasOwnVisualFiles: hasOwnVisualFilesWithBindings,
   resolveVisualBinding: resolveVisualBindingWithBindings,
   getSvgOverride: getSvgOverrideWithDeps,
@@ -88,6 +89,9 @@ let theme = null;
 let SVG_IDLE_FOLLOW = null;
 let STATE_SVGS = {};
 let STATE_BINDINGS = {};
+// One pick per long-running state (thinking / working / juggling) when the
+// theme lists several files; see createStableVisualPicker.
+const stableVisualPicker = createStableVisualPicker();
 let MIN_DISPLAY_MS = {};
 let AUTO_RETURN_MS = {};
 let DEEP_SLEEP_TIMEOUT = 0;
@@ -625,6 +629,7 @@ function refreshTheme() {
   SVG_IDLE_FOLLOW = theme.states.idle[0];
   STATE_SVGS = { ...theme.states };
   STATE_BINDINGS = buildStateBindings(theme);
+  stableVisualPicker.clear();
   // Sync back so settings-animation-overrides can resolve roam/fallback states
   theme._stateBindings = STATE_BINDINGS;
   if (theme.miniMode && theme.miniMode.states) {
@@ -915,6 +920,7 @@ function applyState(state, svgOverride, options = {}) {
 
   previousState = currentState;
   currentState = state;
+  stableVisualPicker.retainOnly(state);
   displayRevision += 1;
   currentVisualSource = applyOptions.settingsPreview === true
     ? VISUAL_SOURCE_SETTINGS_PREVIEW
@@ -1575,12 +1581,12 @@ function normalizeContextUsage(value) {
   if (Number.isFinite(limit) && limit > 0) out.limit = limit;
   const percent = Number(value.percent);
   if (Number.isFinite(percent)) out.percent = Math.max(0, Math.min(100, Math.round(percent)));
-  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode") out.source = value.source;
+  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode" || value.source === "workbuddy") out.source = value.source;
   return out;
 }
 
 function normalizeContextUsageOrigin(value) {
-  return value === "claude-statusline" || value === "claude-transcript" || value === "opencode-statusline" ? value : null;
+  return value === "claude-statusline" || value === "claude-transcript" || value === "opencode-statusline" || value === "workbuddy-native" ? value : null;
 }
 
 function isStatuslineOrigin(origin) {
@@ -1772,6 +1778,59 @@ function updateSessionMetadata(sessionId, opts = {}) {
     applied = true;
   }
   if (applied) emitSessionSnapshot();
+  return true;
+}
+
+// Runtime-only, accepted late Codex initialization. Unlike a lifecycle update,
+// this cannot change phase, activity/history, completion/acknowledgement, recap,
+// or compaction ownership. Unlike statusline metadata it can enrich focus data.
+function updateCodexInitializationMetadata(sessionId, opts = {}) {
+  const session = sessions.get(sessionId);
+  if (!session || session.agentId !== "codex"
+    || (session.profileId || "local") !== "local"
+    || session.host || session.wslDistro || session.headless
+    || !isWorkingLikeState(session.state) || session.requiresCompletionAck === true
+    || opts.agentId !== "codex" || opts.profileId !== "local"
+    || opts.hookSource !== "codex-official"
+    || opts.host || opts.wslDistro || opts.headless
+    || opts.subagentId || opts.subagentType || opts.recapIsSubagent) return false;
+  const processMetadata = mergeSessionProcessMetadata(session, opts, {
+    replace: opts.replaceProcessMetadata === true,
+  });
+  Object.assign(session, {
+    sourcePid: processMetadata.sourcePid,
+    agentPid: processMetadata.agentPid,
+    wtHwnd: processMetadata.wtHwnd,
+    editor: processMetadata.editor,
+    pidChain: processMetadata.pidChain,
+    cwd: opts.cwd || session.cwd || "",
+    tmuxSocket: opts.tmuxSocket || session.tmuxSocket || null,
+    tmuxClient: opts.tmuxClient || session.tmuxClient || null,
+    orcaPaneKey: processMetadata.identityChanged && !opts.orcaPaneKey
+      ? null : mergeOrcaPaneKey(opts.orcaPaneKey, session, null, opts),
+    platform: opts.platform || session.platform || null,
+    provider: opts.provider || session.provider || null,
+    codexOriginator: opts.codexOriginator || session.codexOriginator || null,
+    codexSource: opts.codexSource || session.codexSource || null,
+    ghosttyTerminalId: normalizeGhosttyTerminalId(opts.ghosttyTerminalId) || session.ghosttyTerminalId || null,
+    transcriptPath: normalizeTranscriptPath(opts.transcriptPath) || session.transcriptPath || null,
+    sessionAutomationIdentity: normalizeSessionAutomationIdentity(opts.sessionAutomationIdentity)
+      || session.sessionAutomationIdentity || null,
+    pidReachable: resolvePidReachable(
+      opts.replaceProcessMetadata === true ? null : session,
+      processMetadata.agentPid,
+      processMetadata.sourcePid,
+    ),
+  });
+  updateSessionMetadata(sessionId, {
+    expectedAgentId: "codex",
+    sessionTitle: opts.sessionTitleFromPrompt ? null : opts.sessionTitle,
+    contextUsage: opts.contextUsage,
+    contextUsageOrigin: opts.contextUsageOrigin,
+    model: opts.model,
+  });
+  emitSessionSnapshot();
+  debugSession(`codex-initialization preserve ${describeSession(sessionId, session)}`);
   return true;
 }
 
@@ -3865,6 +3924,7 @@ function getSvgOverride(state) {
     displayHintMap: DISPLAY_HINT_MAP,
     theme,
     stateSvgs: STATE_SVGS,
+    pickVisualFile: stableVisualPicker.pick,
   });
 }
 
@@ -4011,6 +4071,7 @@ return {
   updateSessionFocusMetadata,
   touchSessionActivity,
   updateSessionMetadata,
+  updateCodexInitializationMetadata,
   hasCodexCompactionHold,
   releaseCodexCompactionOnTerminal,
   clearClaudeStatuslineAuthority,

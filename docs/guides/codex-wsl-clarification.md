@@ -23,7 +23,7 @@ The second and third rows are distinct ownership branches in [codex-install-util
 ## Recommended: separate home and Pair
 
 1. Install Codex and Linux Node in the intended WSL2 distro, and run Codex there to establish its own home.
-2. Start Clawd on Windows. Open **Settings → Agents → Connected → WSL Scan**, find that distro under Codex, and choose **Pair**. The row may appear under **Unavailable** when Windows-local Codex is absent.
+2. Start Clawd on Windows. Open **Settings → AI Coding Tools → Connected → WSL Scan**, find that distro under Codex, and choose **Pair**. The row may appear under **Unavailable** when Windows-local Codex is absent.
 3. Confirm Codex is **enabled** in Clawd. WSL pairing is separate from installing the Windows-local integration and does not generally enable a disabled agent.
 4. Check both installation and connectivity results, review/trust hooks in Codex as needed, then start a new session and confirm it appears in Clawd. A failed or unknown connectivity probe is not a connection success.
 

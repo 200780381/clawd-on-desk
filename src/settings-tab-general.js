@@ -173,6 +173,7 @@
     const controlHost = document.createElement("div");
     controlHost.className = "row-control";
     const control = helpers.buildSegmentedRadio({
+      id: "roam-movement-style",
       value: readRoamMovementStyle(),
       disabled: !(state.snapshot && state.snapshot.freeRoam === true),
       ariaLabel: t("rowRoamMovementStyle"),
@@ -229,6 +230,7 @@
     let syncConditionalVisibility = () => {};
 
     const modeControl = helpers.buildSegmentedRadio({
+      id: "bubble-placement-mode",
       value: state.snapshot && state.snapshot.bubbleFollowPet === true ? "follow" : "fixed",
       ariaLabel: t("rowBubblePlacement"),
       className: "bubble-placement-mode-segmented",
@@ -244,6 +246,7 @@
       },
     });
     const followControl = helpers.buildSegmentedRadio({
+      id: "bubble-follow-preference",
       value: state.snapshot && state.snapshot.bubbleFollowPreference || "auto",
       ariaLabel: t("rowBubbleFollowPreference"),
       className: "bubble-follow-preference-segmented",
@@ -255,6 +258,7 @@
       onChange: (value) => saveBubblePlacementValue("bubbleFollowPreference", value),
     });
     const cornerControl = helpers.buildSegmentedRadio({
+      id: "bubble-fixed-corner",
       value: state.snapshot && state.snapshot.bubbleFixedCorner || "bottom-right",
       ariaLabel: t("rowBubbleFixedCorner"),
       className: "bubble-fixed-corner-segmented",
@@ -576,6 +580,7 @@
     // Permission automation stays last: both automatic modes carry a broad
     // trust boundary and require an explicit confirmation.
     parent.appendChild(helpers.buildSection(t("sectionPermissions"), [
+      buildCodexApprovalOwnerRow(),
       buildPermissionAutomationRow(),
       // Reads as a modifier of the row above, and it is one: it only narrows
       // what the automatic modes allow on their own, so unlike them it needs no
@@ -691,6 +696,47 @@
     });
   }
 
+  function buildCodexApprovalOwnerRow() {
+    const row = document.createElement("div");
+    row.className = "row codex-approval-owner-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowCodexApprovalOwner");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    desc.textContent = t(readers.readAgentPermissionMode("codex") === "intercept"
+      ? "rowCodexApprovalOwnerInterceptDesc" : "rowCodexApprovalOwnerAutoDesc");
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+    const control = document.createElement("div");
+    control.className = "row-control";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn";
+    button.textContent = t("codexApprovalSettingsLink");
+    button.addEventListener("click", () => {
+      root.ClawdSettingsCore.runtime.agentsSubtab = readers.readAgentIntegrationInstalled("codex")
+        ? "connected" : "discover";
+      ops.selectTab("agents");
+      requestAnimationFrame(() => {
+        const target = state.mountedControls.agentPermissionModes.get("codex");
+        if (!target || !target.row || !document.body.contains(target.row)) return;
+        for (let parent = target.row.parentElement; parent; parent = parent.parentElement) {
+          if (typeof parent.expand === "function") parent.expand({ animate: false });
+        }
+        target.row.scrollIntoView({ block: "center" });
+        const active = target.row.querySelector("button.active");
+        if (active) active.focus({ preventScroll: true });
+      });
+    });
+    control.appendChild(button);
+    row.appendChild(control);
+    return row;
+  }
+
   function buildPermissionAutomationRow() {
     const row = document.createElement("div");
     row.className = "row permission-automation-row";
@@ -716,6 +762,7 @@
     const ctrl = document.createElement("div");
     ctrl.className = "row-control";
     const segmented = helpers.buildSegmentedRadio({
+      id: "permission-automation",
       value: current,
       ariaLabel: t("rowPermissionAutomation"),
       className: "permission-automation-segmented",
@@ -1093,6 +1140,7 @@
     const controlWrap = document.createElement("div");
     controlWrap.className = "row-control";
     const control = helpers.buildSegmentedRadio({
+      id: "quota-ring-display-mode",
       value: state.snapshot && state.snapshot.quotaRingDisplayMode,
       ariaLabel: t("rowQuotaRingDisplayMode"),
       className: "quota-ring-display-mode-choice",
@@ -1823,7 +1871,7 @@
 
     function setVisual(enabled, pending = false) {
       switchControl.setState({ checked: enabled, pending });
-      if (secondsInput) secondsInput.disabled = !enabled || pending;
+      if (secondsInput) helpers.setTextInputState(secondsInput, { disabled: !enabled, pending });
     }
 
     function clearSecondsCommitTimer() {
@@ -1915,13 +1963,20 @@
     switchControl.setOnToggle(runToggle);
 
     if (secondsKey) {
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "bubble-policy-seconds";
-      input.inputMode = "numeric";
-      input.maxLength = 4;
-      input.pattern = "[0-9]*";
-      input.value = String(Number(state.snapshot && state.snapshot[secondsKey]) || 0);
+      const input = helpers.buildTextInput({
+        type: "text",
+        size: "compact",
+        className: "bubble-policy-seconds",
+        inputMode: "numeric",
+        maxLength: 4,
+        pattern: "[0-9]*",
+        value: String(Number(state.snapshot && state.snapshot[secondsKey]) || 0),
+        ariaLabel: t(labelKey),
+        onEnter: () => {
+          flushSecondsCommit();
+          input.blur();
+        },
+      });
       const prefix = document.createElement("span");
       prefix.className = "bubble-policy-prefix";
       prefix.textContent = t("bubbleSecondsPrefix");
@@ -1932,7 +1987,7 @@
       controls.insertBefore(input, switchControl.element);
       controls.insertBefore(suffix, switchControl.element);
       secondsInput = input;
-      input.disabled = !currentEnabled();
+      helpers.setTextInputState(input, { disabled: !currentEnabled() });
       input.addEventListener("input", () => {
         const sanitized = input.value.replace(/\D+/g, "").slice(0, 4);
         if (input.value !== sanitized) input.value = sanitized;
@@ -1951,12 +2006,6 @@
       });
       input.addEventListener("change", () => {
         flushSecondsCommit();
-      });
-      input.addEventListener("keydown", (ev) => {
-        if (ev.key !== "Enter") return;
-        ev.preventDefault();
-        flushSecondsCommit();
-        input.blur();
       });
     }
 

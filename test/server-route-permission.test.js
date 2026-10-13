@@ -92,6 +92,7 @@ function makeCtx(overrides = {}) {
     permLog: (message) => calls.logs.push(message),
     isAgentEnabled: () => true,
     isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     isAgentSubagentPermissionsEnabled: () => true,
     updateSession: (...args) => calls.updateSession.push(args),
     showPermissionBubble: (entry) => calls.showPermissionBubble.push(entry),
@@ -105,7 +106,7 @@ function makeCtx(overrides = {}) {
       calls.dismissOpencodeFamilyPermissionResolvedExternally.push(payload);
       return 0;
     },
-    resolvePermissionEntry: (entry, behavior, message) => calls.resolved.push({ entry, behavior, message }),
+    resolvePermissionEntry: (entry, behavior, message, options) => calls.resolved.push({ entry, behavior, message, options }),
     maybeStartRemoteApproval: (entry) => calls.maybeStartRemoteApproval.push(entry),
     addPendingPermission(entry) {
       calls.addPendingPermission.push(entry);
@@ -284,6 +285,7 @@ describe("server-route-permission helpers", () => {
     }), true);
     assert.strictEqual(shouldBypassCopilotBubble({
       isAgentPermissionsEnabled: () => true,
+    isCodexPermissionInterceptEnabled: () => true,
     }), false);
   });
 
@@ -2938,6 +2940,10 @@ describe("server-route-permission POST — CC subagent requests (#451)", () => {
       assert.strictEqual(res.ctx.calls.resolved[0].entry, entry);
       assert.strictEqual(res.ctx.calls.resolved[0].behavior, "no-decision");
       assert.strictEqual(res.ctx.calls.resolved[0].message, "Client disconnected");
+      assert.deepStrictEqual(res.ctx.calls.resolved[0].options.disposition, {
+        reason: "agent_gone",
+        decided: false,
+      });
     });
   }
 

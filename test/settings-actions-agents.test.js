@@ -628,12 +628,12 @@ test("settings agent actions switch Codex permission mode and dismiss pending bu
   };
 
   const result = agentCommands.setAgentPermissionMode(
-    { agentId: "codex", mode: "native" },
+    { agentId: "codex", mode: "auto" },
     deps
   );
 
   assert.strictEqual(result.status, "ok");
-  assert.strictEqual(result.commit.agents.codex.permissionMode, "native");
+  assert.strictEqual(result.commit.agents.codex.permissionMode, "auto");
   assert.strictEqual(result.commit.agents.codex.enabled, true);
   assert.deepStrictEqual(calls.dismissPermissionsByAgent, ["codex"]);
 });
