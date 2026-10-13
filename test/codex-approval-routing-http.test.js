@@ -51,3 +51,32 @@ test("Auto keeps automatic and human approval sockets independent", async (t) =>
   assert.equal(JSON.parse(result.body).hookSpecificOutput.decision.behavior, "allow");
   assert.equal(h.permission.pendingPermissions.length, 0);
 });
+
+// #1186: Auto hands WSL requests back to Codex, which silently disabled the
+// user's global auto-allow for them. Global automation now claims them again.
+test("Auto lets global automation allow a WSL Bash request", async (t) => {
+  let mode = "auto-tools";
+  const h = await createPermissionIngressHarness({ render: true, ctxOverrides: {
+    getCodexPermissionMode: () => "auto",
+    getEffectivePermissionAutomationMode: () => mode,
+  } });
+  t.after(() => h.close());
+  const body = (command) => ({ agent_id: "codex", hook_source: "codex-official",
+    session_id: "codex:01a119d3-1893-7f42-aadc-fa33ca4166a8", wsl_distro: "Ubuntu",
+    turn_id: "01a119d7-24b5-7010-9da2-d8791ff8a1d1", permission_mode: "default",
+    tool_name: "Bash", tool_input: { command } });
+
+  const allowed = await postPermission(h.port, body("ssh box uptime")).response;
+  assert.equal(allowed.status, 200);
+  assert.equal(JSON.parse(allowed.body).hookSpecificOutput.decision.behavior, "allow");
+
+  const mcp = await postPermission(h.port, { ...body("x"), tool_name: "mcp__github__get_issue",
+    tool_input: { number: 1 } }).response;
+  assert.equal(mcp.status, 204);
+
+  mode = "off";
+  const native = await postPermission(h.port, body("ssh box uptime")).response;
+  assert.equal(native.status, 204);
+  assert.equal(native.body, "");
+  assert.equal(h.permission.pendingPermissions.length, 0);
+});

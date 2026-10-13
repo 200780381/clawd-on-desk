@@ -43,6 +43,7 @@ async function createPermissionIngressHarness({ render = false, ctxOverrides = {
   const permission = initPermission(ctx);
   for (const key of ["pendingPermissions", "PASSTHROUGH_TOOLS", "addPendingPermission",
     "removePendingPermission", "resolvePermissionEntry", "sendPermissionResponse", "syncPermissionBubbleContent",
+    "wouldAutoAllowPermission",
     "syncPermissionShortcuts"]) ctx[key] = permission[key];
   ctx.showPermissionBubble = (entry) => {
     if (render) permission.showPermissionBubble(entry);
