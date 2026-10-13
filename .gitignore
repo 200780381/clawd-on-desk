@@ -22,6 +22,7 @@ docs/**
 !docs/guides/copilot-setup.zh-CN.md
 !docs/guides/guide-theme-creation.md
 !docs/guides/known-limitations.md
+!docs/guides/agent-questions.md
 !docs/guides/known-limitations.zh-CN.md
 !docs/guides/recap.md
 !docs/guides/setup-guide.md
@@ -68,6 +69,9 @@ docs/**
 !docs/releases/release-v0.15.0.md
 !docs/releases/release-v0.16.0.md
 !docs/releases/release-v1.0.0.md
+!docs/releases/release-v1.1.0.md
+!docs/releases/release-v1.2.0.md
+!docs/releases/release-v1.3.0.md
 
 # Temp files from testing
 .tmp_*
@@ -105,6 +109,7 @@ logs/
 scripts/*
 # Deterministic source-backed macOS tray asset generator
 !scripts/generate-mac-tray-icons.js
+!scripts/update-official-theme-catalog-snapshot.js
 !scripts/manual/
 scripts/manual/*
 !scripts/manual/README.md
@@ -125,6 +130,7 @@ scripts/manual/*
 !scripts/export-agent-icons.js
 !scripts/verify-electron-install.js
 !scripts/audit-repository-assets.js
+!scripts/audit-pr-history-assets.js
 !scripts/assert-no-retired-telegram-sidecar.js
 !scripts/verify-release-version.js
 !scripts/verify-release-contributors.js
@@ -135,6 +141,10 @@ scripts/manual/*
 !scripts/run-packaged-koffi-smoke.js
 !scripts/verify-updater-metadata.js
 !scripts/verify-appimage-apprun.js
+!scripts/prepare-appimage-launcher.js
+!scripts/verify-winget-arch-contract.js
+!scripts/verify-winget-generated-manifest.js
+!scripts/submit-winget-manifest.js
 
 # oh-my-cursor state
 .omc/

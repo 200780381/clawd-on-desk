@@ -329,6 +329,7 @@ test("Kimi quota Dashboard IPC accepts only the real Dashboard main frame", asyn
 
 test("session history IPC accepts only the real Dashboard main frame", async () => {
   const { ipcMain, calls, trustedDashboardEvent } = createHarness();
+  const historyKey = "a".repeat(32);
 
   assert.deepStrictEqual(
     await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:get-session-history"),
@@ -338,13 +339,13 @@ test("session history IPC accepts only the real Dashboard main frame", async () 
     await ipcMain.invokeFrom(
       trustedDashboardEvent,
       "dashboard:resume-session",
-      { agentId: "claude-code", sessionId: "h1" }
+      { agentId: "claude-code", historyKey }
     ),
     { status: "ok" }
   );
   assert.deepStrictEqual(calls, [
     ["getSessionHistory"],
-    ["resumeSessionFromHistory", { agentId: "claude-code", sessionId: "h1" }],
+    ["resumeSessionFromHistory", { agentId: "claude-code", historyKey }],
   ]);
 
   // Rows expose working-directory paths and resuming spawns a real process,
@@ -357,7 +358,7 @@ test("session history IPC accepts only the real Dashboard main frame", async () 
   ]) {
     for (const channel of ["dashboard:get-session-history", "dashboard:resume-session"]) {
       assert.deepStrictEqual(
-        await ipcMain.invokeFrom(event, channel, { agentId: "claude-code", sessionId: "h1" }),
+        await ipcMain.invokeFrom(event, channel, { agentId: "claude-code", historyKey }),
         { status: "error", reason: "untrusted-dashboard-sender" },
         channel
       );
@@ -366,7 +367,7 @@ test("session history IPC accepts only the real Dashboard main frame", async () 
   assert.deepStrictEqual(calls, []);
 });
 
-test("resume-session takes exactly an agentId/sessionId pair", async () => {
+test("resume-session takes exactly an agentId/opaque-historyKey pair", async () => {
   const { ipcMain, calls, trustedDashboardEvent } = createHarness();
 
   for (const bad of [
@@ -376,12 +377,13 @@ test("resume-session takes exactly an agentId/sessionId pair", async () => {
     42,
     [],
     {},
-    { sessionId: "h1" },
+    { historyKey: "a".repeat(32) },
     { agentId: "claude-code" },
-    { agentId: "claude-code", sessionId: "" },
-    { agentId: "", sessionId: "h1" },
-    { agentId: "claude-code", sessionId: "h1", mode: "resume-dangerous" },
-    { agentId: "claude-code", sessionId: "h1", cwd: "/somewhere/else" },
+    { agentId: "claude-code", historyKey: "" },
+    { agentId: "claude-code", historyKey: "not-opaque" },
+    { agentId: "", historyKey: "a".repeat(32) },
+    { agentId: "claude-code", historyKey: "a".repeat(32), mode: "resume-dangerous" },
+    { agentId: "claude-code", historyKey: "a".repeat(32), cwd: "/somewhere/else" },
   ]) {
     assert.deepStrictEqual(
       await ipcMain.invokeFrom(trustedDashboardEvent, "dashboard:resume-session", bad),

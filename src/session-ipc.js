@@ -114,11 +114,11 @@ function registerSessionIpc(options = {}) {
     if (
       keys.length !== 2
       || keys[0] !== "agentId"
-      || keys[1] !== "sessionId"
+      || keys[1] !== "historyKey"
       || typeof payload.agentId !== "string"
       || !payload.agentId
-      || typeof payload.sessionId !== "string"
-      || !payload.sessionId
+      || typeof payload.historyKey !== "string"
+      || !/^[a-f0-9]{32}$/.test(payload.historyKey)
     ) {
       return { status: "invalid" };
     }
@@ -127,7 +127,7 @@ function registerSessionIpc(options = {}) {
     // flow, which confirms it explicitly.
     return resumeSessionFromHistory({
       agentId: payload.agentId,
-      sessionId: payload.sessionId,
+      historyKey: payload.historyKey,
     });
   });
 

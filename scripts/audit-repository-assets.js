@@ -919,6 +919,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  BINARY_MEDIA_EXTENSIONS,
   analyzeAudit,
   buildExtractedPackageManifest,
   buildSourcePackageManifest,

@@ -1,6 +1,7 @@
 "use strict";
 
 const { canOfferLocalFolder, focusUnavailableReasonKey } = globalThis.ClawdSessionFocusUnavailable;
+const { createLanguagePicker } = globalThis.ClawdLanguagePicker;
 
 const AGENT_LABELS = {
   "claude-code": "Claude Code",
@@ -27,6 +28,7 @@ let activeEdit = null;
 const SESSION_FOLDER_FEEDBACK_MS = 4000;
 const sessionFolderActionState = new Map();
 const sessionAutomationActionState = new Map();
+let sessionAutomationPickers = [];
 
 const titleEl = document.getElementById("title");
 const countEl = document.getElementById("count");
@@ -487,6 +489,11 @@ function handleQuickKeydown(event) {
     && (macInputHome || (!isEditingBusy() && !isEditableElement(event.target)))) {
     noteScrollIntent();
   }
+  // The open listbox owns its keys before the page's numeric/cancel mode.
+  if (hasOpenSessionAutomationPicker(event.target)) {
+    cancelPendingActivation();
+    return;
+  }
   if (!quick.active) {
     // A refused replacement leaves the borrowed editor intact. Once editing
     // is over Esc/Tab may close that shell, but digits never auto-arm again.
@@ -525,16 +532,26 @@ function handleQuickKeydown(event) {
     dismissQuickRound();
     return;
   }
-  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-  if (!/^[1-9]$/.test(event.key)) return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const physicalKey = physicalDigit(event);
+  if (!physicalKey) return;
+  // With NumLock off, Chromium keeps `code: "Numpad2"` but reports the
+  // navigation meaning in `key` (for example, "ArrowDown"). Leave those
+  // navigation keys to the page instead of silently jumping to a session.
+  // Main-row Digit codes remain layout-independent for AZERTY and peers.
+  if (physicalKey.startsWith("Numpad") && !/^[1-9]$/.test(event.key)) return;
+  // Shift is part of typing the digit on layouts such as AZERTY. Only accept
+  // it when `code` proves which physical digit key was pressed; the key-only
+  // fallback must keep modified shortcuts out of Quick Select.
+  if (event.shiftKey && physicalKey.startsWith("key:")) return;
+  const digit = Number(physicalKey.slice(-1));
   event.preventDefault();
   event.stopPropagation();
-  const physicalKey = physicalDigit(event);
-  if (physicalKey) quick.held.add(physicalKey);
+  quick.held.add(physicalKey);
   clearQuickTimer();
   // First target wins for the whole hold; auto-repeat never re-targets.
   if (quick.pending || event.repeat) return;
-  const entry = quick.entries[Number(event.key) - 1];
+  const entry = quick.entries[digit - 1];
   if (!entry) return;
   if (!entry.canFocus) {
     setQuickFeedback("dashboardQuickSelectUnavailable");
@@ -1420,7 +1437,9 @@ function createCard(session, now) {
     const focusTargetType = session.focusTarget && session.focusTarget.type;
     button.textContent = focusTargetType === "codex-thread"
       ? t("dashboardOpenCodexSession")
-      : t("dashboardJumpTerminal");
+      : focusTargetType === "dsh-desktop"
+        ? t("dashboardOpenDshDesktop")
+        : t("dashboardJumpTerminal");
     button.disabled = session.canFocus !== true;
     if (button.disabled) {
       button.title = focusUnavailableText(session);
@@ -1505,93 +1524,132 @@ function automationActionState(key) {
     : { pending: false, feedbackText: "" };
 }
 
+function sessionAutomationUnavailableText(session) {
+  // Display-only identity check, matching hooks/codex-originator.js. An
+  // unsupported source/originator reason alone does not identify Desktop.
+  const originator = String(session && session.codexOriginator || "").trim().toLowerCase();
+  if (session && session.agentId === "codex"
+    && (originator === "codex desktop" || originator === "codex_work_desktop")) {
+    return t("sessionAutomationUnavailableCodexDesktop");
+  }
+  return t("sessionAutomationUnavailable");
+}
+
 function appendSessionAutomation(container, session) {
   if (!container || !session) return;
-  if (session.canConfigureSessionAutomation !== true && !session.sessionAutomationGrantId) return;
+  // Explain Codex's unavailable per-session settings, but do not imply that
+  // state-only/manual-only agents inherit Clawd permission automation.
+  if (session.canConfigureSessionAutomation !== true
+    && !session.sessionAutomationGrantId && session.agentId !== "codex") return;
   const row = document.createElement("div");
   row.className = "session-automation-row";
   const label = createText("span", "session-automation-label", t("sessionAutomationLabel"));
-  const select = document.createElement("select");
-  select.className = "session-automation-select";
-  select.setAttribute("aria-label", t("sessionAutomationLabel"));
+  const canConfigure = session.canConfigureSessionAutomation === true;
+  const hasGrant = !!session.sessionAutomationGrantId;
+  const unavailableText = canConfigure ? "" : sessionAutomationUnavailableText(session);
+
+  if (!canConfigure && !hasGrant) {
+    const readonlyValue = createText(
+      "span",
+      "session-automation-readonly",
+      t("sessionAutomationUnavailableValue")
+    );
+    readonlyValue.setAttribute(
+      "aria-label",
+      `${t("sessionAutomationLabel")}: ${t("sessionAutomationUnavailableValue")}`
+    );
+    const unavailable = createText(
+      "span",
+      "session-automation-unavailable",
+      unavailableText
+    );
+    unavailable.setAttribute("role", "note");
+    row.appendChild(label);
+    row.appendChild(readonlyValue);
+    row.appendChild(unavailable);
+    container.appendChild(row);
+    return;
+  }
 
   const values = [
     ["inherit", t("sessionAutomationFollowGlobal")],
     ["off", t("sessionAutomationAsk")],
     ["auto-tools", t("sessionAutomationAutoTools")],
   ];
-  for (const [value, text] of values) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = text;
-    if (
-      session.canConfigureSessionAutomation !== true
-      && value !== "inherit"
-    ) {
-      option.disabled = true;
-    }
-    select.appendChild(option);
-  }
-  select.value = session.sessionAutomationMode || "inherit";
   const key = automationActionKey(session);
   const actionState = automationActionState(key);
-  select.disabled = actionState.pending === true
-    || (
-      session.canConfigureSessionAutomation !== true
-      && !session.sessionAutomationGrantId
-    );
-  if (session.canConfigureSessionAutomation !== true) {
-    select.title = t("sessionAutomationUnavailable");
-  }
   const feedback = createText(
     "span",
     "session-automation-feedback",
     actionState.feedbackText
   );
-  select.addEventListener("change", async () => {
-    if (!window.dashboardAPI) return;
-    const previousValue = session.sessionAutomationMode || "inherit";
-    const nextValue = select.value;
-    sessionAutomationActionState.set(key, {
-      pending: true,
-      feedbackText: "",
-    });
-    select.disabled = true;
-    feedback.textContent = "";
-    let result;
-    try {
-      if (nextValue === "inherit") {
-        result = session.sessionAutomationGrantId
-          ? await window.dashboardAPI.clearSessionAutomationGrant({
-            grantId: session.sessionAutomationGrantId,
-          })
-          : { status: "equivalent" };
-      } else {
-        result = await window.dashboardAPI.setSessionAutomationOverride({
-          sessionId: session.id,
-          mode: nextValue,
-        });
+  const currentMode = session.sessionAutomationMode || "inherit";
+  const pickerValues = canConfigure
+    ? values
+    : values.filter(([value]) => value === "inherit" || value === currentMode);
+  const picker = createLanguagePicker({
+    className: "session-automation-picker",
+    ariaLabel: t("sessionAutomationLabel"),
+    value: currentMode,
+    options: pickerValues.map(([value, labelText]) => ({ value, label: labelText })),
+    lockWhilePending: true,
+    pending: actionState.pending === true,
+    revealWhenClosed: false,
+    onChange: async (nextValue) => {
+      if (!window.dashboardAPI) return false;
+      sessionAutomationActionState.set(key, {
+        pending: true,
+        feedbackText: "",
+      });
+      feedback.textContent = "";
+      let result;
+      try {
+        if (nextValue === "inherit") {
+          result = session.sessionAutomationGrantId
+            ? await window.dashboardAPI.clearSessionAutomationGrant({
+              grantId: session.sessionAutomationGrantId,
+            })
+            : { status: "equivalent" };
+        } else {
+          result = await window.dashboardAPI.setSessionAutomationOverride({
+            sessionId: session.id,
+            mode: nextValue,
+          });
+        }
+      } catch (err) {
+        result = { status: "error", message: err && err.message };
       }
-    } catch (err) {
-      result = { status: "error", message: err && err.message };
-    }
-    if (!result || !["applied", "equivalent"].includes(result.status)) {
-      select.value = previousValue;
-      if (result && result.status === "cancelled") {
-        sessionAutomationActionState.delete(key);
-      } else {
-        sessionAutomationActionState.set(key, {
-          pending: false,
-          feedbackText: t("sessionAutomationChangeFailed"),
-        });
+      if (!result || !["applied", "equivalent"].includes(result.status)) {
+        if (result && result.status === "cancelled") {
+          sessionAutomationActionState.delete(key);
+        } else {
+          const feedbackText = t("sessionAutomationChangeFailed");
+          sessionAutomationActionState.set(key, {
+            pending: false,
+            feedbackText,
+          });
+          feedback.textContent = feedbackText;
+        }
+        return false;
       }
-    } else {
       sessionAutomationActionState.delete(key);
-    }
-    render();
+      return true;
+    },
   });
+  picker.element.setAttribute("data-session-automation-key", key);
+  sessionAutomationPickers.push(picker);
+  if (!canConfigure) picker.element.title = unavailableText;
   row.appendChild(label);
-  row.appendChild(select);
+  row.appendChild(picker.element);
+  if (!canConfigure) {
+    const unavailable = createText(
+      "span",
+      "session-automation-unavailable",
+      unavailableText
+    );
+    unavailable.setAttribute("role", "note");
+    row.appendChild(unavailable);
+  }
   row.appendChild(feedback);
   container.appendChild(row);
 }
@@ -1729,6 +1787,38 @@ function appendSessionAutomationOrphans(fragment) {
   fragment.appendChild(section);
 }
 
+function hasOpenSessionAutomationPicker(target = document.activeElement) {
+  return sessionAutomationPickers.some((picker) => {
+    const element = picker && picker.element;
+    return !!(
+      element
+      && element.classList
+      && element.classList.contains("open")
+      && contentEl.contains(element)
+      && element.contains(target)
+    );
+  });
+}
+
+function sessionAutomationFocusKey() {
+  const focused = sessionAutomationPickers.find((picker) =>
+    picker.element.contains(document.activeElement));
+  return focused ? focused.element.getAttribute("data-session-automation-key") : null;
+}
+
+function restoreSessionAutomationFocus(key) {
+  if (!key) return;
+  const picker = sessionAutomationPickers.find((candidate) =>
+    candidate.element.getAttribute("data-session-automation-key") === key);
+  const trigger = picker && picker.element.querySelector(".language-picker-trigger");
+  if (trigger) trigger.focus({ preventScroll: true });
+}
+
+function disposeSessionAutomationPickers() {
+  for (const picker of sessionAutomationPickers) picker.dispose();
+  sessionAutomationPickers = [];
+}
+
 // ── Session history ──────────────────────────────────────────────────────
 // Rows come from ~/.clawd/session-history-v1 via main. render() runs on a
 // one-second tick and rebuilds the whole tree, so the list is fetched into
@@ -1736,10 +1826,14 @@ function appendSessionAutomationOrphans(fragment) {
 let sessionHistory = [];
 let sessionHistoryPending = false;
 let sessionHistoryReloadRequested = false;
+// Whether the collapsed "other sessions" group is expanded. Session-local on
+// purpose: the Dashboard reopening starts collapsed so the resumable list
+// leads, and no extra state needs to be persisted or synced.
+let sessionHistoryOtherExpanded = false;
 const sessionHistoryActionState = new Map();
 
 function historyKey(row) {
-  return `${row.agentId}\u0000${row.sessionId}`;
+  return row.historyKey;
 }
 
 async function reloadSessionHistory(options = {}) {
@@ -1781,6 +1875,7 @@ function isHistoryResumePending(state, now = Date.now()) {
 }
 
 async function resumeHistoryRow(row) {
+  if (row.resumeDisabledReason) return;
   const key = historyKey(row);
   if (isHistoryResumePending(sessionHistoryActionState.get(key))) return;
   sessionHistoryActionState.set(key, { status: "pending" });
@@ -1789,7 +1884,7 @@ async function resumeHistoryRow(row) {
   try {
     result = await window.dashboardAPI.resumeSession({
       agentId: row.agentId,
-      sessionId: row.sessionId,
+      historyKey: row.historyKey,
     });
   } catch {
     result = null;
@@ -1834,9 +1929,20 @@ function createSessionHistoryCard(row, now) {
       t("dashboardHistoryTranscriptMissing")
     ));
   }
+  if (row.resumeDisabledReason === "profile-unverified") {
+    meta.appendChild(createText(
+      "span",
+      "session-history-flag is-missing",
+      t("dashboardHistoryProfileUnverified")
+    ));
+  }
   const folder = sessionHistoryFolderLabel(row.cwd);
+  // The short id sits next to the folder so two similar-looking rows stay
+  // distinguishable and can be matched against `claude --resume` output.
+  const shortId = typeof row.sessionId === "string" ? row.sessionId.slice(0, 8) : "";
   const elapsed = formatElapsed(Math.max(0, now - row.lastEventAt));
-  meta.appendChild(document.createTextNode(folder ? `${folder} · ${elapsed}` : elapsed));
+  const parts = [folder, shortId].filter(Boolean);
+  meta.appendChild(document.createTextNode(parts.length ? `${parts.join(" · ")} · ${elapsed}` : elapsed));
   main.appendChild(meta);
   card.appendChild(main);
 
@@ -1850,7 +1956,7 @@ function createSessionHistoryCard(row, now) {
   button.textContent = pending
     ? t("dashboardHistoryResuming")
     : t("dashboardHistoryResume");
-  button.disabled = pending;
+  button.disabled = pending || !!row.resumeDisabledReason;
   button.addEventListener("click", () => { void resumeHistoryRow(row); });
   actions.appendChild(button);
   if (state && (state.status === "error" || (state.status === "submitted" && !pending))) {
@@ -1880,14 +1986,41 @@ function appendSessionHistory(fragment, now) {
   const rows = sessionHistory.filter((row) => !activeIds.has(row.sessionId));
   for (const id of activeIds) sessionHistoryActionState.delete(`claude-code\u0000${id}`);
   if (!rows.length) return;
+  // Rows the loader could not confirm resumable (transcript missing or
+  // unknown, v1 profiles) collapse behind the confirmed list instead of
+  // crowding it — the probe stays a hint on each card, never a gate.
+  const confirmed = rows.filter((row) => row.group !== "other");
+  const other = rows.filter((row) => row.group === "other");
   const section = document.createElement("section");
   section.className = "group session-history";
   section.appendChild(createText("h2", "group-title", t("dashboardHistoryTitle")));
   section.appendChild(createText("p", "session-history-hint", t("dashboardHistoryHint")));
-  const cards = document.createElement("div");
-  cards.className = "cards";
-  for (const row of rows) cards.appendChild(createSessionHistoryCard(row, now));
-  section.appendChild(cards);
+  if (confirmed.length) {
+    const cards = document.createElement("div");
+    cards.className = "cards";
+    for (const row of confirmed) cards.appendChild(createSessionHistoryCard(row, now));
+    section.appendChild(cards);
+  }
+  if (other.length) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "session-history-toggle";
+    toggle.setAttribute("aria-expanded", sessionHistoryOtherExpanded ? "true" : "false");
+    toggle.textContent = sessionHistoryOtherExpanded
+      ? t("dashboardHistoryHideOther")
+      : t("dashboardHistoryShowOther").replace("{n}", other.length);
+    toggle.addEventListener("click", () => {
+      sessionHistoryOtherExpanded = !sessionHistoryOtherExpanded;
+      render();
+    });
+    section.appendChild(toggle);
+    if (sessionHistoryOtherExpanded) {
+      const otherCards = document.createElement("div");
+      otherCards.className = "cards";
+      for (const row of other) otherCards.appendChild(createSessionHistoryCard(row, now));
+      section.appendChild(otherCards);
+    }
+  }
   fragment.appendChild(section);
 }
 
@@ -2033,25 +2166,16 @@ function appendSessionGroups(fragment, byId, now) {
   }
 }
 
-function hasFocusedSessionAutomationSelect() {
-  const active = document.activeElement;
-  return !!(
-    active
-    && active.tagName === "SELECT"
-    && active.classList
-    && active.classList.contains("session-automation-select")
-    && contentEl.contains(active)
-  );
-}
-
 function render(options = {}) {
   // A round that ended settles here if no scroll or layout signal closed it
   // first: the guard must never stay armed indefinitely.
   if (scrollGuard.settling) handleScrollSignal();
   // The one-second elapsed-time tick normally rebuilds the entire card tree.
-  // Replacing a focused native <select> closes its open menu on Windows, so
-  // defer ordinary snapshot/timer renders until the user finishes choosing.
-  if ((activeEdit || hasFocusedSessionAutomationSelect()) && !options.force) return;
+  // Replacing an open picker closes its menu, but focus alone must not block an
+  // authoritative snapshot that carries a newly created automation grant.
+  if ((activeEdit || hasOpenSessionAutomationPicker()) && !options.force) return;
+  const automationFocusKey = sessionAutomationFocusKey();
+  disposeSessionAutomationPickers();
   const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
   const count = sessions.length;
   const now = Date.now();
@@ -2097,6 +2221,7 @@ function render(options = {}) {
   appendSessionHistory(fragment, now);
 
   contentEl.replaceChildren(fragment);
+  restoreSessionAutomationFocus(automationFocusKey);
 }
 
 async function init() {

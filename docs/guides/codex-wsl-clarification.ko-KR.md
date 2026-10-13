@@ -23,7 +23,7 @@ Windows와 WSL은 기본적으로 별도의 Codex home을 사용합니다. WSL�
 ## 권장 절차: 별도 home + Pair
 
 1. 대상 WSL2 배포판에 Codex와 Linux Node를 설치하고, 그 안에서 Codex를 실행해 자체 home을 만듭니다.
-2. Windows Clawd를 시작합니다. **Settings → Agents → Connected → WSL Scan**에서 Codex의 해당 배포판을 찾아 **Pair**를 선택합니다. Windows에 Codex가 없으면 해당 행이 **Unavailable**에 있을 수 있습니다.
+2. Windows Clawd를 시작합니다. **Settings → AI 코딩 도구 → Connected → WSL Scan**에서 Codex의 해당 배포판을 찾아 **Pair**를 선택합니다. Windows에 Codex가 없으면 해당 행이 **Unavailable**에 있을 수 있습니다.
 3. Clawd에서 Codex가 **활성화**되어 있는지 확인합니다. WSL 페어링은 Windows 로컬 통합 설치와 별개이며, 일반적으로 비활성화된 agent를 자동으로 켜지 않습니다.
 4. 설치 결과와 연결 결과를 각각 확인하고, 필요한 경우 Codex에서 hooks를 검토하고 신뢰합니다. 새 세션을 시작해 Clawd에 나타나는지 확인하세요. 연결 탐지 실패나 알 수 없음은 연결 성공이 아닙니다.
 

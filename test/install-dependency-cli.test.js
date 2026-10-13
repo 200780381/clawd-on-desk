@@ -8,11 +8,23 @@ const { spawnSync } = require("node:child_process");
 const HOOKS = path.join(__dirname, "..", "hooks");
 const ALL_FILES = fs.readdirSync(HOOKS).filter((name) => name.endsWith(".js"));
 // Historical #901 payload, deliberately independent of the corrected guide.
-const OLD_FILES = [
-  "server-config", "json-utils", "shared-process", "clawd-hook", "install",
+const HISTORICAL_PAYLOAD_FILES = [
+  "shared-process", "clawd-hook", "install",
   "codex-hook", "codex-install", "codex-install-utils", "codex-remote-monitor",
   "codex-session-index", "codex-subagent-fields", "copilot-hook", "copilot-install",
 ].map((name) => `${name}.js`);
+// install.js requires these at module load. A copy missing one of them cannot
+// even reach the dependency preflight (it dies with MODULE_NOT_FOUND), which is
+// a bootstrap failure, not the partial-payload case under test here. They are
+// listed separately so nobody mistakes them for part of the historical #901
+// payload.
+const CURRENT_BOOTSTRAP_FILES = [
+  "server-config.js",
+  "json-utils.js",
+  "appimage-hook-materializer.js",
+  "hook-dependency-preflight.js",
+];
+const OLD_FILES = [...HISTORICAL_PAYLOAD_FILES, ...CURRENT_BOOTSTRAP_FILES];
 
 function fixture(t, files = ALL_FILES) {
   // Space also exercises source-path handling; this does not execute the
@@ -67,6 +79,53 @@ function refused(f, args, expected, env) {
   assert.doesNotMatch(result.stdout, /hooks installed|statusline.*updated/);
   if (expected) assert.match(result.stderr, expected);
   return result;
+}
+
+function kimiFixture(t, files = ALL_FILES) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "clawd kimi cli-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const hooks = path.join(home, "payload", "hooks");
+  const legacyDir = path.join(home, ".kimi");
+  const codeDir = path.join(home, ".kimi-code");
+  fs.mkdirSync(hooks, { recursive: true });
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.mkdirSync(codeDir, { recursive: true });
+  for (const name of files) fs.copyFileSync(path.join(HOOKS, name), path.join(hooks, name));
+  const legacyConfig = path.join(legacyDir, "config.toml");
+  const codeConfig = path.join(codeDir, "config.toml");
+  fs.writeFileSync(legacyConfig, 'user_setting = "legacy"\n');
+  fs.writeFileSync(codeConfig, 'user_setting = "kimi-code"\n');
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    KIMI_CODE_HOME: codeDir,
+    TMPDIR: home,
+    TMP: home,
+    TEMP: home,
+  };
+  return {
+    home,
+    hooks,
+    legacyConfig,
+    codeConfig,
+    run: () => {
+      const result = spawnSync(process.execPath, [path.join(hooks, "kimi-install.js")], {
+        cwd: home,
+        env,
+        encoding: "utf8",
+        timeout: 20000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.signal, null);
+      return result;
+    },
+    loadRuntime: () => spawnSync(
+      process.execPath,
+      ["-e", "require(process.argv[1])", path.join(hooks, "kimi-hook.js")],
+      { cwd: home, env, encoding: "utf8", timeout: 20000 }
+    ),
+  };
 }
 
 describe("Claude installer CLI dependency preflight", () => {
@@ -136,6 +195,9 @@ describe("Claude installer CLI dependency preflight", () => {
   it("fails without writes when the installer's own bootstrap dependency is absent", (t) => {
     refused(fixture(t, ALL_FILES.filter((n) => n !== "json-utils.js")), [], /MODULE_NOT_FOUND/);
   });
+  it("fails without writes when the shared materializer bootstrap leaf is absent", (t) => {
+    refused(fixture(t, ALL_FILES.filter((n) => n !== "appimage-hook-materializer.js")), [], /MODULE_NOT_FOUND/);
+  });
   for (const key of ["CLAWD_WSL_DISTRO", "WSL_DISTRO_NAME"]) {
     it(`covers the no-flag WSL configuration with ${key}`, (t) => {
       if (key === "WSL_DISTRO_NAME" && process.platform !== "linux") return t.skip("native WSL detection is Linux-only");
@@ -145,6 +207,32 @@ describe("Claude installer CLI dependency preflight", () => {
       const commands = f.read().hooks.UserPromptSubmit.flatMap((e) => e.hooks);
       assert.ok(commands.every((h) => !h.command.includes("CLAWD_REMOTE=")));
       refused(fixture(t, OLD_FILES), [], /state-payload-size\.js/, { [key]: "Fixture" });
+    });
+  }
+});
+
+describe("Kimi installer CLI dependency preflight", () => {
+  it("installs both homes from a complete hooks-only payload and loads the real runtime entry", (t) => {
+    const f = kimiFixture(t);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(fs.readFileSync(f.legacyConfig, "utf8"), /kimi-hook\.js/);
+    assert.match(fs.readFileSync(f.codeConfig, "utf8"), /kimi-hook\.js/);
+    assert.equal(fs.existsSync(path.join(f.home, "payload", "agents")), false);
+    const loaded = f.loadRuntime();
+    assert.ifError(loaded.error);
+    assert.equal(loaded.status, 0, loaded.stdout + loaded.stderr);
+  });
+
+  for (const missingName of ["kimi-process-names.js", "shared-process.js"]) {
+    it(`refuses missing ${missingName} before changing either Kimi home`, (t) => {
+      const f = kimiFixture(t, ALL_FILES.filter((name) => name !== missingName));
+      const before = snapshot(f.home);
+      const result = f.run();
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, new RegExp(missingName.replace(".", "\\.")));
+      assert.match(result.stderr, /required by kimi-hook\.js/);
+      assert.deepEqual(snapshot(f.home), before, "neither Kimi TOML home may change after a failed preflight");
     });
   }
 });

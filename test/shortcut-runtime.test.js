@@ -115,6 +115,7 @@ function createRuntime(options = {}) {
       togglePet: () => togglePetCalls.push("togglePet"),
       quickSelectSession: () => {},
     },
+    platform: options.platform,
   });
   return { globalShortcut, ipcMain, runtime, settingsWindow, togglePetCalls };
 }
@@ -296,6 +297,7 @@ test("shortcut recording temporarily unregisters and restores every persistent s
   const toggle = "CommandOrControl+Shift+Alt+C";
   const quickSelect = "CommandOrControl+Shift+J";
   const { globalShortcut, ipcMain } = createRuntime({
+    platform: "win32",
     snapshot: {
       shortcuts: {
         togglePet: toggle,

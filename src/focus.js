@@ -2311,10 +2311,13 @@ function focusTerminalWindowLegacy(request, onDone) {
   if (cwd) {
     let dir = cwd;
     for (let i = 0; i < 3; i++) {
-      const name = path.basename(dir);
+      // This is the Windows dispatch branch even when exercised by a POSIX
+      // test host. Interpret the target cwd with Windows path semantics so a
+      // drive/backslash path yields the same title candidates everywhere.
+      const name = path.win32.basename(dir);
       if (!name || name === dir || /^[A-Z]:$/i.test(name)) break;
       cwdCandidates.push(name);
-      dir = path.dirname(dir);
+      dir = path.win32.dirname(dir);
     }
   }
 

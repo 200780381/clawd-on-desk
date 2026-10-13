@@ -82,6 +82,41 @@ describe("session focus helpers", () => {
     });
   });
 
+  it("keeps Codex CLI UUIDs on the terminal focus path", () => {
+    const entry = {
+      id: "codex:019e115a-4df2-7ed0-b90e-8e6345aca777",
+      rawSessionId: "codex:019e115a-4df2-7ed0-b90e-8e6345aca777",
+      agentId: "codex",
+      codexOriginator: "codex-tui",
+      sourcePid: 123,
+    };
+
+    assert.strictEqual(getCodexThreadId(entry), "019e115a-4df2-7ed0-b90e-8e6345aca777");
+    assert.strictEqual(getCodexThreadUrl(entry), null);
+    assert.deepStrictEqual(getSessionFocusTarget(entry, { osPlatform: "win32" }), {
+      canFocus: true,
+      type: "terminal",
+      url: null,
+    });
+  });
+
+  it("does not infer a Desktop deep link from a queue-only named thread selector", () => {
+    const entry = {
+      id: "codex:Build / release?week#1",
+      rawSessionId: "codex:Build / release?week#1",
+      agentId: "codex",
+      codexOriginator: "Codex Desktop",
+    };
+
+    assert.strictEqual(getCodexThreadId(entry), "Build / release?week#1");
+    assert.strictEqual(getCodexThreadUrl(entry), null);
+    assert.deepStrictEqual(getSessionFocusTarget(entry, { osPlatform: "darwin" }), {
+      canFocus: false,
+      type: null,
+      url: null,
+    });
+  });
+
   it("derives Codex Desktop thread focus targets from profile-scoped session entries", () => {
     const rawSessionId = "codex:019e115a-4df2-7ed0-b90e-8e6345aca777";
     const entry = {
@@ -226,6 +261,51 @@ describe("session focus helpers", () => {
     // The HUD/Dashboard click target is enabled, but local-only consumers such
     // as pet-body focus and Telegram Direct Send must not absorb remote sessions.
     assert.strictEqual(isFocusableLocalHudSession(remoteOrca, { osPlatform: "darwin" }), false);
+  });
+
+  it("opens the DSH desktop window only for local desktop-carrier sessions on supported hosts", () => {
+    const desktop = {
+      id: "deepseek-harness:s1",
+      agentId: "deepseek-harness",
+      dshCarrier: "desktop",
+    };
+    const dshDesktopTarget = { canFocus: true, type: "dsh-desktop", url: "dsh://open" };
+    const unavailable = { canFocus: false, type: null, url: null };
+
+    assert.deepStrictEqual(getSessionFocusTarget(desktop, { osPlatform: "darwin" }), dshDesktopTarget);
+    assert.deepStrictEqual(getSessionFocusTarget(desktop, { osPlatform: "win32" }), dshDesktopTarget);
+    assert.strictEqual(isFocusableLocalHudSession(desktop, { osPlatform: "darwin" }), true);
+    assert.strictEqual(isFocusableLocalHudSession(desktop, { osPlatform: "linux" }), false);
+    assert.deepStrictEqual(getSessionFocusTarget(desktop, { osPlatform: "linux" }), unavailable);
+
+    // The carrier only counts for DSH, and only when it is exactly "desktop".
+    assert.deepStrictEqual(getSessionFocusTarget({ ...desktop, agentId: "codex" }, { osPlatform: "darwin" }), unavailable);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...desktop, dshCarrier: "web" }, { osPlatform: "darwin" }), unavailable);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...desktop, platform: "webui" }, { osPlatform: "darwin" }), unavailable);
+    assert.deepStrictEqual(getSessionFocusTarget({ ...desktop, host: "remote-box" }, { osPlatform: "darwin" }), unavailable);
+    // A desktop carrier never grants terminal focus.
+    assert.deepStrictEqual(getSessionFocusTarget({ ...desktop, sourcePid: 123 }, { osPlatform: "darwin" }), dshDesktopTarget);
+  });
+
+  it("keeps the DSH desktop window out of the Direct Send paste target", () => {
+    const desktop = {
+      id: "deepseek-harness:s1",
+      agentId: "deepseek-harness",
+      dshCarrier: "desktop",
+      sourcePid: 123,
+    };
+
+    assert.deepStrictEqual(getDirectSendFocusTarget(desktop, { osPlatform: "darwin" }), {
+      canFocus: false,
+      type: "dsh-desktop",
+      url: "dsh://open",
+      reason: "dsh_desktop_requires_manual_paste",
+    });
+    assert.deepStrictEqual(getDirectSendFocusTarget({ ...desktop, dshCarrier: "web" }, { osPlatform: "darwin" }), {
+      canFocus: true,
+      type: "terminal",
+      url: null,
+    });
   });
 
   it("rejects malformed entries defensively", () => {

@@ -32,7 +32,8 @@ const {
   cleanupOrphanedLeaseLocks,
 } = require("./session-recovery-lease");
 
-const HISTORY_VERSION = 1;
+const LEGACY_HISTORY_VERSION = 1;
+const HISTORY_VERSION = 2;
 const HISTORY_DIR_NAME = "session-history-v1";
 const HISTORY_FILE_PREFIX = "session-history-v1-";
 const MAX_HISTORY_BYTES = 16 * 1024;
@@ -47,7 +48,7 @@ const REFRESH_INTERVAL_MS = 30 * 1000;
 // than equality.
 const BOOT_TOLERANCE_MS = 5 * 60 * 1000;
 
-const ALLOWED_RECORD_KEYS = new Set([
+const LEGACY_ALLOWED_RECORD_KEYS = new Set([
   "version",
   "agentId",
   "sessionId",
@@ -59,6 +60,12 @@ const ALLOWED_RECORD_KEYS = new Set([
   "endedAt",
   "bootApproxAt",
 ]);
+const ALLOWED_RECORD_KEYS = new Set([
+  ...LEGACY_ALLOWED_RECORD_KEYS,
+  "profile",
+  "historyKey",
+]);
+const MAX_CLAUDE_CONFIG_DIR_LENGTH = 1024;
 
 const SUSTAINED_STATES = new Set(["thinking", "working", "juggling"]);
 
@@ -88,6 +95,39 @@ function normalizeTitle(value) {
   const title = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim();
   if (!title) return null;
   return title.length > 120 ? title.slice(0, 120) : title;
+}
+
+function normalizeClaudeProfile(profile) {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return null;
+  const keys = Object.keys(profile).sort();
+  if (keys.length !== 2 || keys[0] !== "configDir" || keys[1] !== "kind") return null;
+  if (profile.kind === "default" && profile.configDir === null) {
+    return { kind: "default", configDir: null };
+  }
+  if (profile.kind !== "custom" || typeof profile.configDir !== "string") return null;
+  const raw = profile.configDir.trim();
+  if (!raw || raw.length > MAX_CLAUDE_CONFIG_DIR_LENGTH
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(raw) || !path.isAbsolute(raw)) return null;
+  const configDir = path.normalize(raw);
+  return configDir === raw ? { kind: "custom", configDir } : null;
+}
+
+function resolveClaudeProfileFromEnv(options = {}) {
+  const env = options.env && typeof options.env === "object" ? options.env : process.env;
+  if (!Object.prototype.hasOwnProperty.call(env, "CLAUDE_CONFIG_DIR")
+    || env.CLAUDE_CONFIG_DIR === undefined || env.CLAUDE_CONFIG_DIR === null
+    || env.CLAUDE_CONFIG_DIR === "") {
+    return { kind: "default", configDir: null };
+  }
+  if (typeof env.CLAUDE_CONFIG_DIR !== "string") return null;
+  const raw = env.CLAUDE_CONFIG_DIR.trim();
+  if (!raw || raw.length > MAX_CLAUDE_CONFIG_DIR_LENGTH
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(raw) || !path.isAbsolute(raw)) return null;
+  return { kind: "custom", configDir: path.normalize(raw) };
+}
+
+function profileIdentity(profile) {
+  return profile.kind === "custom" ? `custom\0${profile.configDir}` : "default";
 }
 
 // Boot identity without spawning anything. The Windows lease writer is bound
@@ -138,24 +178,36 @@ function ensureHistoryDir(options = {}) {
   }
 }
 
-function historyHash(agentId, sessionId) {
-  return crypto.createHash("sha256").update(`${agentId}\0${sessionId}`).digest("hex").slice(0, 32);
+function historyHash(agentId, sessionId, profile, version = HISTORY_VERSION) {
+  const input = version === LEGACY_HISTORY_VERSION
+    ? `${agentId}\0${sessionId}`
+    : `${agentId}\0${sessionId}\0${profileIdentity(profile)}`;
+  return crypto.createHash("sha256").update(input).digest("hex").slice(0, 32);
 }
 
 function getHistoryFilePath(agentId, sessionId, options = {}) {
   const normalizedAgentId = normalizeAgentId(agentId);
   const normalizedSessionId = normalizeSessionId(sessionId);
   if (!normalizedAgentId || !normalizedSessionId) return null;
+  const version = options.version === LEGACY_HISTORY_VERSION
+    ? LEGACY_HISTORY_VERSION
+    : HISTORY_VERSION;
+  const profile = version === LEGACY_HISTORY_VERSION
+    ? { kind: "default", configDir: null }
+    : normalizeClaudeProfile(options.profile || { kind: "default", configDir: null });
+  if (!profile) return null;
   return path.join(
     getHistoryDir(options),
-    `${HISTORY_FILE_PREFIX}${historyHash(normalizedAgentId, normalizedSessionId)}.json`,
+    `${HISTORY_FILE_PREFIX}${historyHash(normalizedAgentId, normalizedSessionId, profile, version)}.json`,
   );
 }
 
 function validateRecord(record, options = {}) {
   if (!record || typeof record !== "object" || Array.isArray(record)) return null;
-  if (Object.keys(record).some((key) => !ALLOWED_RECORD_KEYS.has(key))) return null;
-  if (record.version !== HISTORY_VERSION) return null;
+  const version = record.version;
+  if (version !== LEGACY_HISTORY_VERSION && version !== HISTORY_VERSION) return null;
+  const allowedKeys = version === LEGACY_HISTORY_VERSION ? LEGACY_ALLOWED_RECORD_KEYS : ALLOWED_RECORD_KEYS;
+  if (Object.keys(record).some((key) => !allowedKeys.has(key))) return null;
   const agentId = normalizeAgentId(record.agentId);
   const sessionId = normalizeSessionId(record.sessionId);
   if (!agentId || !SUPPORTED_AGENT_IDS.has(agentId) || !sessionId
@@ -170,16 +222,29 @@ function validateRecord(record, options = {}) {
   if (cwd !== record.cwd) return null;
   const title = record.title === null ? null : normalizeTitle(record.title);
   if (title !== record.title) return null;
+  const profile = version === HISTORY_VERSION ? normalizeClaudeProfile(record.profile) : null;
+  if (version === HISTORY_VERSION && !profile) return null;
+  const historyKey = historyHash(
+    agentId,
+    sessionId,
+    profile || { kind: "default", configDir: null },
+    version,
+  );
+  if (version === HISTORY_VERSION && record.historyKey !== historyKey) return null;
   if (options.filePath) {
     const expected = getHistoryFilePath(agentId, sessionId, {
       historyDir: path.dirname(options.filePath),
+      version,
+      profile,
     });
     if (!expected || path.basename(expected) !== path.basename(options.filePath)) return null;
   }
   return {
-    version: HISTORY_VERSION,
+    version,
     agentId,
     sessionId,
+    profile,
+    historyKey,
     cwd,
     title,
     lastState: record.lastState,
@@ -239,7 +304,10 @@ function pruneHistoryFiles(dir, options = {}) {
     if (!lock) return false;
     try {
       const current = readHistoryFile(entry.filePath);
-      if (!current || current.lastEventAt !== entry.record.lastEventAt) return false;
+      // Any concurrent write must abort this deletion, not just one that moves
+      // lastEventAt: a SubagentStop settle rewrites state while keeping the
+      // original timestamp (#1060 follow-up).
+      if (!current || JSON.stringify(current) !== JSON.stringify(entry.record)) return false;
       fs.unlinkSync(entry.filePath);
       return true;
     } catch {
@@ -289,8 +357,11 @@ function recordSessionHistoryFromStateBody(body, options = {}) {
   const classified = classifyStateBodyForRecovery(body, options);
   if (!classified) return { written: false, reason: "unclassified" };
 
+  const profile = resolveClaudeProfileFromEnv(options);
+  if (!profile) return { written: false, reason: "invalid-profile" };
+
   const dir = ensureHistoryDir(options);
-  const filePath = dir ? getHistoryFilePath(agentId, sessionId, { historyDir: dir }) : null;
+  const filePath = dir ? getHistoryFilePath(agentId, sessionId, { historyDir: dir, profile }) : null;
   if (!filePath) return { written: false, reason: "path" };
 
   try {
@@ -308,27 +379,46 @@ function recordSessionHistoryFromStateBody(body, options = {}) {
     const existing = readHistoryFile(filePath);
     // An existing invalid row may belong to a future schema or another owner.
     if (!existing && fs.existsSync(filePath)) return { written: false, reason: "invalid-record" };
+    if (classified.requireActiveExisting === true && (!existing || existing.endedAt !== null)) {
+      return { written: false, reason: "no-active-evidence" };
+    }
     const observedAt = Number.isFinite(options.eventAt) && options.eventAt > 0
       ? options.eventAt
       : Date.now();
+    // A debounce Stop is a completed turn in history even though the lease
+    // keeps it active and provisional. Fold that into the active/terminal this
+    // write uses so the merge below matches a normal event.
+    const completedTurn = classified.provisionalCompletion === true;
+    const active = classified.active && !completedTurn;
+    const terminal = classified.terminal || completedTurn;
     // Same tie-break as the lease: a terminal hook wins over same-tick work.
-    const eventAt = observedAt + (classified.terminal ? 0.5 : 0);
+    const eventAt = observedAt + (terminal ? 0.5 : 0);
     if (existing && existing.lastEventAt > eventAt) {
       return { written: false, reason: "older-event" };
     }
+    // A SubagentStop is closing evidence, not new activity, so it may only
+    // settle a row that was tracking concurrency. Thinking/working/empty rows
+    // stay byte-for-byte, matching the live state machine's "subagent-stop keep".
+    if (classified.subagentStop === true && existing.lastState !== "juggling") {
+      return { written: false, reason: "nothing-to-settle" };
+    }
 
     const cwd = normalizeCwd(body.cwd) || (existing && existing.cwd) || "";
-    const title = body._sessionTitleFromPrompt === true
+    const title = body.session_title_from_prompt === true
       ? (existing && existing.title) || null
       : normalizeTitle(body.session_title) || (existing && existing.title) || null;
-    const lastState = classified.active && SUSTAINED_STATES.has(classified.state)
+    const lastState = active && SUSTAINED_STATES.has(classified.state)
       ? classified.state
       : (existing && existing.lastState) || null;
     // A session that goes quiet and then receives another prompt is live
     // again, so an earlier terminal event must not stick.
-    const endedAt = classified.active
+    const endedAt = active
       ? null
-      : (classified.terminal ? observedAt : (existing && existing.endedAt) || null);
+      : (terminal ? observedAt : (existing && existing.endedAt) || null);
+    // Settling keeps the existing clock; only a genuinely new event may move it.
+    const lastEventAt = classified.subagentStop === true && existing
+      ? existing.lastEventAt
+      : eventAt;
 
     if (existing) {
       const identityUnchanged = existing.cwd === cwd
@@ -347,11 +437,13 @@ function recordSessionHistoryFromStateBody(body, options = {}) {
       version: HISTORY_VERSION,
       agentId,
       sessionId,
+      profile,
+      historyKey: historyHash(agentId, sessionId, profile),
       cwd,
       title,
       lastState,
       firstSeenAt: existing ? existing.firstSeenAt : eventAt,
-      lastEventAt: eventAt,
+      lastEventAt,
       endedAt,
       // In production sample wall clock and uptime together, after any hook
       // buffering/lock wait. Fixtures may supply a paired event clock.
@@ -421,6 +513,7 @@ function loadSessionHistory(options = {}) {
 }
 
 module.exports = {
+  LEGACY_HISTORY_VERSION,
   HISTORY_VERSION,
   HISTORY_DIR_NAME,
   HISTORY_FILE_PREFIX,
@@ -428,6 +521,9 @@ module.exports = {
   MAX_HISTORY_FILES,
   REFRESH_INTERVAL_MS,
   BOOT_TOLERANCE_MS,
+  MAX_CLAUDE_CONFIG_DIR_LENGTH,
+  normalizeClaudeProfile,
+  resolveClaudeProfileFromEnv,
   getHistoryDir,
   getHistoryFilePath,
   getBootApproxAt,

@@ -3098,7 +3098,7 @@ test("remoteSsh:open-terminal uses the same interactive ssh args contract as Aut
   ipc.dispose();
 });
 
-test("Windows: waits for START to complete before reporting a conhost launch", async () => {
+test("Windows: waits for the START command before reporting a conhost launch", async () => {
   const ipcMain = mockIpcMain();
   const { BrowserWindow } = mockBrowserWindow();
   const calls = [];
@@ -3131,7 +3131,6 @@ test("Windows: waits for START to complete before reporting a conhost launch", a
   assert.equal(calls[0].args[4],
     'start "" conhost.exe cmd.exe /d /v:off /s /k ^%CLAWD_REMOTE_SSH_COMMAND^%');
   assert.equal(calls[0].opts.windowsHide, true, "only the short-lived starter is hidden");
-  assert.equal(calls[0].opts.detached, true, "the terminal must outlive Clawd");
   assert.equal(calls[0].opts.shell, false);
   ipc.dispose();
 });

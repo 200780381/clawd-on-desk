@@ -62,6 +62,18 @@ const VERIFIED_GITHUB_CONTRIBUTORS = [
   "CheeseAgent",
   "RS-Nocsi",
   "Cobb04",
+  "TalexDreamSoul",
+  "FuZoe",
+  "undefined-moe",
+  "pu-1205",
+  "Free-LZJ",
+  "easyhak",
+  "jlimcode",
+  "xfurqan0",
+  "brantshin",
+  "mantertius",
+  "VonSdite",
+  "sunnyswag",
 ];
 
 function createDeferred() {
@@ -393,6 +405,10 @@ function collectText(el) {
   return parts.join(" ");
 }
 
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 class FakeElement {
   constructor(tagName) {
     this.tagName = String(tagName || "").toUpperCase();
@@ -632,6 +648,33 @@ class FakeElement {
   }
 }
 
+let nextFakeSettingRowId = 1;
+function buildFakeSettingRow(document, config = {}) {
+  const element = document.createElement("div");
+  element.className = ["row", config.className || ""].filter(Boolean).join(" ");
+  const textElement = document.createElement("div");
+  textElement.className = "row-text";
+  const labelElement = document.createElement("span");
+  labelElement.className = "row-label";
+  labelElement.id = `fake-row-label-${nextFakeSettingRowId++}`;
+  labelElement.textContent = config.label != null ? String(config.label) : (config.labelKey || "");
+  textElement.appendChild(labelElement);
+  let descriptionElement = null;
+  const description = config.description != null ? String(config.description) : (config.descriptionKey || "");
+  if (description) {
+    descriptionElement = document.createElement("span");
+    descriptionElement.className = "row-desc";
+    descriptionElement.id = `fake-row-description-${nextFakeSettingRowId++}`;
+    descriptionElement.textContent = description;
+    textElement.appendChild(descriptionElement);
+  }
+  const controlElement = document.createElement("div");
+  controlElement.className = ["row-control", config.controlClassName || ""].filter(Boolean).join(" ");
+  element.appendChild(textElement);
+  element.appendChild(controlElement);
+  return { element, textElement, labelElement, descriptionElement, controlElement };
+}
+
 function loadSharedButtonHelpersForTest(document, settingsAPI = {}, getTranslate = null) {
   const shared = loadSettingsCoreForTest(settingsAPI, { document }).helpers;
   const translateConfig = (config = {}) => {
@@ -646,6 +689,17 @@ function loadSharedButtonHelpersForTest(document, settingsAPI = {}, getTranslate
     buildButton: (config) => shared.buildButton(translateConfig(config)),
     setButtonState: (button, patch) => shared.setButtonState(button, translateConfig(patch)),
     buildSwitch: (config) => shared.buildSwitch(config),
+  };
+}
+
+function loadSharedChoiceHelpersForTest(document) {
+  const core = loadSettingsCoreForTest({}, { document });
+  return {
+    buildTabs: core.helpers.buildTabs,
+    createSubpageHost: core.helpers.createSubpageHost,
+    clearMountedControls: core.ops.clearMountedControls,
+    buildSegmentedRadio: core.helpers.buildSegmentedRadio,
+    registerMountedDisposable: core.helpers.registerMountedDisposable,
   };
 }
 
@@ -683,6 +737,7 @@ function loadRecapTabForTest({ data, agentMetadata = [], queryRecap } = {}) {
     state: { activeTab: "recap", snapshot: { lang: "en", recapEnabled: true } },
     runtime: { agentMetadata },
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => strings[key] || key,
       buildSwitch: sharedControls.buildSwitch,
       buildSection: (title, rows) => {
@@ -766,6 +821,58 @@ function sampleRecapView() {
   };
 }
 
+function setFakeTextInputState(input, nextState = {}) {
+  const state = { disabled: false, pending: false, invalid: false, lockWhilePending: true,
+    ...(input._settingsTextInputState || {}) };
+  for (const key of ["disabled", "pending", "invalid"]) {
+    if (Object.prototype.hasOwnProperty.call(nextState, key)) state[key] = nextState[key] === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextState, "lockWhilePending")) {
+    state.lockWhilePending = nextState.lockWhilePending !== false;
+  }
+  input._settingsTextInputState = state;
+  input.disabled = state.disabled || (state.pending && state.lockWhilePending);
+  input.classList.toggle("pending", state.pending);
+  input.classList.toggle("invalid", state.invalid);
+  input.setAttribute("aria-busy", state.pending ? "true" : "false");
+  input.setAttribute("aria-invalid", state.invalid ? "true" : "false");
+  if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
+    if (nextState.describedBy) input.setAttribute("aria-describedby", nextState.describedBy);
+    else input.removeAttribute("aria-describedby");
+  }
+  return input;
+}
+
+function buildFakeTextInput(document, config = {}) {
+  const input = document.createElement("input");
+  const size = config.size === "compact" ? "compact" : "regular";
+  input.type = config.type || "text";
+  input.className = [
+    "settings-text-input",
+    `settings-text-input-${size}`,
+    config.className || "",
+  ].filter(Boolean).join(" ");
+  if (config.value != null) input.value = String(config.value);
+  if (config.placeholder != null) input.placeholder = String(config.placeholder);
+  if (config.autocomplete != null) input.autocomplete = String(config.autocomplete);
+  if (config.spellcheck != null) input.spellcheck = config.spellcheck === true;
+  if (config.inputMode != null) input.inputMode = String(config.inputMode);
+  if (config.maxLength != null) input.maxLength = Number(config.maxLength);
+  if (config.pattern != null) input.pattern = String(config.pattern);
+  if (config.ariaLabel) input.setAttribute("aria-label", config.ariaLabel);
+  if (config.describedBy) input.setAttribute("aria-describedby", config.describedBy);
+  if (typeof config.onInput === "function") input.addEventListener("input", config.onInput);
+  if (config.stopPropagation === true) input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (config.stopPropagation === true) event.stopPropagation();
+    if (event.key !== "Enter" || typeof config.onEnter !== "function"
+      || event.isComposing === true || event.keyCode === 229) return;
+    event.preventDefault();
+    config.onEnter(event, input);
+  });
+  return setFakeTextInputState(input, config);
+}
+
 function loadSharedLanguagePickerForTest({
   value = "en",
   options = ["en", "zh", "ja"],
@@ -775,6 +882,7 @@ function loadSharedLanguagePickerForTest({
   transitionDelay = "0s",
   lockWhilePending = false,
   viewportPlacement = null,
+  revealWhenClosed,
   innerWidth = 1000,
   textZoom = 1,
 } = {}) {
@@ -868,6 +976,7 @@ function loadSharedLanguagePickerForTest({
     onChange,
     lockWhilePending,
     viewportPlacement,
+    revealWhenClosed,
   });
   boundary.appendChild(control.element);
 
@@ -1058,12 +1167,14 @@ function loadGeneralLanguageRowForTest({
 function loadGeneralTabForTest({
   snapshot,
   settingsAPI = {},
+  sizeSliderExports = null,
   platform = "Win32",
   requestAnimationFrame = (cb) => {
     cb();
     return 1;
   },
 } = {}) {
+  const windowListeners = new Map();
   const body = new FakeElement("body");
   const content = new FakeElement("main");
   content.id = "content";
@@ -1090,8 +1201,11 @@ function loadGeneralTabForTest({
     getComputedStyle: () => ({
       getPropertyValue: () => "",
     }),
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: (type, cb) => {
+      if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+      windowListeners.get(type).add(cb);
+    },
+    removeEventListener: (type, cb) => windowListeners.get(type)?.delete(cb),
     window: null,
     globalThis: null,
     settingsAPI: {
@@ -1101,7 +1215,7 @@ function loadGeneralTabForTest({
       openDashboard: () => {},
       ...settingsAPI,
     },
-    ClawdSettingsSizeSlider: {
+    ClawdSettingsSizeSlider: sizeSliderExports || {
       SIZE_UI_MIN: 1,
       SIZE_UI_MAX: 100,
       SIZE_TICK_VALUES: [25, 50, 75, 100],
@@ -1159,6 +1273,10 @@ function loadGeneralTabForTest({
       const meta = core.state.mountedControls.generalSwitches.get(key);
       return meta ? meta.element : null;
     },
+    dispatchWindowEvent: (type) => {
+      for (const cb of windowListeners.get(type) || []) cb();
+    },
+    getWindowListenerCount: (type) => windowListeners.get(type)?.size || 0,
   };
 }
 
@@ -1366,6 +1484,8 @@ function chooseSegmentedOption(group, value) {
 
 function loadThemeTabForTest({
   themes,
+  officialThemes,
+  officialCatalogStatus,
   snapshot,
   petTintOptions,
   petAccessoryOptions,
@@ -1489,6 +1609,9 @@ function loadThemeTabForTest({
   };
   core.state.activeTab = "theme";
   core.runtime.themeList = themeListState;
+  core.runtime.officialThemeList = Array.isArray(officialThemes) ? officialThemes : null;
+  core.runtime.officialThemeListFetched = Array.isArray(officialThemes);
+  core.runtime.officialThemeCatalogStatus = officialCatalogStatus || "ok";
   core.runtime.petTintOptions = Array.isArray(petTintOptions) ? petTintOptions : [];
   core.runtime.petAccessoryOptions = Array.isArray(petAccessoryOptions)
     ? petAccessoryOptions
@@ -1513,6 +1636,7 @@ function loadAgentsTabForTest({
   collapsedGroups = {},
   settingsAPI = {},
   doctor = null,
+  navigator: navigatorOverrides = {},
 } = {}) {
   const raf = createQueuedRaf();
   const body = new FakeElement("body");
@@ -1529,13 +1653,18 @@ function loadAgentsTabForTest({
     createElement: (tagName) => new FakeElement(tagName),
     getElementById(id) {
       if (id === "content") return content;
+      if (id === "toastStack") return toastStack;
       return null;
     },
   };
+  const toastStack = new FakeElement("div");
+  toastStack.id = "toastStack";
+  body.appendChild(toastStack);
 
+  const windowListeners = {};
   const context = {
     console,
-    navigator: { platform: "Win32" },
+    navigator: { platform: "Win32", ...navigatorOverrides },
     localStorage: {
       getItem: (key) => (Object.prototype.hasOwnProperty.call(localStorageData, key) ? localStorageData[key] : null),
       setItem: (key, value) => {
@@ -1579,6 +1708,8 @@ function loadAgentsTabForTest({
           customToolManualAdd: "Choose AI installation folder",
           customToolNotRecognized: "No launchable application found",
           customToolDetectionMissing: "Path missing",
+          customToolDetectionNotExecutable: "Not executable",
+          customToolDetectionNotFile: "Not a file",
           agentInstanceScanWsl: "Scan WSL",
           agentInstanceScanWslDesc: "Rescan WSL distros",
           customToolRescan: "Rescan",
@@ -1596,12 +1727,27 @@ function loadAgentsTabForTest({
           rowStartWithCodexDesc: "Start with Codex desc",
           rowCodexPermissionMode: "Permission mode",
           rowCodexPermissionModeDesc: "Permission mode desc",
-          codexPermissionModeNative: "Native",
+          codexPermissionModeAuto: "Auto",
           codexPermissionModeIntercept: "Intercept",
           rowCodexNativeNotificationSound: "Native sound",
           rowCodexNativeNotificationSoundDesc: "Native sound desc",
           badgePermissionBubble: "Permission bubble",
           traecodeEnableHint: "Enable hooks in Trae before they fire.",
+          minimaxEnableHint: "Enable the Clawd plugin in MiniMax Code before hooks fire.",
+          dshNoticeProfileWeb: "Web",
+          dshNoticeProfileDesktop: "Desktop",
+          dshNoticeLine: "{profile}: {text}",
+          dshNoticeRestartRequired: "The Clawd plugin was updated. Restart DeepSeek Harness desktop to load it.",
+          dshNoticeFirstInstall: "Installed in DeepSeek Harness desktop. It loads automatically while the app is open; no restart needed.",
+          dshNoticeManualCommand: "Run this in a terminal to finish. Clawd will not run it for you:",
+          dshNoticeInstallFailed: "Not installed: {message}",
+          dshNoticeGenerationConflict: "DeepSeek Harness moved to a new version family. The Clawd plugin keeps working. To switch it to the new family, click Uninstall and then Install here, then restart any running dsh web.",
+          dshNoticeUninstallFailed: "Not fully removed: {message}",
+          dshNoticeOpenDoctor: "Open Doctor and click {fix}.",
+          doctorFix: "Repair Now",
+          dshNoticeAcknowledge: "Got it",
+          dshNoticeCopy: "Copy",
+          dshNoticeCopied: "Copied",
           eventSourceHook: "Hook",
           eventSourceLogPoll: "Log poll",
           eventSourcePlugin: "Plugin",
@@ -1645,6 +1791,20 @@ function loadAgentsTabForTest({
   };
   context.window = context;
   context.globalThis = context;
+  context.addEventListener = (type, cb) => {
+    if (typeof cb !== "function") return;
+    if (!windowListeners[type]) windowListeners[type] = [];
+    windowListeners[type].push(cb);
+  };
+  context.removeEventListener = (type, cb) => {
+    const listeners = windowListeners[type];
+    if (!listeners) return;
+    const index = listeners.indexOf(cb);
+    if (index !== -1) listeners.splice(index, 1);
+  };
+  context.dispatchWindowEvent = (type) => {
+    for (const cb of [...(windowListeners[type] || [])]) cb({ type });
+  };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_ANIM_OVERRIDES_MERGE, "utf8"), context);
@@ -1672,6 +1832,7 @@ function loadAgentsTabForTest({
     content,
     raf,
     getContentRenderCount: () => contentRenderCount,
+    dispatchWindowEvent: (type) => context.dispatchWindowEvent(type),
   };
 }
 
@@ -1877,7 +2038,11 @@ function loadTelegramApprovalTabForTest({
     },
     runtime: {},
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
+      buildSettingRow: (config) => buildFakeSettingRow(document, config),
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
       buildSwitch: buttonHelpers.buildSwitch,
@@ -1892,69 +2057,6 @@ function loadTelegramApprovalTabForTest({
         core.state.mountedControls.settingsSelects.add(control);
         return control;
       },
-      buildSegmentedRadio: (config) => {
-        const element = document.createElement("div");
-        element.className = `segmented settings-segmented-radio ${config.className || ""}`.trim();
-        element.setAttribute("role", "radiogroup");
-        element.setAttribute("aria-label", config.ariaLabel || "");
-        let currentValue = String(config.value);
-        const buttons = (config.options || []).map((option) => {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.dataset.value = String(option.value);
-          button.setAttribute("role", "radio");
-          const label = document.createElement("span");
-          label.className = "settings-segmented-radio-label";
-          label.textContent = String(option.label);
-          button.appendChild(label);
-          if (option.description) {
-            const description = document.createElement("span");
-            description.className = "settings-segmented-radio-description";
-            description.textContent = String(option.description);
-            button.appendChild(description);
-          }
-          element.appendChild(button);
-          return button;
-        });
-        const sync = () => {
-          for (const button of buttons) {
-            const selected = button.dataset.value === currentValue;
-            button.classList.toggle("active", selected);
-            button.setAttribute("aria-checked", selected ? "true" : "false");
-            button.tabIndex = selected ? 0 : -1;
-            button.disabled = config.disabled === true;
-          }
-        };
-        for (const button of buttons) {
-          button.addEventListener("click", () => {
-            const previous = currentValue;
-            currentValue = button.dataset.value;
-            sync();
-            let result;
-            try {
-              result = typeof config.onChange === "function"
-                ? config.onChange(currentValue)
-                : true;
-            } catch (_) {
-              result = false;
-            }
-            if (result === false) {
-              currentValue = previous;
-              sync();
-              return;
-            }
-            Promise.resolve(result).then((accepted) => {
-              if (accepted === false) currentValue = previous;
-              sync();
-            });
-          });
-        }
-        sync();
-        return { element };
-      },
-      // Mirror the real buildCollapsibleGroup just enough that header content,
-      // title/summary, and children all end up in the DOM tree; collapsed
-      // behaviour is exercised by the real component's own tests.
       buildCollapsibleGroup: ({
         id,
         title = "",
@@ -2034,6 +2136,7 @@ function loadTelegramApprovalTabForTest({
     tabs: {},
   };
   coreRef = core;
+  core.ops.clearMountedControls = core.helpers.clearMountedControls;
   context.ClawdSettingsTabTelegramApproval.init(core);
   function render() {
     content.innerHTML = "";
@@ -2184,7 +2287,11 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
       activeTab: "discord-presence",
     },
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
+      buildSettingRow: (config) => buildFakeSettingRow(document, config),
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
       buildSwitch: buttonHelpers.buildSwitch,
@@ -2314,7 +2421,10 @@ function assertVisibleFeishuLookupPreflight(card, lookupButton, expectedMessage)
   assert.equal(status.getAttribute("role"), "status");
   assert.equal(status.getAttribute("aria-live"), "polite");
   assert.equal(status.getAttribute("aria-atomic"), "true");
-  assert.equal(input.getAttribute("aria-describedby"), status.id);
+  const describedByIds = String(input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+  assert.ok(describedByIds.includes(status.id));
+  assert.ok(describedByIds.some((id) => id !== status.id),
+    "the field keeps its row description while adding preflight status");
   assert.equal(input.getAttribute("aria-invalid"), valueInvalid ? "true" : "false");
   assert.equal(lookupButton.getAttribute("aria-describedby"), status.id);
   assert.equal(lookupButton.title, "", "visible status must replace title-only feedback");
@@ -2381,6 +2491,7 @@ function loadAboutTabForTest({
     },
     runtime: { about: { infoCache: null, clickCount: 0, updateCheckSnapshot: { state: "idle" } } },
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
@@ -2467,7 +2578,10 @@ function loadAnimOverridesTabForTest({
     state: { activeTab: "animOverrides", mountedControls: {} },
     runtime,
     helpers: {
+      ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       createDisclosureChevron: (className) => {
         const chevron = document.createElement("span");
         chevron.className = className;
@@ -2589,6 +2703,30 @@ function createAnimOverridesRuntime(card, overrides = {}) {
 }
 
 describe("settings renderer browser environment", () => {
+  it("keeps recap chrome and chart mounted while a period query is pending", async () => {
+    let finish;
+    const harness = loadRecapTabForTest({
+      queryRecap: (period) => period === "today" ? Promise.resolve(sampleRecapView())
+        : new Promise((resolve) => { finish = resolve; }),
+    });
+    await harness.settle();
+    const header = harness.content.querySelector(".recap-page-header");
+    const chart = harness.content.querySelector(".recap-card");
+    const renders = harness.renderRequests.length;
+    header.querySelectorAll(".recap-period-button")[1].click();
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-page-header"), header,
+      "switching a period must not rebuild the page header");
+    assert.strictEqual(harness.content.querySelector(".recap-card"), chart,
+      "retain the chart geometry until replacement data is ready");
+    assert.strictEqual(harness.renderRequests.length, renders);
+    finish(sampleRecapView());
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-page-header"), header);
+    assert.notStrictEqual(harness.content.querySelector(".recap-card"), chart);
+    assert.strictEqual(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-week");
+  });
+
   it("defers recap recovery queries while the Settings document is hidden", async () => {
     let queryCount = 0;
     const harness = loadRecapTabForTest({
@@ -2611,6 +2749,161 @@ describe("settings renderer browser environment", () => {
     harness.core.tabs.recap.applyDataChanged();
     await harness.settle();
     assert.strictEqual(queryCount, 2);
+  });
+
+  it("keeps only the newest recap period result after rapid switches", async () => {
+    const requests = new Map();
+    const harness = loadRecapTabForTest({ queryRecap: (period) => {
+      if (period === "today") return Promise.resolve(sampleRecapView());
+      const deferred = createDeferred();
+      requests.set(period, deferred);
+      return deferred.promise;
+    } });
+    await harness.settle();
+    const choices = harness.content.querySelectorAll(".recap-period-button");
+    choices[1].click();
+    choices[2].click();
+    choices[3].click();
+    await harness.settle();
+    assert.deepStrictEqual([...requests.keys()], ["week", "month", "year"]);
+    assert.equal(harness.content.querySelector(".recap-data-body").inert, true);
+    requests.get("year").resolve(sampleRecapView());
+    await harness.settle();
+    const chart = harness.content.querySelector(".recap-card");
+    requests.get("month").reject(new Error("late failure"));
+    requests.get("week").resolve(sampleRecapView());
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-card"), chart);
+    assert.equal(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-year");
+    assert.equal(harness.content.querySelector(".recap-data-body").inert, false);
+    assert.equal(harness.content.querySelector(".recap-data-body").getAttribute("aria-busy"), "false");
+    assert.equal(choices[3].getAttribute("aria-checked"), "true");
+  });
+
+  it("starts each recap keyboard grid at the current date and shares empty-cell popovers", async () => {
+    for (const [index, period] of ["today", "week", "month", "year"].entries()) {
+      const harness = loadRecapTabForTest({ data: sampleRecapView() });
+      await harness.settle();
+      if (index) {
+        harness.content.querySelectorAll(".recap-period-button")[index].click();
+        await harness.settle();
+      }
+      const grid = harness.content.querySelector(".recap-grid");
+      const cells = grid.querySelectorAll(".recap-cell");
+      const current = cells.find((cell) => cell.id === grid.getAttribute("aria-activedescendant"));
+      assert.match(current.dataset.cellKey, /2026-08-29/, period);
+      assert.ok(cells.every((cell) => !cell.title), "native tooltips must not compete with the shared popover");
+      const empty = cells.find((cell) => cell.getAttribute("role") === "gridcell"
+        && !cell.classList.contains("recap-cell-activity"));
+      empty.dispatchEvent({ type: "mouseenter" });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      const popover = harness.content.querySelector(".recap-cell-popover");
+      assert.ok(popover, `${period} empty cells use the rounded popover`);
+      assert.equal(`${popover.querySelector("strong").textContent}: ${popover.querySelector(".recap-cell-popover-note").textContent}`,
+        empty.getAttribute("aria-label"), "date and status occupy separate lines without losing meaning");
+      if (period === "month") {
+        const today = grid.querySelectorAll(".recap-cell-current");
+        assert.equal(today.length, 1);
+        assert.match(today[0].dataset.cellKey, /2026-08-29/);
+        assert.equal(today[0].getAttribute("aria-current"), "date");
+      }
+      if (period === "week") {
+        assert.deepEqual(grid.querySelector(".recap-week-hours").children.map((node) => node.textContent).filter(Boolean),
+          ["00", "06", "12", "18"]);
+      }
+      empty.dispatchEvent({ type: "mouseleave" });
+      assert.equal(harness.content.querySelector(".recap-cell-popover"), null);
+      grid.dispatchEvent({ type: "keydown", key: "ArrowLeft", preventDefault() {} });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      assert.ok(harness.content.querySelector(".recap-cell-popover"), "keyboard uses the same popover");
+      grid.dispatchEvent({ type: "blur" });
+      assert.equal(harness.content.querySelector(".recap-cell-popover"), null);
+      harness.core.tabs.recap.onExit();
+    }
+  });
+
+  it("shows a local recap query failure and retries without replacing period controls", async () => {
+    let fail = true;
+    const harness = loadRecapTabForTest({ queryRecap: async (period) => {
+      if (period === "week" && fail) throw new Error("query failed");
+      return sampleRecapView();
+    } });
+    await harness.settle();
+    const header = harness.content.querySelector(".recap-page-header");
+    header.querySelectorAll(".recap-period-button")[1].click();
+    await harness.settle();
+    assert.ok(harness.content.querySelector(".recap-error"));
+    assert.equal(harness.content.querySelector(".recap-data-body").inert, false);
+    fail = false;
+    harness.content.querySelector(".recap-error button").click();
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-page-header"), header);
+    assert.ok(harness.content.querySelector(".recap-card"));
+  });
+
+  it("ignores a recap query that completes after leaving the page", async () => {
+    const pending = createDeferred();
+    const harness = loadRecapTabForTest({ queryRecap: (period) => period === "today"
+      ? Promise.resolve(sampleRecapView()) : pending.promise });
+    await harness.settle();
+    harness.content.querySelectorAll(".recap-period-button")[1].click();
+    await harness.settle();
+    const chart = harness.content.querySelector(".recap-card");
+    harness.core.tabs.recap.onExit();
+    harness.core.state.activeTab = "general";
+    pending.resolve(sampleRecapView());
+    await harness.settle();
+    assert.strictEqual(harness.content.querySelector(".recap-card"), chart);
+    assert.equal(harness.renderRequests.length, 0);
+    harness.core.state.activeTab = "recap";
+    harness.content.innerHTML = "";
+    harness.core.tabs.recap.render(harness.content);
+    await harness.settle();
+    assert.equal(harness.content.querySelector(".recap-grid").getAttribute("data-settings-focus-key"), "recap-grid-week");
+  });
+
+  it("re-queues a background recap refresh that was dropped by leaving the page", async () => {
+    const queries = [];
+    const harness = loadRecapTabForTest({ queryRecap: (period) => {
+      const deferred = createDeferred();
+      queries.push(deferred);
+      if (queries.length === 1) deferred.resolve(sampleRecapView());
+      return deferred.promise;
+    } });
+    await harness.settle();
+    assert.equal(queries.length, 1);
+    harness.core.tabs.recap.applyDataChanged();
+    await harness.settle();
+    assert.equal(queries.length, 2);
+    harness.core.tabs.recap.onExit();
+    harness.core.state.activeTab = "general";
+    queries[1].resolve(sampleRecapView());
+    await harness.settle();
+    assert.equal(queries.length, 2);
+    harness.core.state.activeTab = "recap";
+    harness.content.innerHTML = "";
+    harness.core.tabs.recap.render(harness.content);
+    await harness.settle();
+    assert.equal(queries.length, 3);
+  });
+
+  it("keeps Remote Approval chrome mounted while switching Channels and LAN", async () => {
+    const harness = loadTelegramApprovalTabForTest();
+    await Promise.resolve();
+    const heading = harness.content.children[0];
+    const tabs = harness.content.querySelector(".settings-tabs");
+    const choices = tabs.querySelectorAll("button");
+    const renders = harness.renderRequests.length;
+    choices[1].click();
+    assert.strictEqual(harness.content.children[0], heading);
+    assert.strictEqual(harness.content.querySelector(".settings-tabs"), tabs);
+    assert.equal(harness.core.runtime.remoteApprovalSubtab, "lan");
+    assert.equal(harness.renderRequests.length, renders);
+    choices[0].click();
+    assert.equal(harness.core.runtime.remoteApprovalSubtab, "channels");
+    assert.equal(choices[0].getAttribute("aria-selected"), "true");
+    assert.equal(harness.renderRequests.length, renders);
+    assert.strictEqual(harness.document.activeElement, choices[0]);
   });
 
   it("re-queries an unavailable recap page after the runtime recovery signal", async () => {
@@ -2692,7 +2985,7 @@ describe("settings renderer browser environment", () => {
     const codexRow = harness.content.querySelectorAll(".recap-agent-row")
       .find((row) => row.querySelector("strong").textContent === "codex");
     const codexMetrics = codexRow.querySelectorAll("dd");
-    assert.strictEqual(codexMetrics[2].textContent, "5");
+    assert.strictEqual(codexMetrics[1].textContent, "5");
   });
 
   it("renders the recap grid as one keyboard stop with accessible agent locks", async () => {
@@ -2741,7 +3034,8 @@ describe("settings renderer browser environment", () => {
       clearButton.getAttribute("data-settings-focus-fallback-key"),
       "recap-recording-toggle"
     );
-    assert.match(rows[0].getAttribute("aria-label"), /Sessions started: .*Turns completed: .*Tool calls: .*Activity signals:/);
+    assert.match(rows[0].getAttribute("aria-label"), /Turns completed: .*Tool calls: .*Activity signals:/);
+    assert.doesNotMatch(rows[0].getAttribute("aria-label"), /Sessions started/);
 
     const firstActiveDescendant = grid.getAttribute("aria-activedescendant");
     grid.dispatchEvent({ type: "keydown", key: "ArrowRight", bubbles: false });
@@ -2770,6 +3064,68 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(active.getAttribute("aria-rowindex"), "7");
   });
 
+  it("issue #1142: agent rows show turns, tool calls and activity signals without a sessions column", async () => {
+    const data = sampleRecapView();
+    data.days[0].rows[1].sessionsStartedPartial = true;
+    const harness = loadRecapTabForTest({
+      data,
+      agentMetadata: [
+        { id: "codex", name: "Codex" },
+        { id: "claude-code", name: "Claude Code" },
+      ],
+    });
+    await harness.settle();
+
+    const rowByName = new Map(
+      harness.content.querySelectorAll(".recap-agent-row")
+        .map((row) => [row.querySelector("strong").textContent, row])
+    );
+    const expectations = [
+      ["Codex", ["2", "4", "9"]],
+      ["Claude Code", ["1", "2", "3"]],
+    ];
+    for (const [name, values] of expectations) {
+      const row = rowByName.get(name);
+      assert.ok(row, name);
+      assert.deepStrictEqual(
+        row.querySelectorAll("dt").map((dt) => dt.textContent),
+        ["Turns completed", "Tool calls", "Activity signals"]
+      );
+      assert.deepStrictEqual(row.querySelectorAll("dd").map((dd) => dd.textContent), values);
+      const rowText = collectText(row);
+      assert.doesNotMatch(rowText, /Sessions started/);
+      assert.doesNotMatch(rowText, /partial/);
+    }
+  });
+
+  it("issue #1142: a metric without a reliable boundary still renders a dash with its explanation", async () => {
+    const data = sampleRecapView();
+    data.days[0].rows[0].metrics.turnsCompleted = null;
+    const harness = loadRecapTabForTest({
+      data,
+      agentMetadata: [
+        { id: "codex", name: "Codex" },
+        { id: "claude-code", name: "Claude Code" },
+      ],
+    });
+    await harness.settle();
+
+    const codexRow = harness.content.querySelectorAll(".recap-agent-row")
+      .find((row) => row.querySelector("strong").textContent === "Codex");
+    const count = codexRow.querySelectorAll("dd")[0];
+    assert.strictEqual(count.textContent, "—");
+    assert.strictEqual(
+      count.title,
+      "This agent does not provide a reliable boundary for this metric."
+    );
+    assert.strictEqual(
+      count.getAttribute("aria-label"),
+      "Turns completed: This agent does not provide a reliable boundary for this metric."
+    );
+    assert.ok(codexRow.getAttribute("aria-label")
+      .includes("Turns completed: This agent does not provide a reliable boundary for this metric."));
+  });
+
   it("keeps every recap keyboard focus key stable across a live data refresh", async () => {
     const data = sampleRecapView();
     const harness = loadRecapTabForTest({
@@ -2795,7 +3151,7 @@ describe("settings renderer browser environment", () => {
     harness.core.tabs.recap.applyDataChanged();
     await harness.settle();
     assert.deepStrictEqual(focusKeys(), before);
-    assert.strictEqual(harness.renderRequests.at(-1).preserveScroll, true);
+    assert.strictEqual(harness.renderRequests.length, 0, "live data updates only the body");
   });
 
   it("keeps month and year placeholder cells out of the accessibility grid", async () => {
@@ -2947,7 +3303,9 @@ describe("settings renderer browser environment", () => {
 
     assert.equal(input.value, "");
     assert.equal(input.getAttribute("aria-invalid"), "false");
-    assert.equal(input.getAttribute("aria-describedby"), undefined);
+    const initialDescriptionIds = String(input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    assert.equal(initialDescriptionIds.length, 1, "the untouched field is described only by its row hint");
+    assert.notEqual(initialDescriptionIds[0], status.id);
     assert.equal(status.getAttribute("hidden") == null, true);
     assert.equal(status.textContent, "");
     assert.equal(saveButton.disabled, false);
@@ -3098,7 +3456,8 @@ describe("settings renderer browser environment", () => {
     assert.equal(lookupButton.disabled, false);
     assert.equal(status.getAttribute("hidden") == null, true);
     assert.equal(status.textContent, "");
-    assert.equal(input.getAttribute("aria-describedby"), undefined);
+    assert.ok(input.getAttribute("aria-describedby"), "the field keeps its row hint after preflight clears");
+    assert.notEqual(input.getAttribute("aria-describedby"), status.id);
     assert.equal(input.getAttribute("aria-invalid"), "false");
     assert.equal(lookupButton.getAttribute("aria-describedby"), undefined);
     lookupButton.dispatchEvent({ type: "click" });
@@ -3162,7 +3521,7 @@ describe("settings renderer browser environment", () => {
     );
     assert.equal(pendingStatus.textContent, "feishuApprovalLookupMissingContactScope");
     assert.equal(pendingStatus.getAttribute("hidden") == null, true);
-    assert.equal(pendingInput.getAttribute("aria-describedby"), pendingStatus.id);
+    assert.ok(String(pendingInput.getAttribute("aria-describedby")).split(/\s+/).includes(pendingStatus.id));
     assert.equal(cancelButton.disabled, true);
     assert.equal(harness.renderRequests.length, renderRequestCount);
 
@@ -4991,6 +5350,7 @@ describe("settings renderer browser environment", () => {
       ],
     }]);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.updates)), []);
+    await new Promise((resolve) => setImmediate(resolve));
     const offButton = select.querySelectorAll("button").find((button) => button.dataset.value === "off");
     assert.equal(offButton.getAttribute("aria-checked"), "true");
 
@@ -5028,7 +5388,7 @@ describe("settings renderer browser environment", () => {
     }]);
   });
 
-  it("toggles Telegram Direct Send paste-only mode without changing the approval transport", async () => {
+  it("toggles Telegram completion replies without changing the approval transport", async () => {
     const commandCalls = [];
     const harness = loadTelegramApprovalTabForTest({
       snapshot: {
@@ -5759,7 +6119,10 @@ describe("settings renderer browser environment", () => {
       const returnedInput = returnedCard.querySelectorAll("input").at(-1);
       const returnedStatus = returnedCard.querySelector(".feishu-approval-lookup-preflight-status");
       assert.equal(returnedInput.value, "");
-      assert.equal(returnedInput.getAttribute("aria-describedby"), undefined);
+      const returnedDescriptionIds = String(returnedInput.getAttribute("aria-describedby") || "")
+        .split(/\s+/).filter(Boolean);
+      assert.equal(returnedDescriptionIds.length, 1);
+      assert.notEqual(returnedDescriptionIds[0], returnedStatus.id);
       assert.equal(returnedStatus.textContent, "");
     }
   });
@@ -6388,7 +6751,8 @@ describe("settings renderer browser environment", () => {
         retryInput.value = "retry@example.com";
         retryInput.dispatchEvent({ type: "input" });
         assert.equal(resultStatus.textContent, "", `${platform}/${code} should clear on input`);
-        assert.equal(retryInput.getAttribute("aria-describedby"), undefined);
+        assert.ok(retryInput.getAttribute("aria-describedby"));
+        assert.notEqual(retryInput.getAttribute("aria-describedby"), resultStatus.id);
       }
     }
   });
@@ -8505,6 +8869,365 @@ describe("settings renderer browser environment", () => {
     assert.ok(/\.size-control\.pending \.volume-slider\s*\{[\s\S]*cursor:\s*ew-resize;/.test(css));
   });
 
+  it("shows the effective current-display size and refreshes it on context and focus changes", async () => {
+    let context = { ui: 70, overMax: false, synced: false };
+    let notify;
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve(context),
+        onSizeContextChanged: (cb) => { notify = cb; return () => { notify = null; }; },
+      },
+    });
+    harness.renderContent();
+    const slider = harness.content.querySelector(".size-slider");
+    const readout = harness.content.querySelector(".size-readout");
+    assert.strictEqual(slider.value, "35");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(slider.value, "70");
+    assert.strictEqual(readout.textContent, "70%");
+    context = { ui: 35, overMax: false, synced: true };
+    notify();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(slider.value, "35");
+    context = { ui: 72, overMax: false, synced: false };
+    harness.dispatchWindowEvent("focus");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(slider.value, "72");
+  });
+
+  it("shows the over-limit warning only until a size drag starts", async () => {
+    const previewCalls = [];
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve({ ui: 100, overMax: true, synced: false }),
+        beginSizePreview: async () => ({ status: "ok" }),
+        previewSize: async (key) => { previewCalls.push(key); return { status: "ok" }; },
+        endSizePreview: async () => ({ status: "ok" }),
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    const readout = harness.content.querySelector(".size-readout");
+    const hint = harness.content.querySelector(".size-over-max-hint");
+    assert.strictEqual(slider.value, "100");
+    assert.strictEqual(readout.textContent, "100%+");
+    assert.strictEqual(hint.hidden, false);
+    assert.strictEqual(hint.classList.contains("bubble-policy-warning"), false);
+    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
+    assert.match(css, /\.size-over-max-hint\s*\{\s*color:\s*var\(--accent\);/);
+    assert.match(css, /\.size-over-max-hint\[hidden\]\s*\{\s*display:\s*none;/);
+    assert.match(css, /\.size-readout\.over-max\s*\{\s*color:\s*var\(--accent\);/);
+    slider.dispatchEvent({ type: "pointerdown", bubbles: false });
+    assert.strictEqual(readout.textContent, "100%");
+    assert.strictEqual(hint.hidden, true);
+    slider.value = "99";
+    slider.dispatchEvent({ type: "input", bubbles: false });
+    assert.strictEqual(readout.textContent, "99%");
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.deepStrictEqual(previewCalls, ["P:29.7"]);
+  });
+
+  it("restores an over-limit context after pressing and releasing the size thumb without input", async () => {
+    let contextCalls = 0;
+    const commits = [];
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => {
+          contextCalls++;
+          return Promise.resolve({ ui: 100, overMax: true, synced: false });
+        },
+        beginSizePreview: async () => ({ status: "ok" }),
+        endSizePreview: async (key) => { commits.push(key); return { status: "ok" }; },
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    const readout = harness.content.querySelector(".size-readout");
+    const hint = harness.content.querySelector(".size-over-max-hint");
+    assert.strictEqual(readout.textContent, "100%+");
+    assert.strictEqual(contextCalls, 1);
+    slider.dispatchEvent({ type: "pointerdown", bubbles: false });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(readout.textContent, "100%");
+    assert.strictEqual(hint.hidden, true);
+    slider.dispatchEvent({ type: "pointerup", bubbles: false });
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    assert.deepStrictEqual(commits, [null]);
+    assert.strictEqual(contextCalls, 2);
+    assert.strictEqual(slider.value, "100");
+    assert.strictEqual(readout.textContent, "100%+");
+    assert.strictEqual(hint.hidden, false);
+    assert.strictEqual(harness.core.state.snapshot.size, "P:10.5");
+  });
+
+  it("rechecks an unsynced size context after no-input pointer, cancel, and blur endings", async () => {
+    for (const ending of ["pointerup", "pointercancel", "blur"]) {
+      let contextCalls = 0;
+      const harness = loadGeneralTabForTest({
+        snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+        sizeSliderExports: require("../src/settings-size-slider"),
+        settingsAPI: {
+          getSizeContext: () => {
+            contextCalls++;
+            return Promise.resolve({ ui: 70, overMax: false, synced: false });
+          },
+          beginSizePreview: async () => ({ status: "ok" }),
+          endSizePreview: async () => ({ status: "ok" }),
+        },
+      });
+      harness.renderContent();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      const slider = harness.content.querySelector(".size-slider");
+      assert.strictEqual(slider.value, "70", ending);
+      slider.dispatchEvent({ type: "pointerdown", bubbles: false });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      slider.dispatchEvent({ type: ending, bubbles: false });
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      assert.strictEqual(contextCalls, 2, ending);
+      assert.strictEqual(slider.value, "70", ending);
+      assert.strictEqual(harness.content.querySelector(".size-readout").textContent, "70%", ending);
+    }
+  });
+
+  it("keeps a live size draft while late context replies and notifications arrive", async () => {
+    const late = createDeferred();
+    const end = createDeferred();
+    let calls = 0;
+    let notify;
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => ++calls === 1
+          ? Promise.resolve({ ui: 70, overMax: false, synced: false }) : late.promise,
+        onSizeContextChanged: (cb) => { notify = cb; return () => {}; },
+        beginSizePreview: async () => ({ status: "ok" }),
+        previewSize: async () => ({ status: "ok" }),
+        endSizePreview: () => end.promise,
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    notify();
+    await Promise.resolve();
+    slider.dispatchEvent({ type: "pointerdown", bubbles: false });
+    slider.value = "71";
+    slider.dispatchEvent({ type: "input", bubbles: false });
+    notify();
+    late.resolve({ ui: 80, overMax: false, synced: false });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(slider.value, "71");
+    assert.strictEqual(harness.content.querySelector(".size-readout").textContent, "71%");
+    assert.strictEqual(calls, 2, "notification during drag must defer the IPC request");
+    slider.dispatchEvent({ type: "pointerup", bubbles: false });
+    notify();
+    assert.strictEqual(slider.value, "71");
+    assert.strictEqual(calls, 2, "notification during commit must defer the IPC request");
+    end.resolve({ status: "ok" });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(calls, 3, "the settled interaction must query the latest context");
+  });
+
+  it("drops stale context before a committed size broadcast paints the new tick", async () => {
+    const stale = createDeferred();
+    const fresh = createDeferred();
+    let calls = 0;
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => {
+          calls++;
+          return calls === 1 ? Promise.resolve({ ui: 70, overMax: false, synced: false })
+            : calls === 2 ? stale.promise : fresh.promise;
+        },
+        onSizeContextChanged: (cb) => { return () => {}; },
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    assert.strictEqual(slider.value, "70");
+    harness.dispatchWindowEvent("focus");
+    await Promise.resolve();
+    harness.core.state.snapshot.size = "P:21.3";
+    assert.strictEqual(harness.core.tabs.general.patchInPlace({ size: "P:21.3" }), true);
+    assert.strictEqual(slider.value, "71");
+    stale.resolve({ ui: 70, overMax: false, synced: false });
+    await Promise.resolve(); await Promise.resolve();
+    assert.strictEqual(slider.value, "71");
+    fresh.resolve({ ui: 71, overMax: false, synced: true });
+    await Promise.resolve(); await Promise.resolve();
+    assert.strictEqual(slider.value, "71");
+    harness.core.state.snapshot.keepSizeAcrossDisplays = false;
+    assert.strictEqual(harness.core.tabs.general.patchInPlace({ keepSizeAcrossDisplays: false }), true);
+    assert.strictEqual(slider.value, "71");
+  });
+
+  it("refreshes the mounted size row when keep size across displays changes", async () => {
+    let contextCalls = 0;
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5", keepSizeAcrossDisplays: true }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve({
+          ui: ++contextCalls === 1 ? 70 : 60,
+          overMax: false,
+          synced: false,
+        }),
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    assert.strictEqual(slider.value, "70");
+    assert.strictEqual(contextCalls, 1);
+
+    harness.core.state.snapshot.keepSizeAcrossDisplays = false;
+    assert.strictEqual(harness.core.tabs.general.patchInPlace({ keepSizeAcrossDisplays: false }), true);
+    assert.strictEqual(harness.content.querySelector(".size-slider"), slider);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(contextCalls, 2);
+    assert.strictEqual(slider.value, "60");
+    assert.strictEqual(harness.content.querySelector(".size-readout").textContent, "60%");
+  });
+
+  it("keeps the submitted tick through a successful save and a full Settings redraw", async () => {
+    let saved = false;
+    const calls = [];
+    let harness;
+    harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve(saved
+          ? { ui: 71, overMax: false, synced: true }
+          : { ui: 70, overMax: false, synced: false }),
+        beginSizePreview: async () => { calls.push("begin"); return { status: "ok" }; },
+        previewSize: async (key) => { calls.push(key); return { status: "ok" }; },
+        endSizePreview: async (key) => {
+          calls.push(key);
+          saved = true;
+          harness.core.state.snapshot.size = key;
+          harness.core.tabs.general.patchInPlace({ size: key });
+          return { status: "ok" };
+        },
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    assert.strictEqual(slider.value, "70");
+    slider.dispatchEvent({ type: "pointerdown", bubbles: false });
+    slider.value = "71";
+    slider.dispatchEvent({ type: "input", bubbles: false });
+    slider.dispatchEvent({ type: "pointerup", bubbles: false });
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    assert.deepStrictEqual(calls, ["begin", "P:21.3", "P:21.3"]);
+    assert.strictEqual(slider.value, "71");
+    assert.strictEqual(harness.content.querySelector(".size-readout").textContent, "71%");
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(harness.content.querySelector(".size-slider").value, "71");
+  });
+
+  it("keeps the size readout reset action on the existing preview commit IPC", async () => {
+    const calls = [];
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve({ ui: 70, overMax: false, synced: false }),
+        endSizePreview: async (key) => { calls.push(key); return { status: "ok" }; },
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    harness.content.querySelector(".size-readout").click();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.deepStrictEqual(calls, ["P:9"]);
+    assert.strictEqual(harness.content.querySelector(".size-slider").value, "30");
+  });
+
+  it("restores the effective tick after a failed size commit", async () => {
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve({ ui: 70, overMax: false, synced: false }),
+        beginSizePreview: async () => ({ status: "ok" }),
+        previewSize: async () => ({ status: "ok" }),
+        endSizePreview: async () => ({ status: "error", message: "save failed" }),
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    slider.dispatchEvent({ type: "pointerdown", bubbles: false });
+    slider.value = "71";
+    slider.dispatchEvent({ type: "input", bubbles: false });
+    slider.dispatchEvent({ type: "pointerup", bubbles: false });
+    for (let i = 0; i < 16; i++) await Promise.resolve();
+    assert.strictEqual(slider.value, "70");
+    assert.strictEqual(harness.content.querySelector(".size-readout").textContent, "70%");
+  });
+
+  it("falls back to the snapshot when context is unavailable and unsubscribes on disposal", async () => {
+    let notify;
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.reject(new Error("unavailable")),
+        onSizeContextChanged: (cb) => { notify = cb; return () => { notify = null; }; },
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(harness.content.querySelector(".size-slider").value, "35");
+    assert.strictEqual(harness.getWindowListenerCount("focus"), 1);
+    harness.core.state.mountedControls.size.dispose();
+    assert.strictEqual(notify, null);
+    assert.strictEqual(harness.getWindowListenerCount("focus"), 0);
+    const missing = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+    });
+    missing.renderContent();
+    assert.strictEqual(missing.content.querySelector(".size-slider").value, "35");
+  });
+
+  it("uses the snapshot when a later size context is malformed", async () => {
+    let result = { ui: 70, overMax: false, synced: false };
+    let notify;
+    const harness = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
+      sizeSliderExports: require("../src/settings-size-slider"),
+      settingsAPI: {
+        getSizeContext: () => Promise.resolve(result),
+        onSizeContextChanged: (cb) => { notify = cb; return () => {}; },
+      },
+    });
+    harness.renderContent();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const slider = harness.content.querySelector(".size-slider");
+    assert.strictEqual(slider.value, "70");
+    result = { ui: "100", overMax: true, synced: false };
+    notify();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.strictEqual(slider.value, "35");
+    assert.strictEqual(harness.content.querySelector(".size-readout").textContent, "35%");
+  });
+
   it("compensates every viewport unit for the injected text zoom", () => {
     // vh/vw resolve against the UNZOOMED window (verified by probe: a 100vh
     // box renders S× the window height under the injected root zoom), so any
@@ -8894,7 +9617,7 @@ describe("settings renderer browser environment", () => {
     acceptChanges = false;
     buttons[0].dispatchEvent(createKeyboardEventForTest("End"));
     assert.equal(control.element.getAttribute("aria-busy"), "true");
-    assert.equal(buttons[0].disabled, true);
+    assert.equal(buttons[0].getAttribute("aria-disabled"), "true");
     await Promise.resolve();
     await Promise.resolve();
     assert.equal(buttons[0].getAttribute("aria-checked"), "true");
@@ -8903,6 +9626,39 @@ describe("settings renderer browser environment", () => {
     core.ops.clearMountedControls();
     assert.equal(buttons[0].eventListeners.click.length, 0);
     assert.equal(buttons[0].eventListeners.keydown.length, 0);
+  });
+
+  it("lets segmented radio and tab clicks reach document listeners unless a row opts out", () => {
+    const body = new FakeElement("body");
+    const document = {
+      body,
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const options = [{ value: "a", label: "A" }, { value: "b", label: "B" }];
+    const clickWithProbe = (button) => {
+      let stopped = false;
+      button.eventListeners.click[0]({ currentTarget: button, stopPropagation: () => { stopped = true; } });
+      return stopped;
+    };
+    const plain = core.helpers.buildSegmentedRadio({ value: "a", ariaLabel: "Plain", options, onChange: () => true });
+    const isolated = core.helpers.buildSegmentedRadio({
+      value: "a", ariaLabel: "Isolated", options, stopPropagation: true, onChange: () => true,
+    });
+    const tabs = core.helpers.buildTabs({
+      id: "probe-tabs",
+      ariaLabel: "Pages",
+      value: "a",
+      options,
+      onChange: () => true,
+    });
+    body.appendChild(plain.element);
+    body.appendChild(isolated.element);
+    body.appendChild(tabs.element);
+    assert.equal(clickWithProbe(plain.element.querySelectorAll("button")[1]), false);
+    assert.equal(clickWithProbe(isolated.element.querySelectorAll("button")[1]), true);
+    assert.equal(clickWithProbe(tabs.element.querySelectorAll("button")[1]), false);
   });
 
   it("restores segmented-control focus after a warning dialog closes", async () => {
@@ -8933,6 +9689,7 @@ describe("settings renderer browser environment", () => {
     const core = loadSettingsCoreForTest({}, { document });
     const control = core.helpers.buildSegmentedRadio({
       value: "off",
+      ariaLabel: "Automation",
       options: [{ value: "off", label: "Off" }, { value: "auto", label: "Auto" }],
       onChange: () => core.helpers.showSettingsConfirmModal({
         title: "Enable automation?",
@@ -8948,7 +9705,7 @@ describe("settings renderer browser environment", () => {
     source.focus();
     source.dispatchEvent({ type: "click" });
 
-    assert.equal(source.disabled, true);
+    assert.equal(source.getAttribute("aria-disabled"), "true");
     assert.notStrictEqual(document.activeElement, source);
     listeners.get("keydown")({ key: "Escape", preventDefault() {} });
     await Promise.resolve();
@@ -9269,6 +10026,96 @@ describe("settings renderer browser environment", () => {
     );
   });
 
+  it("builds Settings text inputs from one size, accessibility, state, and IME-safe Enter contract", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const submitted = [];
+    const input = core.helpers.buildTextInput({
+      type: "password",
+      size: "compact",
+      value: "secret",
+      placeholder: "API key",
+      autocomplete: "new-password",
+      spellcheck: false,
+      inputMode: "text",
+      ariaLabel: "Dedicated API key",
+      describedBy: "key-help",
+      pending: true,
+      lockWhilePending: false,
+      onEnter: (_event, element) => submitted.push(element.value),
+    });
+
+    assert.equal(input.classList.contains("settings-text-input"), true);
+    assert.equal(input.classList.contains("settings-text-input-compact"), true);
+    assert.equal(input.classList.contains("pending"), true);
+    assert.equal(input.type, "password");
+    assert.equal(input.value, "secret");
+    assert.equal(input.autocomplete, "new-password");
+    assert.equal(input.spellcheck, false);
+    assert.equal(input.disabled, false, "editable-pending fields stay editable");
+    assert.equal(input.getAttribute("aria-busy"), "true");
+    assert.equal(input.getAttribute("aria-invalid"), "false");
+    assert.equal(input.getAttribute("aria-label"), "Dedicated API key");
+    assert.equal(input.getAttribute("aria-describedby"), "key-help");
+
+    input.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+    input.dispatchEvent({ type: "keydown", key: "Enter", keyCode: 229 });
+    assert.deepStrictEqual(submitted, [], "IME composition must not submit");
+    const enter = { type: "keydown", key: "Enter" };
+    input.dispatchEvent(enter);
+    assert.deepStrictEqual(submitted, ["secret"]);
+    assert.equal(enter.defaultPrevented, true);
+
+    core.helpers.setTextInputState(input, {
+      invalid: true,
+      describedBy: "key-error",
+    });
+    assert.equal(input.disabled, false, "partial state updates preserve editable-pending mode");
+    assert.equal(input.getAttribute("aria-busy"), "true", "partial updates preserve pending state");
+    assert.equal(input.classList.contains("invalid"), true);
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(input.getAttribute("aria-describedby"), "key-error");
+
+    core.helpers.setTextInputState(input, { lockWhilePending: true });
+    assert.equal(input.disabled, true, "pending fields lock when requested");
+    const passive = core.helpers.buildTextInput({ ariaLabel: "Passive field" });
+    const passiveEnter = { type: "keydown", key: "Enter" };
+    passive.dispatchEvent(passiveEnter);
+    assert.notEqual(passiveEnter.defaultPrevented, true, "Enter remains untouched without an onEnter callback");
+
+    const canonical = core.helpers.buildTextInput({
+      ariaLabel: "Canonical description",
+      ariaDescribedBy: "canonical-help",
+    });
+    assert.equal(canonical.getAttribute("aria-describedby"), "canonical-help");
+    const canonicalEmpty = core.helpers.buildTextInput({
+      ariaLabel: "Canonical empty description",
+      ariaDescribedBy: "",
+      describedBy: "legacy-help",
+    });
+    assert.ok(!canonicalEmpty.getAttribute("aria-describedby"),
+      "an explicit empty canonical value must not fall back to the compatibility alias");
+    const canonicalEmptyLabel = core.helpers.buildTextInput({
+      ariaLabel: "Canonical empty label relationship",
+      ariaLabelledBy: "",
+      labelledBy: "legacy-label",
+    });
+    assert.ok(!canonicalEmptyLabel.getAttribute("aria-labelledby"),
+      "an explicit empty canonical label relationship must not fall back to the compatibility alias");
+    const compatibility = core.helpers.buildTextInput({
+      ariaLabel: "Compatibility description",
+      describedBy: "compatibility-help",
+    });
+    assert.equal(compatibility.getAttribute("aria-describedby"), "compatibility-help");
+    core.helpers.setTextInputState(compatibility, { describedBy: "" });
+    assert.equal(compatibility.getAttribute("aria-describedby"), null,
+      "an explicit empty compatibility value clears the relationship");
+  });
+
   it("builds a controlled Settings switch with unified input and accessibility state", () => {
     const document = {
       body: new FakeElement("body"),
@@ -9367,6 +10214,136 @@ describe("settings renderer browser environment", () => {
     const core = loadSettingsCoreForTest({}, { document });
     assert.throws(() => core.helpers.buildSwitch({ checked: false }), /requires ariaLabel or ariaLabelledBy/);
   });
+
+  it("builds Setting rows with stable label and description relationships", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const first = core.helpers.buildSettingRow({
+      label: "Host",
+      description: "Remote host name",
+      className: "remote-row",
+      controlClassName: "remote-control",
+    });
+    const second = core.helpers.buildSettingRow({ label: "Port" });
+
+    assert.equal(first.element.classList.contains("row"), true);
+    assert.equal(first.element.classList.contains("remote-row"), true);
+    assert.equal(first.textElement.classList.contains("row-text"), true);
+    assert.equal(first.labelElement.textContent, "Host");
+    assert.equal(first.descriptionElement.textContent, "Remote host name");
+    assert.equal(first.controlElement.classList.contains("row-control"), true);
+    assert.equal(first.controlElement.classList.contains("remote-control"), true);
+    assert.notEqual(first.labelElement.id, second.labelElement.id);
+    assert.equal(second.descriptionElement, null, "description-less rows do not mount an empty node");
+  });
+
+  it("controls Form Field state axes, validation relationships, callbacks, and disposal independently", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const calls = [];
+    const field = core.helpers.buildFormField({
+      type: "search",
+      value: "draft",
+      ariaLabelledBy: "field-label",
+      ariaDescribedBy: "field-help",
+      stopPropagation: true,
+      disabled: true,
+      pending: true,
+      onInput: ({ value }) => calls.push(value),
+    });
+
+    assert.equal(field.element.classList.contains("settings-form-field"), true);
+    assert.equal(field.element.getAttribute("aria-labelledby"), "field-label");
+    assert.equal(field.element.getAttribute("aria-describedby"), "field-help");
+    assert.equal(field.element.disabled, true);
+    assert.equal(field.element.getAttribute("aria-busy"), "true");
+    field.setState({ pending: false });
+    assert.equal(field.element.disabled, true, "ending pending does not clear business disabled");
+    field.setState({
+      disabled: false,
+      invalid: true,
+      validationMessage: "Host is required",
+    });
+    assert.equal(field.element.disabled, false);
+    assert.equal(field.element.getAttribute("aria-invalid"), "true");
+    assert.equal(field.validationElement.textContent, "Host is required");
+    assert.equal(field.validationElement.hidden, false);
+    assert.equal(field.element.getAttribute("aria-describedby"), `field-help ${field.validationElement.id}`);
+    assert.equal(document.body.contains(field.validationElement), true,
+      "validation messages must be mounted so aria-describedby resolves");
+
+    field.element.value = "new draft";
+    field.setState({ invalid: false });
+    assert.equal(field.getValue(), "new draft", "unspecified value does not overwrite an active draft");
+    field.element.dispatchEvent({ type: "input" });
+    assert.deepStrictEqual(calls, ["new draft"]);
+    field.setState({ validationMessage: "" });
+    assert.equal(field.element.getAttribute("aria-describedby"), "field-help",
+      "clearing validation keeps the row description relationship");
+
+    field.dispose();
+    assert.equal(document.body.contains(field.validationElement), false,
+      "disposed fields remove their validation node");
+    field.element.value = "ignored";
+    field.element.dispatchEvent({ type: "input" });
+    assert.deepStrictEqual(calls, ["new draft"], "disposed fields remove their callbacks");
+    assert.equal(core.state.mountedControls.formFields.size, 0);
+    const rerenderedField = core.helpers.buildFormField({ ariaLabel: "Rerendered field" });
+    assert.equal(core.state.mountedControls.formFields.size, 1);
+    core.ops.clearMountedControls();
+    rerenderedField.element.dispatchEvent({ type: "input" });
+    assert.equal(core.state.mountedControls.formFields.size, 0,
+      "Settings rerenders dispose every mounted Form Field controller");
+    assert.throws(() => core.helpers.buildFormField({ type: "text" }), /ariaLabel or ariaLabelledBy/);
+  });
+
+  it("routes every Settings single-line text surface through the shared primitive", () => {
+    const files = [
+      "settings-tab-agents.js",
+      "settings-tab-discord-presence.js",
+      "settings-tab-general.js",
+      "settings-tab-remote-ssh.js",
+      "settings-tab-telegram-approval.js",
+    ];
+    for (const file of files) {
+      const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+      assert.ok(source.includes("buildTextInput({"), `${file} should use the compatibility adapter`);
+      assert.doesNotMatch(source, /document\.createElement\("input"\)/, `${file} should not create raw inputs`);
+    }
+    const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
+    assert.ok(coreSource.includes("function buildFormField(config = {})"));
+    assert.ok(coreSource.includes("function buildSettingRow(config = {})"));
+    assert.ok(coreSource.includes("const control = buildFormField({"),
+      "the compatibility adapter must route through the Form Field controller");
+    assert.ok(coreSource.includes("state.mountedControls.formFields.add(control)"));
+    assert.ok(coreSource.includes("state.mountedControls.formFields.delete(control)"));
+    for (const file of [
+      "settings-tab-agents.js",
+      "settings-tab-discord-presence.js",
+      "settings-tab-telegram-approval.js",
+    ]) {
+      const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+      assert.ok(source.includes("buildSettingRow({"), `${file} should compose standard fields with Setting Row`);
+    }
+    const animSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-anim-overrides.js"), "utf8");
+    assert.match(animSource, /const range = document\.createElement\("input"\);[\s\S]*range\.type = "range";/,
+      "Range remains a documented P2 exception");
+    assert.match(animSource, /const number = document\.createElement\("input"\);[\s\S]*number\.type = "number";/,
+      "the number input paired with Range remains in the Range contract");
+    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
+    assert.match(css, /\.settings-text-input\s*\{[\s\S]*border-radius:\s*8px;[\s\S]*background:\s*var\(--panel-bg\);/);
+    assert.match(css, /\.settings-text-input:focus\s*\{[\s\S]*var\(--accent\)/);
+    assert.match(css, /\.settings-text-input\.invalid/);
+  });
+
 
   it("keeps interactive Settings switch DOM and semantics owned by the shared primitive", () => {
     const allowedOwner = "settings-ui-core.js";
@@ -9690,6 +10667,26 @@ describe("settings renderer browser environment", () => {
         lastOption.bottom <= layout.boundaryBottom,
         `${layout.scale}: last option stays inside the body`,
       );
+    }
+  });
+
+  it("can preserve a closed Dashboard picker's scroll without changing tutorial reveal defaults", () => {
+    for (const revealWhenClosed of [false, undefined]) {
+      const harness = loadSharedLanguagePickerForTest({ revealWhenClosed });
+      harness.boundary.getBoundingClientRect = () => ({ top: 50, bottom: 300 });
+      harness.trigger.getBoundingClientRect = () => ({
+        top: 500 - harness.boundary.scrollTop, bottom: 526 - harness.boundary.scrollTop,
+      });
+      harness.dispatchWindowEvent("resize");
+      harness.flushAnimationFrames();
+      if (revealWhenClosed === false) assert.strictEqual(harness.boundary.scrollTop, 0);
+      else assert.ok(harness.boundary.scrollTop > 0);
+      harness.boundary.scrollTop = 0;
+      harness.trigger.dispatchEvent({ type: "click" });
+      harness.dispatchWindowEvent("resize");
+      harness.flushAnimationFrames();
+      assert.ok(harness.boundary.scrollTop > 0, "open menus still reveal their trigger");
+      harness.control.dispose();
     }
   });
 
@@ -10121,14 +11118,14 @@ describe("settings renderer browser environment", () => {
     assert.ok(generalSource.includes("notificationBubbleAutoCloseSeconds"));
     assert.ok(generalSource.includes("updateBubbleAutoCloseSeconds"));
     assert.ok(generalSource.includes("bubble-policy-prefix"));
-    assert.ok(generalSource.includes('input.type = "text"'));
-    assert.ok(generalSource.includes("input.maxLength = 4"));
-    assert.ok(generalSource.includes('input.pattern = "[0-9]*"'));
+    assert.ok(generalSource.includes("helpers.buildTextInput({"));
+    assert.ok(generalSource.includes("maxLength: 4"));
+    assert.ok(generalSource.includes('pattern: "[0-9]*"'));
     assert.ok(generalSource.includes('input.value.replace(/\\D+/g, "").slice(0, 4)'));
     assert.ok(generalSource.includes("showSettingsConfirmModal"));
     assert.ok(generalSource.includes("updateBubbleDisableConfirmTitle"));
-    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*42px;/.test(css));
-    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*box-sizing:\s*border-box;[\s\S]*text-align:\s*center;[\s\S]*padding:\s*0 3px;/.test(css));
+    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*58px;/.test(css));
+    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*text-align:\s*center;/.test(css));
     assert.ok(i18nSource.includes("rowHideBubbles"));
     assert.ok(i18nSource.includes("rowBubblePolicy"));
     assert.ok(i18nSource.includes("bubbleUpdateWarning"));
@@ -10648,6 +11645,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(generalSource.includes('row.className = "row volume-slider-row"'));
     assert.match(css, /\.quota-ring-collapsible \.settings-option-list,\s*\.sound-collapsible \.settings-option-list\s*\{\s*container-type:\s*inline-size;/s);
     assert.match(css, /@container \(max-width:\s*400px\)\s*\{[\s\S]*\.quota-ring-display-mode-row,[\s\S]*\.volume-slider-row\s*\{[\s\S]*flex-direction:\s*column;/);
+    assert.match(css, /@container \(max-width:\s*400px\)\s*\{[\s\S]*\.quota-alert-thresholds-row,[\s\S]*flex-direction:\s*column;/);
     assert.match(css, /@container \(max-width:\s*400px\)\s*\{[\s\S]*\.volume-slider-row \.volume-control\s*\{[\s\S]*width:\s*100%;[\s\S]*min-width:\s*0;/);
   });
 
@@ -11401,6 +12399,283 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(updateCalls, [{ key: "quotaMergeSources", value: false }]);
   });
 
+  it("quota reminders: hides the reminder rows while the master switch is off", async () => {
+    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
+    assert.match(css, /\.quota-ring-option-list \.row\[hidden\]\s*\{\s*display:\s*none;/);
+    assert.match(css, /\.quota-alert-thresholds-row \.settings-select\s*\{[\s\S]*min-width:\s*216px;/);
+    const snapshot = makeGeneralSnapshot({
+      quotaAlertsEnabled: false, quotaAlertThresholds: [20, 10], quotaRecoveryAlertsEnabled: true,
+    });
+    const h = loadGeneralTabForTest({
+      snapshot,
+      settingsAPI: { update: async () => ({ status: "ok" }) },
+    });
+    h.renderContent();
+    const thresholdsRow = h.content.querySelector(".quota-alert-thresholds-row");
+    const recoveryRow = h.getSwitchMeta("quotaRecoveryAlertsEnabled").row;
+    const testRow = h.content.querySelector(".quota-notification-test-row");
+    for (const row of [thresholdsRow, recoveryRow, testRow]) {
+      assert.equal(row.hidden, true);
+      assert.equal(row.getAttribute("aria-hidden"), "true");
+    }
+
+    const before = h.getContentRenderCount();
+    h.core.ops.applyChanges({
+      changes: { quotaAlertsEnabled: true },
+      snapshot: { ...snapshot, quotaAlertsEnabled: true },
+    });
+    assert.equal(h.getContentRenderCount(), before);
+    for (const row of [thresholdsRow, recoveryRow, testRow]) {
+      assert.equal(row.hidden, false);
+      assert.equal(row.getAttribute("aria-hidden"), "false");
+    }
+    assert.strictEqual(h.content.querySelector(".quota-alert-thresholds-row"), thresholdsRow);
+
+    h.core.ops.applyChanges({
+      changes: { quotaAlertsEnabled: false },
+      snapshot: { ...snapshot, quotaAlertsEnabled: false },
+    });
+    for (const row of [thresholdsRow, recoveryRow, testRow]) {
+      assert.equal(row.hidden, true);
+      assert.equal(row.getAttribute("aria-hidden"), "true");
+    }
+  });
+
+  it("quota reminders: a preset select writes immediately and follows external values in place", async () => {
+    const writes = [];
+    const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] });
+    const h = loadGeneralTabForTest({
+      snapshot,
+      settingsAPI: { update: async (key, value) => { writes.push({ key, value }); return { status: "ok" }; } },
+    });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-alert-thresholds-row");
+    const select = row.querySelector(".settings-select");
+    assert.match(select.querySelector(".language-picker-trigger").textContent, /20% and 10%/);
+    assert.deepStrictEqual(
+      select.querySelectorAll(".language-picker-option").map((option) => option.getAttribute("data-lang")),
+      ["10", "20,10", "30,20,10", "50,20,10"],
+    );
+
+    select.querySelectorAll(".language-picker-option")
+      .find((option) => option.getAttribute("data-lang") === "30,20,10")
+      .dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(writes)),
+      [{ key: "quotaAlertThresholds", value: [30, 20, 10] }],
+    );
+
+    const before = h.getContentRenderCount();
+    h.core.ops.applyChanges({
+      changes: { quotaAlertThresholds: [50, 20, 10] },
+      snapshot: { ...h.core.state.snapshot, quotaAlertThresholds: [50, 20, 10] },
+    });
+    assert.equal(h.getContentRenderCount(), before);
+    assert.strictEqual(h.content.querySelector(".quota-alert-thresholds-row"), row);
+    assert.strictEqual(row.querySelector(".settings-select"), select);
+    assert.match(select.querySelector(".language-picker-trigger").textContent, /50%, 20%, 10%/);
+  });
+
+  it("quota reminders: shows a custom option for non-preset values and drops it after a preset write", async () => {
+    const writes = [];
+    const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [25, 5] });
+    const h = loadGeneralTabForTest({
+      snapshot,
+      settingsAPI: { update: async (key, value) => { writes.push({ key, value }); return { status: "ok" }; } },
+    });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-alert-thresholds-row");
+    assert.deepStrictEqual(
+      row.querySelectorAll(".language-picker-option").map((option) => option.getAttribute("data-lang")),
+      ["10", "20,10", "30,20,10", "50,20,10", "custom"],
+    );
+    assert.match(row.querySelector(".language-picker-trigger").textContent, /Custom: 25%, 5% left/);
+
+    // The custom option forces a fresh select, so the old registry entry must be
+    // removed as the new one is added (net count unchanged).
+    const selects = h.core.state.mountedControls.settingsSelects;
+    const selectCountBefore = selects.size;
+    const oldControl = [...selects].find((entry) => entry.element === row.querySelector(".settings-select"));
+    assert.ok(oldControl);
+
+    row.querySelectorAll(".language-picker-option")
+      .find((option) => option.getAttribute("data-lang") === "20,10")
+      .dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(writes)), [{ key: "quotaAlertThresholds", value: [20, 10] }]);
+    assert.strictEqual(h.content.querySelector(".quota-alert-thresholds-row"), row);
+    assert.equal(selects.size, selectCountBefore);
+    assert.equal(selects.has(oldControl), false);
+    assert.deepStrictEqual(
+      row.querySelectorAll(".language-picker-option").map((option) => option.getAttribute("data-lang")),
+      ["10", "20,10", "30,20,10", "50,20,10"],
+    );
+    assert.doesNotMatch(row.querySelector(".language-picker-trigger").textContent, /Custom/);
+  });
+
+  it("quota reminders: localizes the custom option with the language list separator", async () => {
+    const snapshot = makeGeneralSnapshot({
+      lang: "zh", quotaAlertsEnabled: true, quotaAlertThresholds: [25, 5],
+    });
+    const h = loadGeneralTabForTest({
+      snapshot,
+      settingsAPI: { update: async () => ({ status: "ok" }) },
+    });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-alert-thresholds-row");
+    assert.match(row.querySelector(".language-picker-trigger").textContent, /自定义：剩 25%、5%/);
+  });
+
+  it("quota reminders: a rejected preset write warns and restores the previous value", async () => {
+    const writes = [], toasts = [];
+    const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] });
+    const h = loadGeneralTabForTest({
+      snapshot,
+      settingsAPI: {
+        update: async (key, value) => { writes.push({ key, value }); return { status: "error", message: "disk" }; },
+      },
+    });
+    h.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-alert-thresholds-row");
+    const select = row.querySelector(".settings-select");
+    select.querySelectorAll(".language-picker-option")
+      .find((option) => option.getAttribute("data-lang") === "30,20,10")
+      .dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(writes.length, 1);
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].options.error, true);
+    assert.equal(select.querySelector(".language-picker-trigger").textContent, "20% and 10% left");
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(h.core.state.snapshot.quotaAlertThresholds)), [20, 10]);
+  });
+
+  it("quota reminders: an in-flight preset write locks the select against a second change", async () => {
+    const deferred = createDeferred(), writes = [];
+    const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] });
+    const h = loadGeneralTabForTest({
+      snapshot,
+      settingsAPI: { update: (key, value) => { writes.push({ key, value }); return deferred.promise; } },
+    });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-alert-thresholds-row");
+    const select = row.querySelector(".settings-select");
+    const options = select.querySelectorAll(".language-picker-option");
+    options.find((option) => option.getAttribute("data-lang") === "30,20,10").dispatchEvent({ type: "click" });
+    options.find((option) => option.getAttribute("data-lang") === "50,20,10").dispatchEvent({ type: "click" });
+    assert.equal(writes.length, 1);
+    assert.equal(select.querySelector(".language-picker-trigger").disabled, true);
+    deferred.resolve({ status: "ok" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(select.querySelector(".language-picker-trigger").disabled, false);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(h.core.state.snapshot.quotaAlertThresholds)), [30, 20, 10]);
+  });
+
+  it("quota reminders: a successful write adopts the server snapshot even when the click differs", async () => {
+    for (const committed of [[50, 20, 10], [35, 5]]) {
+      const h = loadGeneralTabForTest({
+        snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] }),
+        settingsAPI: {
+          update: async () => ({
+            status: "ok",
+            snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: committed }),
+          }),
+        },
+      });
+      h.renderContent();
+      const old = h.content.querySelector(".quota-alert-thresholds-row .settings-select");
+      old.querySelectorAll(".language-picker-option")
+        .find((option) => option.getAttribute("data-lang") === "30,20,10")
+        .dispatchEvent({ type: "click" });
+      await new Promise((resolve) => setImmediate(resolve));
+      const current = h.content.querySelector(".quota-alert-thresholds-row .settings-select");
+      const trigger = current.querySelector(".language-picker-trigger");
+      assert.equal(trigger.textContent, committed[0] === 50 ? "50%, 20%, 10% left" : "Custom: 35%, 5% left");
+      assert.equal(trigger.disabled, false);
+      assert.equal(current === old, committed[0] === 50);
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(h.core.state.snapshot.quotaAlertThresholds)), committed);
+    }
+  });
+
+  it("quota reminders: an external replacement mid-write keeps the authoritative value on rejection", async () => {
+    const deferred = createDeferred(), toasts = [];
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] }),
+      settingsAPI: { update: () => deferred.promise },
+    });
+    h.core.ops.showToast = (message) => toasts.push(message);
+    h.renderContent();
+    const selectOf = () => h.content.querySelector(".quota-alert-thresholds-row .settings-select");
+    const old = selectOf();
+    old.querySelectorAll(".language-picker-option")
+      .find((option) => option.getAttribute("data-lang") === "30,20,10")
+      .dispatchEvent({ type: "click" });
+    h.core.ops.applyChanges({
+      changes: { quotaAlertThresholds: [35, 5] },
+      snapshot: { ...h.core.state.snapshot, quotaAlertThresholds: [35, 5] },
+    });
+    assert.notEqual(selectOf(), old);
+    assert.equal(selectOf().querySelector(".language-picker-trigger").disabled, true);
+    deferred.reject(new Error("probe rejection"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(selectOf().querySelector(".language-picker-trigger").textContent, "Custom: 35%, 5% left");
+    assert.equal(selectOf().querySelector(".language-picker-trigger").disabled, false);
+    assert.equal(toasts.length, 1);
+  });
+
+  it("quota reminders: a full re-render mid-write recovers the server value on success", async () => {
+    const success = createDeferred();
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [25, 5] }),
+      settingsAPI: { update: () => success.promise },
+    });
+    h.renderContent();
+    const selectCount = h.core.state.mountedControls.settingsSelects.size;
+    h.content.querySelector(".quota-alert-thresholds-row .settings-select")
+      .querySelectorAll(".language-picker-option")
+      .find((option) => option.getAttribute("data-lang") === "30,20,10")
+      .dispatchEvent({ type: "click" });
+    h.renderContent();
+    success.resolve({
+      status: "ok",
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [30, 20, 10] }),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      h.content.querySelector(".quota-alert-thresholds-row .settings-select .language-picker-trigger").textContent,
+      "30%, 20%, 10% left",
+    );
+    assert.equal(h.core.state.mountedControls.settingsSelects.size, selectCount);
+    assert.equal(h.getContentRenderCount(), 2);
+  });
+
+  it("quota reminders: the test row carries platform copy and stays single-flight", async () => {
+    const pending = createDeferred(), toasts = [];
+    let tests = 0, writes = 0;
+    const h = loadGeneralTabForTest({
+      snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true }),
+      settingsAPI: {
+        testQuotaNotification: () => { tests++; return pending.promise; },
+        update: async () => { writes++; return { status: "ok" }; },
+      },
+    });
+    h.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    h.renderContent();
+    const row = h.content.querySelector(".quota-notification-test-row");
+    assert.equal(row.querySelector(".row-label").textContent, "Test notification");
+    assert.match(row.querySelector(".row-desc").textContent, /Windows Settings/);
+    const button = row.querySelector("button");
+    assert.match(button.textContent, /Send/);
+    button.dispatchEvent({ type: "click" }); button.dispatchEvent({ type: "click" });
+    assert.equal(tests, 1); assert.equal(button.disabled, true);
+    pending.resolve({ ok: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(button.disabled, false); assert.equal(writes, 0);
+    assert.equal(toasts.length, 1); assert.equal(toasts[0].options.error, false);
+    assert.match(toasts[0].message, /Test notification sent/);
+  });
+
   it("lets users choose used or remaining quota without rebuilding General", async () => {
     const updateCalls = [];
     const initialSnapshot = makeGeneralSnapshot({ quotaRingDisplayMode: "used" });
@@ -11829,6 +13104,274 @@ describe("settings renderer browser environment", () => {
     harness.core.ops.requestRender({ content: true });
 
     assert.strictEqual(harness.content.querySelector(".agent-traecode-hint"), null);
+  });
+
+  it("shows the MiniMax enable hint on the card when the integration is installed", () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: { minimax: { integrationInstalled: true, enabled: true } },
+      },
+      agentMetadata: [
+        { id: "minimax", name: "MiniMax Code", eventSource: "hook", capabilities: {} },
+      ],
+    });
+
+    harness.core.ops.requestRender({ content: true });
+
+    const hint = harness.content.querySelector(".agent-minimax-hint");
+    assert.ok(hint, "MiniMax hint should render on the installed card");
+    assert.match(collectText(hint), /MiniMax Code/);
+  });
+
+  it("omits the MiniMax enable hint until the integration is installed", () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: { minimax: { integrationInstalled: false, enabled: false } },
+      },
+      agentMetadata: [
+        { id: "minimax", name: "MiniMax Code", eventSource: "hook", capabilities: {} },
+      ],
+    });
+
+    harness.core.ops.requestRender({ content: true });
+
+    assert.strictEqual(harness.content.querySelector(".agent-minimax-hint"), null);
+  });
+
+  function loadDshNoticesHarness({ notices = [], settingsAPI = {}, navigator: navigatorOverrides } = {}) {
+    return loadAgentsTabForTest({
+      snapshot: { agents: { "deepseek-harness": { integrationInstalled: true, enabled: true } } },
+      agentMetadata: [
+        { id: "deepseek-harness", name: "DeepSeek Harness (experimental)", eventSource: "plugin-event", capabilities: {} },
+      ],
+      navigator: navigatorOverrides,
+      settingsAPI: {
+        getDshNotices: () => Promise.resolve({ notices }),
+        acknowledgeDshNotice: () => Promise.resolve({ status: "ok", found: true }),
+        ...settingsAPI,
+      },
+    });
+  }
+
+  it("renders the DeepSeek Harness notices with per-kind wording and prefixes", async () => {
+    const harness = loadDshNoticesHarness({
+      notices: [
+        { id: "r", profile: "desktop", kind: "restart-required" },
+        { id: "f1", profile: "web", kind: "failed-target", operation: "install", reason: "plugin-disabled-in-dsh", message: "disabled" },
+        { id: "f2", profile: "web", kind: "failed-target", operation: "uninstall", reason: "version-unsupported", message: "bad version" },
+        { id: "m", profile: "web", kind: "manual-command", commands: ["line1", "line2"] },
+        { id: "d", profile: "desktop", kind: "first-install" },
+      ],
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.deepStrictEqual(rows.map((row) => row.getAttribute("data-kind")), [
+      "restart-required",
+      "failed-target",
+      "failed-target",
+      "manual-command",
+      "first-install",
+    ]);
+    assert.match(collectText(rows[0]), /Desktop: The Clawd plugin was updated\./);
+    assert.match(collectText(rows[1]), /Web: Not installed: disabled Open Doctor and click Repair Now\./);
+    assert.match(collectText(rows[2]), /Web: Not fully removed: bad version/);
+    assert.doesNotMatch(collectText(rows[2]), /Open Doctor/);
+    assert.match(collectText(rows[3]), /Web: Run this in a terminal to finish\./);
+    assert.match(collectText(rows[3].querySelector(".agent-dsh-notice-commands")), /line1\s*\n\s*line2/);
+    assert.match(collectText(rows[4]), /Desktop: Installed in DeepSeek Harness desktop\./);
+  });
+
+  it("guides DeepSeek Harness generation changes through Uninstall and Install while repairable failures keep Doctor", async () => {
+    const harness = loadDshNoticesHarness({ notices: [
+      { id: "g", profile: "web", kind: "failed-target", operation: "install", reason: "generation-conflict", message: "raw installer error" },
+      { id: "r", profile: "web", kind: "failed-target", operation: "install", reason: "repair-pending", message: "repair interrupted" },
+    ] });
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.match(collectText(rows[0]), /The Clawd plugin keeps working.*click Uninstall and then Install here.*restart any running dsh web/);
+    assert.doesNotMatch(collectText(rows[0]), /Open Doctor|Not installed:|raw installer error/);
+    assert.match(collectText(rows[1]), /Not installed: repair interrupted Open Doctor and click Repair Now/);
+    assert.strictEqual(collectText(harness.content.querySelector(".agent-integration-action")), "Uninstall");
+    harness.core.state.snapshot = { agents: { "deepseek-harness": { integrationInstalled: false, enabled: false } } };
+    harness.core.ops.requestRender({ content: true });
+    assert.strictEqual(collectText(harness.content.querySelector(".agent-integration-action")), "Install");
+  });
+
+  it("copies every manual command line from a DeepSeek Harness notice", async () => {
+    const copied = [];
+    const harness = loadDshNoticesHarness({
+      notices: [{ id: "m", profile: "web", kind: "manual-command", commands: ["cmd one", "cmd two"] }],
+      navigator: { clipboard: { writeText: (value) => { copied.push(value); return Promise.resolve(); } } },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    harness.content.querySelector(".agent-dsh-notice-copy").click();
+    await flushAsync();
+
+    assert.deepStrictEqual(copied, ["cmd one\ncmd two"]);
+  });
+
+  it("acknowledges the clicked DeepSeek Harness notice and refetches", async () => {
+    const acks = [];
+    let notices = [
+      { id: "one", profile: "web", kind: "manual-command", commands: ["a"] },
+      { id: "two", profile: "desktop", kind: "first-install" },
+    ];
+    const harness = loadDshNoticesHarness({
+      settingsAPI: {
+        getDshNotices: () => Promise.resolve({ notices: notices.map((notice) => ({ ...notice })) }),
+        acknowledgeDshNotice: (profile, id) => {
+          acks.push([profile, id]);
+          notices = notices.filter((notice) => !(notice.profile === profile && notice.id === id));
+          return Promise.resolve({ status: "ok", found: true });
+        },
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const buttons = harness.content.querySelectorAll(".agent-dsh-notice-ack");
+    assert.strictEqual(buttons.length, 2);
+    buttons[1].click();
+    await flushAsync();
+    await flushAsync();
+
+    assert.deepStrictEqual(acks, [["desktop", "two"]]);
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.deepStrictEqual(rows.map((row) => row.getAttribute("data-profile")), ["web"]);
+  });
+
+  it("re-enables the acknowledge button and keeps the notice when acknowledgement fails", async () => {
+    const harness = loadDshNoticesHarness({
+      notices: [{ id: "m", profile: "web", kind: "manual-command", commands: ["a"] }],
+      settingsAPI: {
+        acknowledgeDshNotice: () => Promise.resolve({ status: "error", message: "nope" }),
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const button = harness.content.querySelector(".agent-dsh-notice-ack");
+    button.click();
+    await flushAsync();
+
+    const toasts = harness.content.parentNode.querySelectorAll(".toast");
+    assert.ok(toasts.some((toast) => collectText(toast).includes("nope")), "a failure toast should appear");
+    assert.strictEqual(button.disabled, false, "the acknowledge button must be clickable again");
+    assert.strictEqual(button.classList.contains("pending"), false);
+    assert.strictEqual(harness.content.querySelectorAll(".agent-dsh-notice").length, 1, "the notice stays");
+  });
+
+  it("keeps DeepSeek Harness notice buttons from toggling the row", async () => {
+    const commands = [];
+    const harness = loadAgentsTabForTest({
+      snapshot: { agents: { "deepseek-harness": { integrationInstalled: true, enabled: true } } },
+      agentMetadata: [
+        { id: "deepseek-harness", name: "DeepSeek Harness (experimental)", eventSource: "plugin-event", capabilities: { permissionApproval: true } },
+      ],
+      navigator: { clipboard: { writeText: () => Promise.resolve() } },
+      settingsAPI: {
+        command: (action, payload) => { commands.push([action, payload]); return Promise.resolve({ status: "ok" }); },
+        getDshNotices: () => Promise.resolve({ notices: [{ id: "m", profile: "web", kind: "manual-command", commands: ["a"] }] }),
+        acknowledgeDshNotice: () => Promise.resolve({ status: "ok", found: true }),
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const disclosure = harness.content.querySelector(".settings-disclosure-trigger");
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false");
+
+    // The group header toggles on click, so the notice buttons must stop the
+    // event before it reaches it. Assert after each click so one button
+    // expanding and the next collapsing cannot mask the bug.
+    harness.content.querySelector(".agent-dsh-notice-ack").dispatchEvent({ type: "click", bubbles: true });
+    harness.raf.flushFrame();
+    await flushAsync();
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false", "acknowledge must not expand the group");
+
+    harness.content.querySelector(".agent-dsh-notice-copy").dispatchEvent({ type: "click", bubbles: true });
+    harness.raf.flushFrame();
+    await flushAsync();
+    assert.strictEqual(disclosure.getAttribute("aria-expanded"), "false", "copy must not expand the group");
+    assert.deepStrictEqual(commands, []);
+  });
+
+  it("refetches DeepSeek Harness notices after an install result and on window focus", async () => {
+    let getCalls = 0;
+    const harness = loadDshNoticesHarness({
+      settingsAPI: {
+        command: () => Promise.resolve({ status: "ok" }),
+        getDshNotices: () => { getCalls += 1; return Promise.resolve({ notices: [] }); },
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    const afterRender = getCalls;
+
+    harness.content.querySelector(".agent-integration-action").click();
+    await flushAsync();
+    await flushAsync();
+    const afterInstall = getCalls;
+    assert.ok(afterInstall > afterRender, "an install/uninstall result must refetch notices");
+
+    harness.dispatchWindowEvent("focus");
+    await flushAsync();
+    assert.ok(getCalls > afterInstall, "focusing the window must refetch notices");
+  });
+
+  it("drops stale DeepSeek Harness notice responses", async () => {
+    const pending = [];
+    const harness = loadDshNoticesHarness({
+      settingsAPI: {
+        getDshNotices: () => new Promise((resolve) => { pending.push(resolve); }),
+      },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+    assert.strictEqual(pending.length, 1);
+
+    harness.dispatchWindowEvent("focus");
+    await flushAsync();
+    assert.strictEqual(pending.length, 2);
+
+    pending[1]({ notices: [{ id: "new", profile: "web", kind: "first-install" }] });
+    await flushAsync();
+    pending[0]({ notices: [{ id: "old", profile: "web", kind: "restart-required" }] });
+    await flushAsync();
+
+    const rows = harness.content.querySelectorAll(".agent-dsh-notice");
+    assert.deepStrictEqual(rows.map((row) => row.getAttribute("data-kind")), ["first-install"]);
+  });
+
+  it("leaves the DeepSeek Harness notice container empty and others without one", async () => {
+    const harness = loadAgentsTabForTest({
+      snapshot: {
+        agents: {
+          "deepseek-harness": { integrationInstalled: true, enabled: true },
+          codex: { integrationInstalled: true, enabled: true },
+        },
+      },
+      agentMetadata: [
+        { id: "deepseek-harness", name: "DeepSeek Harness (experimental)", eventSource: "plugin-event", capabilities: {} },
+        { id: "codex", name: "Codex", eventSource: "hook", capabilities: {} },
+      ],
+      settingsAPI: { getDshNotices: () => Promise.resolve({ notices: [] }) },
+    });
+
+    harness.core.ops.requestRender({ content: true });
+    await flushAsync();
+
+    const containers = harness.content.querySelectorAll(".agent-dsh-notices");
+    assert.strictEqual(containers.length, 1);
+    assert.strictEqual(containers[0].querySelectorAll(".agent-dsh-notice").length, 0);
   });
 
   it("keeps Start with Codex independent and commits through the preference API", async () => {
@@ -12447,7 +13990,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(tabSource.includes("handleRefreshThemes"));
     assert.ok(tabSource.includes("handleRemoveCodexPet"));
     assert.ok(tabSource.includes("themeUninstallPetLabel"));
-    assert.ok(tabSource.includes('footer.className = "theme-card-footer";'));
+    assert.ok(tabSource.includes('"theme-card-footer theme-card-footer-official"'));
     assert.ok(tabSource.includes('btn.className = "theme-customize-btn";'));
     assert.ok(tabSource.includes("function renderThemeDetail(parent, theme)"));
     assert.ok(tabSource.includes("function supportsThemeCustomization(theme)"));
@@ -12478,6 +14021,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(css.includes(".theme-detail-hero"));
     assert.ok(css.includes(".theme-customization-row"));
     assert.ok(/\.theme-card-footer\s*\{[^}]*min-height:\s*26px;[^}]*margin-top:\s*auto;[^}]*\}/.test(css));
+    assert.ok(/\.theme-card-footer-official\s*\{[^}]*flex-wrap:\s*wrap;[^}]*justify-content:\s*flex-start;[^}]*\}/.test(css));
+    assert.ok(css.includes(".theme-official-showcase-btn"));
     assert.ok(/\.theme-card-check\s*\{[^}]*white-space:\s*nowrap;[^}]*\}/.test(css));
     assert.ok(i18nSource.includes("themeImportPetZip"));
     assert.ok(i18nSource.includes("themeImportUserThemeZip"));
@@ -12577,8 +14122,346 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(commands, []);
   });
 
-  it("renders Codex Pet atlas previews with V1, V2, and legacy grid ratios", () => {
+  it("renders official themes in their own section without duplicating an installed card", () => {
     const { content } = loadThemeTabForTest({
+      themes: [
+        { id: "clawd", name: "Clawd", builtin: true, active: true },
+        {
+          id: "hash-sage",
+          name: "Hash Sage",
+          officialTheme: true,
+          active: true,
+          officialThemeState: "installed",
+          officialThemeInstalledVersion: "1.0.0",
+          officialThemeCanUninstall: true,
+        },
+        { id: "user", name: "User Theme", active: false },
+      ],
+      officialThemes: [
+        {
+          id: "hash-sage",
+          name: "Hash Sage",
+          officialTheme: true,
+          active: false,
+          officialThemeState: "installed",
+          officialThemeInstalledVersion: "1.0.0",
+          officialThemeCanUninstall: true,
+        },
+      ],
+    });
+
+    const sections = content.querySelectorAll(".theme-section");
+    const officialSection = sections.find(
+      (section) => section.querySelector(".theme-section-title").textContent === "Official themes"
+    );
+    assert.ok(officialSection, "official section must render");
+    assert.strictEqual(officialSection.querySelectorAll(".theme-card").length, 1);
+    const userSection = sections.find(
+      (section) => section.querySelector(".theme-section-title").textContent === "User Themes"
+    );
+    assert.ok(userSection);
+    // The installed official card must not also appear as a user card.
+    const allCards = content.querySelectorAll(".theme-card");
+    const hashCards = allCards.filter(
+      (card) => card.querySelector(".theme-card-name-text").textContent === "Hash Sage"
+    );
+    assert.strictEqual(hashCards.length, 1);
+    assert.strictEqual(hashCards[0].getAttribute("aria-checked"), "true");
+    assert.ok(hashCards[0].classList.contains("active"));
+    assert.ok(hashCards[0].querySelector(".theme-card-footer-official"));
+    assert.strictEqual(
+      hashCards[0].querySelector(".theme-uninstall-btn").getAttribute("data-settings-focus-key"),
+      "official-uninstall:hash-sage",
+    );
+  });
+
+  it("keeps a local theme in the user section when the confirmed catalog never listed its id", () => {
+    const { content } = loadThemeTabForTest({
+      themes: [
+        { id: "clawd", name: "Clawd", builtin: true, active: true },
+        { id: "hash-sage", name: "My Local Sage", builtin: false, active: false },
+      ],
+      officialThemes: [
+        { id: "whale-chan", name: "Whale-chan", officialTheme: true, active: false, officialThemeState: "available" },
+      ],
+      officialCatalogStatus: "ok",
+    });
+
+    const sections = content.querySelectorAll(".theme-section");
+    const userSection = sections.find(
+      (section) => section.querySelector(".theme-section-title").textContent === "User Themes"
+    );
+    assert.ok(userSection, "the local theme must stay in the user section");
+    assert.strictEqual(userSection.querySelectorAll(".theme-card").length, 1);
+    assert.ok(collectText(userSection.querySelector(".theme-card")).includes("My Local Sage"));
+    assert.strictEqual(userSection.querySelector(".theme-card-footer-official"), null);
+  });
+
+  it("returns a stale official local theme to the user section once the catalog drops its id", async () => {
+    const { content, commands } = loadThemeTabForTest({
+      themes: [
+        { id: "clawd", name: "Clawd", builtin: true, active: true },
+        {
+          id: "hash-sage",
+          name: "My Local Sage",
+          builtin: false,
+          active: false,
+          // Decoration left behind by the catalog version that still listed this id.
+          officialTheme: true,
+          officialThemeState: "conflict",
+          officialThemeConflict: true,
+          officialThemeCanUninstall: false,
+        },
+      ],
+      officialThemes: [
+        { id: "whale-chan", name: "Whale-chan", officialTheme: true, active: false, officialThemeState: "available" },
+      ],
+      officialCatalogStatus: "ok",
+    });
+
+    const sections = content.querySelectorAll(".theme-section");
+    const userSection = sections.find(
+      (section) => section.querySelector(".theme-section-title").textContent === "User Themes"
+    );
+    assert.ok(userSection, "the withdrawn local theme must return to the user section");
+    const cards = userSection.querySelectorAll(".theme-card");
+    assert.strictEqual(cards.length, 1);
+    assert.ok(collectText(cards[0]).includes("My Local Sage"));
+    assert.strictEqual(cards[0].querySelector(".theme-card-footer-official"), null);
+    assert.ok(cards[0].querySelector(".theme-delete-btn"), "plain user themes offer delete");
+
+    cards[0].dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(commands)),
+      [{ name: "setThemeSelection", payload: { themeId: "hash-sage" } }],
+    );
+  });
+
+  it("shows official download, progress and uninstall affordances", async () => {
+    const installCalls = [];
+    const cancelCalls = [];
+    const openExternalCalls = [];
+    const showcaseUrl = "https://hash-sage-art.pages.dev/progress/";
+    const harness = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [
+        {
+          id: "hash-sage",
+          name: "Hash Sage",
+          officialTheme: true,
+          active: false,
+          officialThemeState: "available",
+          officialThemeBytes: 5 * 1024 * 1024,
+          officialThemeDescription: { en: "A cloud-riding pixel sage." },
+          officialThemeShowcaseUrl: showcaseUrl,
+        },
+      ],
+      settingsAPI: {
+        openExternal: (url) => {
+          openExternalCalls.push(url);
+          return Promise.resolve({ status: "ok" });
+        },
+        installOfficialTheme: (themeId) => {
+          installCalls.push(themeId);
+          return Promise.resolve({ status: "ok" });
+        },
+        cancelOfficialThemeInstall: () => {
+          cancelCalls.push("cancel");
+          return Promise.resolve({ status: "ok", cancelled: true });
+        },
+      },
+    });
+
+    const download = harness.content.querySelector(".theme-official-download-btn");
+    const showcaseButton = harness.content.querySelector(".theme-official-showcase-btn");
+    assert.ok(download);
+    assert.strictEqual(
+      harness.content.querySelector(".theme-card-description").textContent,
+      "A cloud-riding pixel sage."
+    );
+    assert.strictEqual(harness.content.querySelector(".theme-official-license-summary"), null);
+    assert.strictEqual(harness.content.querySelector(".theme-official-license-notice"), null);
+    assert.strictEqual(harness.content.querySelector(".theme-official-license-link"), null);
+    assert.ok(showcaseButton);
+    assert.strictEqual(showcaseButton.textContent, "View animations");
+    showcaseButton.dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    assert.deepStrictEqual(openExternalCalls, [showcaseUrl]);
+    assert.ok(download.textContent.includes("5 MB"));
+    download.dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    assert.deepStrictEqual(installCalls, ["hash-sage"]);
+
+    // A live main-owned operation renders a progress bar + cancel.
+    harness.core.runtime.officialThemeOperation = {
+      id: "hash-sage",
+      phase: "downloading",
+      receivedBytes: 1024 * 1024,
+      totalBytes: 5 * 1024 * 1024,
+    };
+    harness.renderContent();
+    const cancel = harness.content.querySelector(".theme-official-cancel-btn");
+    const progress = harness.content.querySelector(".theme-official-progress");
+    assert.ok(cancel);
+    assert.ok(harness.content.querySelector(".theme-official-progress-bar"));
+    assert.strictEqual(cancel.getAttribute("data-settings-focus-key"), "official-cancel:hash-sage");
+    assert.strictEqual(progress.getAttribute("role"), "progressbar");
+    assert.strictEqual(progress.getAttribute("aria-valuenow"), "20");
+    cancel.dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    assert.deepStrictEqual(cancelCalls, ["cancel"]);
+
+    harness.core.runtime.officialThemeOperation = {
+      id: "hash-sage",
+      phase: "installing",
+      receivedBytes: 5 * 1024 * 1024,
+      totalBytes: 5 * 1024 * 1024,
+    };
+    harness.renderContent();
+    assert.strictEqual(harness.content.querySelector(".theme-official-cancel-btn"), null);
+  });
+
+  it("gives retry a stable keyboard focus key", () => {
+    const harness = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        officialThemeState: "error",
+        officialThemeError: { message: "offline" },
+      }],
+    });
+    const retry = harness.content.querySelector(".theme-official-retry-btn");
+    assert.ok(retry);
+    assert.strictEqual(retry.getAttribute("data-settings-focus-key"), "official-retry:hash-sage");
+  });
+
+  it("uses the localized catalog-unavailable copy for that install failure code", async () => {
+    const toasts = [];
+    const harness = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        active: false,
+        officialThemeState: "available",
+        officialThemeBytes: 5 * 1024 * 1024,
+      }],
+      settingsAPI: {
+        installOfficialTheme: () => Promise.resolve({
+          status: "error",
+          code: "OFFICIAL_THEME_CATALOG_UNAVAILABLE",
+          message: "official theme catalog is unavailable",
+        }),
+      },
+    });
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    harness.content.querySelector(".theme-official-download-btn").dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.strictEqual(toasts.length, 1);
+    assert.strictEqual(toasts[0].message, harness.core.helpers.t("toastOfficialThemeCatalogUnavailable"));
+    assert.ok(!toasts[0].message.includes("official theme catalog is unavailable"));
+    assert.strictEqual(toasts[0].options.error, true);
+  });
+
+  it("keeps the generic install-failure copy for other error codes", async () => {
+    const toasts = [];
+    const harness = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        active: false,
+        officialThemeState: "available",
+        officialThemeBytes: 5 * 1024 * 1024,
+      }],
+      settingsAPI: {
+        installOfficialTheme: () => Promise.resolve({
+          status: "error",
+          code: "OFFICIAL_THEME_INSTALL_FAILED",
+          message: "boom",
+        }),
+      },
+    });
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
+    harness.content.querySelector(".theme-official-download-btn").dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.strictEqual(toasts.length, 1);
+    assert.strictEqual(toasts[0].message, harness.core.helpers.t("toastOfficialThemeInstallFailed")("boom"));
+  });
+
+  it("localizes a catalog-unavailable card error instead of showing the English message", () => {
+    const { content, core } = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [{
+        id: "hash-sage",
+        name: "Hash Sage",
+        officialTheme: true,
+        active: false,
+        officialThemeState: "error",
+        officialThemeError: {
+          code: "OFFICIAL_THEME_CATALOG_UNAVAILABLE",
+          message: "official theme catalog is unavailable",
+        },
+      }],
+    });
+    const note = content.querySelector(".theme-official-note");
+    assert.ok(note);
+    assert.strictEqual(note.textContent, core.helpers.t("toastOfficialThemeCatalogUnavailable"));
+    assert.ok(!collectText(content).includes("official theme catalog is unavailable"));
+  });
+
+  it("shows a retry banner when the official catalog is offline without hiding installed cards", () => {
+    const { content } = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialCatalogStatus: "offline",
+      officialThemes: [
+        {
+          id: "hash-sage",
+          name: "Hash Sage",
+          officialTheme: true,
+          active: false,
+          officialThemeState: "installed",
+          officialThemeInstalledVersion: "1.0.0",
+          officialThemeCanUninstall: true,
+        },
+      ],
+    });
+    const banner = content.querySelector(".theme-official-offline-banner");
+    assert.ok(banner);
+    assert.ok(content.querySelector(".theme-official-offline-retry"));
+    assert.ok(content.querySelector(".theme-uninstall-btn"));
+    assert.strictEqual(content.querySelector(".theme-official-offline-note"), null);
+  });
+
+  it("keeps the official section with a no-list banner when the offline catalog returned nothing", () => {
+    const { content, core } = loadThemeTabForTest({
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialCatalogStatus: "invalid",
+      officialThemes: [],
+    });
+    const banner = content.querySelector(".theme-official-offline-banner");
+    assert.ok(banner);
+    assert.strictEqual(
+      content.querySelector(".theme-official-offline-retry").textContent,
+      core.helpers.t("themeOfficialRetry"),
+    );
+    assert.strictEqual(
+      content.querySelector(".theme-official-offline-message").textContent,
+      core.helpers.t("themeOfficialOfflineNoList"),
+    );
+  });
+
+  it("renders Codex Pet atlas previews with V1, V2, and legacy grid ratios", () => {    const { content } = loadThemeTabForTest({
       themes: [
         {
           id: "pet-v1",
@@ -12867,6 +14750,81 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(result, previousThemeList);
     assert.strictEqual(harness.core.runtime.themeList, previousThemeList);
     assert.strictEqual(harness.content.querySelectorAll(".theme-card").length, 1);
+  });
+
+  it("does not let a pending official catalog block the local theme first paint", async () => {
+    let resolveOfficial;
+    const officialPending = new Promise((resolve) => { resolveOfficial = resolve; });
+    const localThemes = [{ id: "clawd", name: "Clawd", builtin: true, active: true }];
+    const harness = loadThemeTabForTest({
+      themes: localThemes,
+      settingsAPI: {
+        listThemes: () => Promise.resolve(localThemes),
+        listOfficialThemes: () => officialPending,
+      },
+    });
+
+    let settled = false;
+    let result = null;
+    harness.core.ops.fetchThemes().then((themes) => {
+      settled = true;
+      result = themes;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.strictEqual(settled, true);
+    assert.deepStrictEqual(result, localThemes);
+
+    resolveOfficial({ status: "ok", catalogStatus: "ok", catalogVersion: 1, themes: [] });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("does not re-enter theme fetching when the official catalog wins the first-paint race", async () => {
+    let resolveLocal;
+    const localThemes = [{ id: "clawd", name: "Clawd", builtin: true, active: true }];
+    const localPending = new Promise((resolve) => { resolveLocal = resolve; });
+    let localCalls = 0;
+    let officialCalls = 0;
+    const harness = loadThemeTabForTest({
+      themes: [],
+      settingsAPI: {
+        listThemes: () => {
+          localCalls += 1;
+          return localPending;
+        },
+        listOfficialThemes: () => {
+          officialCalls += 1;
+          return Promise.resolve({ status: "ok", catalogStatus: "ok", catalogVersion: 1, themes: [] });
+        },
+      },
+    });
+    let requestedRenders = 0;
+    harness.core.ops.installRenderHooks({
+      content: () => {
+        requestedRenders += 1;
+        harness.renderContent();
+      },
+    });
+    harness.core.runtime.themeList = null;
+    harness.renderContent();
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.strictEqual(localCalls, 1);
+    assert.strictEqual(officialCalls, 1);
+    assert.strictEqual(requestedRenders, 0, "official completion must not render before local themes settle");
+
+    resolveLocal(localThemes);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.strictEqual(localCalls, 1);
+    assert.strictEqual(officialCalls, 1);
+    assert.strictEqual(requestedRenders, 1);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(harness.core.runtime.themeList)), localThemes);
   });
 
   it("opens the active pet detail and saves color independently for that theme", async () => {
@@ -13260,12 +15218,19 @@ describe("settings renderer browser environment", () => {
     const input = connectSection.querySelector(".kimi-quota-key-input");
     assert.strictEqual(input.type, "password");
     assert.strictEqual(input.autocomplete, "new-password");
+    assert.ok(input.classList.contains("settings-text-input"));
     const connectPrimary = connectSection.querySelectorAll(".kimi-quota-primary");
     assert.strictEqual(connectPrimary.length, 1, "the connect card has exactly one primary action");
     assert.ok(connectPrimary[0].classList.contains("accent"));
     // The Console link is present but quiet — it never competes with Connect.
     assert.ok(connectSection.querySelector(".kimi-quota-console-link").classList.contains("quiet"));
 
+    input.dispatchEvent({ type: "keydown", key: "Enter" });
+    assert.strictEqual(input.getAttribute("aria-invalid"), "true", "empty Enter marks the key invalid");
+    input.value = "ime-draft";
+    input.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+    assert.strictEqual(connectedKey, null, "IME composition must not submit a key");
+    assert.strictEqual(input.value, "ime-draft");
     input.value = "sk-renderer-secret";
     connectPrimary[0].dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(input.value, "", "the DOM must drop the key immediately after submission");
@@ -13296,7 +15261,19 @@ describe("settings renderer browser environment", () => {
     replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(replacePanel.hidden, false);
     assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "true");
-    assert.ok(replacePanel.querySelector(".kimi-quota-key-input"));
+    const replaceInput = replacePanel.querySelector(".kimi-quota-key-input");
+    assert.ok(replaceInput);
+    replaceInput.value = "sk-replacement-secret";
+    replaceInput.dispatchEvent({ type: "keydown", key: "Enter" });
+    assert.strictEqual(replaceInput.value, "", "Enter clears replacement credentials immediately");
+    await flush();
+    assert.strictEqual(connectedKey, "sk-replacement-secret", "Enter uses the dedicated key IPC");
+
+    // The replacement submission closes the panel; reopening it exercises the
+    // explicit cancel path independently.
+    replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
+    assert.strictEqual(replacePanel.hidden, false);
+    assert.strictEqual(replaceToggle.getAttribute("aria-pressed"), "true");
     const replaceCancel = replacePanel.querySelectorAll("button")
       .find((button) => button.textContent === "kimiQuotaCancel");
     replaceCancel.dispatchEvent({ type: "click", stopPropagation() {} });
@@ -13419,15 +15396,20 @@ describe("settings renderer browser environment", () => {
 
     // Losing the executable no longer moves the agent out of Connected, so the
     // row itself has to report it.
-    harness.core.runtime.agentInstallationHints = {
-      checkedAt: 2,
-      agents: [],
-      customAgents: [{ agentId: id, detectedInstalled: false, confidence: "high" }],
-      customTools: [],
-      skippedAgentIds: [],
+    const showUnavailableReason = (reason, checkedAt) => {
+      harness.core.runtime.agentInstallationHints = {
+        checkedAt,
+        agents: [],
+        customAgents: [{ agentId: id, detectedInstalled: false, confidence: "low", reason }],
+        customTools: [],
+        skippedAgentIds: [],
+      };
+      harness.core.ops.requestRender({ content: true });
+      harness.raf.flush();
+      return harness.content.querySelector(".agent-section-connected .custom-missing");
     };
-    harness.core.ops.requestRender({ content: true });
-    harness.raf.flush();
+
+    const missing = showUnavailableReason("not-found", 2);
 
     const stillConnected = harness.content.querySelector(".agent-section-connected");
     assert.deepStrictEqual(
@@ -13435,9 +15417,10 @@ describe("settings renderer browser environment", () => {
       ["Nova AI", "QoderWork"],
       "a vanished executable must not evict the agent from Connected"
     );
-    const missing = stillConnected.querySelector(".custom-missing");
     assert.ok(missing, "the row reports the missing executable");
     assert.strictEqual(missing.textContent, "Path missing");
+    assert.strictEqual(showUnavailableReason("not-executable", 3).textContent, "Not executable");
+    assert.strictEqual(showUnavailableReason("not-file", 4).textContent, "Not a file");
   });
 
   it("renders Custom AI detection under one manual folder picker", () => {
@@ -13510,6 +15493,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(group.classList.contains("collapsed"), "catalog starts collapsed");
     const search = group.querySelector(".agent-section-search");
     assert.ok(search, "the catalog header carries a search box");
+    assert.ok(search.classList.contains("settings-text-input"));
+    assert.ok(search.classList.contains("settings-text-input-compact"));
     assert.strictEqual(search.placeholder, "Search");
     assert.strictEqual(group.querySelector(".agent-section-count").textContent, "3");
 
@@ -13633,10 +15618,9 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.content.querySelector(".agent-custom-tools-section"), null);
 
     // Each banner belongs to the subtab it acts on.
-    const cleanupIndex = harness.content.children
-      .findIndex((node) => node.classList.contains("agent-cleanup-hint-banner"));
-    assert.ok(cleanupIndex >= 0, "a cleanup hint should render for the missing local agent");
-    assert.ok(cleanupIndex > harness.content.children.indexOf(subtabs));
+    const connectedPanel = harness.content.children.find((node) => node.getAttribute("role") === "tabpanel");
+    assert.equal(connectedPanel.hidden, false);
+    assert.ok(connectedPanel.querySelector(".agent-cleanup-hint-banner"), "cleanup hint belongs to the connected panel");
     assert.strictEqual(harness.content.querySelector(".agent-install-hint-banner"), null);
 
     pills[1].dispatchEvent({ type: "click", bubbles: false });
@@ -13867,7 +15851,6 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes('agent.id !== "gemini-cli"'));
     assert.ok(!agentsSource.includes("Gemini CLI"));
     assert.ok(!agentsSource.includes("if (disabled || btn.classList.contains(\"active\")) return;"));
-    assert.ok(agentsSource.includes("if (btn.disabled || btn.classList.contains(\"active\")) return;"));
     assert.ok(!agentsSource.includes("codex-permission-mode-transitioning"));
   });
 
@@ -14043,8 +16026,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(group.classList.contains("collapsed"));
     assert.deepStrictEqual(labelsFor(unavailable), ["Pi"]);
     assert.ok(
-      harness.content.children.indexOf(harness.content.querySelector(".agent-custom-tools-section"))
-      < harness.content.children.indexOf(unavailable)
+      unavailable.parentNode.children.indexOf(harness.content.querySelector(".agent-custom-tools-section"))
+      < unavailable.parentNode.children.indexOf(unavailable)
     );
   });
 
@@ -14636,7 +16619,23 @@ describe("settings renderer browser environment", () => {
     );
   });
 
-  it("disables the Codex Permissions switch in place when Permission mode changes to Native", () => {
+  it("General exposes the Codex approval owner and links to its Agents control", () => {
+    for (const mode of ["auto", "intercept"]) {
+      const harness = loadGeneralTabForTest({ snapshot: { agents: { codex: {
+        integrationInstalled: true, enabled: true, permissionMode: mode } } } });
+      harness.renderContent();
+      const row = harness.content.querySelector(".codex-approval-owner-row");
+      assert.ok(row);
+      assert.ok(row.querySelector(".row-desc").textContent.includes(mode === "auto" ? "Auto" : "Intercept"));
+      const selected = [];
+      harness.core.ops.selectTab = (tab) => selected.push(tab);
+      row.querySelector("button").dispatchEvent({ type: "click" });
+      assert.deepStrictEqual(selected, ["agents"]);
+      assert.strictEqual(harness.core.runtime.agentsSubtab, "connected");
+    }
+  });
+
+  it("keeps manual Codex Permissions available when switching to Auto", () => {
     const harness = loadAgentsTabForTest({
       snapshot: {
         agents: {
@@ -14689,9 +16688,9 @@ describe("settings renderer browser environment", () => {
       .find((meta) => meta.agentId === "codex" && meta.flag === "permissionsEnabled");
     assert.ok(permissionsSwitch, "Codex Permissions switch should stay mounted");
     assert.strictEqual(harness.getContentRenderCount(), before);
-    assert.strictEqual(permissionsSwitch.element.classList.contains("disabled"), true);
-    assert.strictEqual(permissionsSwitch.element.attributes["aria-disabled"], "true");
-    assert.strictEqual(permissionsSwitch.element.attributes.tabindex, "-1");
+    assert.strictEqual(permissionsSwitch.element.classList.contains("disabled"), false);
+    assert.strictEqual(permissionsSwitch.element.attributes["aria-disabled"], "false");
+    assert.strictEqual(permissionsSwitch.element.attributes.tabindex, "0");
   });
 
   it("enables the Codex native sound switch only in Native permission mode", () => {
@@ -14939,7 +16938,7 @@ describe("settings renderer browser environment", () => {
       },
     });
 
-    assert.strictEqual(segmented.style.getPropertyValue("--codex-permission-mode-active-index"), "1");
+    assert.strictEqual(segmented.querySelectorAll("button")[0].getAttribute("aria-checked"), "true");
     harness.raf.flush();
     assert.strictEqual(segmented.style.getPropertyValue("--codex-permission-mode-active-index"), "0");
   });
@@ -17750,5 +19749,343 @@ describe("macOS platform detection (Settings shortcut labels)", () => {
     assert.strictEqual(isMac(""), false);
     assert.strictEqual(isMac(undefined), false);
     assert.strictEqual(isMac(null), false);
+  });
+});
+
+// A focused document model for real shared-controller and shell tests. Focus
+// events and attachment state matter here, unlike the layout-only harnesses.
+function createChoiceDocument() {
+  const body = new FakeElement("body");
+  const document = {
+    body, activeElement: body,
+    createElement(tag) {
+      const node = new FakeElement(tag);
+      node.focus = () => {
+        if (node.disabled || document.activeElement === node) return;
+        const previous = document.activeElement;
+        document.activeElement = node;
+        previous?.dispatchEvent({ type: "blur", relatedTarget: node, bubbles: false });
+        node.dispatchEvent({ type: "focus", relatedTarget: previous, bubbles: false });
+      };
+      return node;
+    },
+    getElementById(id) {
+      const visit = (node) => node.id === id ? node : node.children.map(visit).find(Boolean);
+      return visit(body) || null;
+    },
+  };
+  return document;
+}
+
+function mountChoice(document, control) {
+  document.body.appendChild(control.element);
+  for (const panel of control.panels?.values() || []) document.body.appendChild(panel);
+  return control.element.querySelectorAll("button");
+}
+
+const choiceOptions = () => [
+  { value: "a", label: "Alpha" },
+  { value: "b", label: "Beta", disabled: true },
+  { value: "c", label: "Gamma" },
+];
+const settleChoice = () => new Promise((resolve) => setImmediate(resolve));
+
+describe("Settings tabs and segmented choice contracts", () => {
+  it("replaces only subpage bodies, restores lost focus and invalidates disposed scroll work", () => {
+    const document = createChoiceDocument();
+    const frames = [];
+    const core = loadSettingsCoreForTest({}, { document, requestAnimationFrame: (cb) => frames.push(cb) });
+    const scroller = document.createElement("main");
+    scroller.id = "content";
+    document.body.appendChild(scroller);
+    const fallback = document.createElement("button");
+    fallback.setAttribute("data-settings-focus-key", "period");
+    scroller.appendChild(fallback);
+    const panel = document.createElement("div");
+    scroller.appendChild(panel);
+    let cleanups = 0;
+    const host = core.helpers.createSubpageHost({ disposeBody: () => { cleanups++; } });
+    const renderInput = (body) => {
+      const input = document.createElement("input");
+      input.setAttribute("data-settings-focus-key", "draft");
+      input.setAttribute("data-settings-focus-fallback-key", "period");
+      body.appendChild(input);
+    };
+    host.render(panel, renderInput);
+    panel.children[0].focus();
+    scroller.scrollTop = 90;
+    host.render(panel, renderInput);
+    assert.equal(cleanups, 1);
+    assert.strictEqual(document.activeElement, panel.children[0]);
+    assert.equal(scroller.scrollTop, 90);
+    host.render(panel, () => {});
+    assert.strictEqual(document.activeElement, fallback);
+    const modal = document.createElement("button");
+    document.body.appendChild(modal);
+    host.render(panel, (body) => { renderInput(body); modal.focus(); });
+    assert.strictEqual(document.activeElement, modal, "a dialog keeps its focus");
+    host.dispose();
+    scroller.scrollTop = 20;
+    frames.forEach((frame) => frame());
+    assert.equal(scroller.scrollTop, 20);
+    assert.equal(host.render(panel, () => { throw new Error("disposed host rendered"); }), false);
+  });
+
+  for (const orientation of ["horizontal", "vertical"]) {
+    it(`uses manual activation, wrapping and disabled skipping for ${orientation} tabs`, () => {
+      const document = createChoiceDocument();
+      const core = loadSettingsCoreForTest({}, { document });
+      const changes = [];
+      const control = core.helpers.buildTabs({ id: "test-tabs", ariaLabel: "Views", value: "a",
+        orientation, options: choiceOptions(), onChange: (value) => changes.push(value) });
+      const [a, b, c] = mountChoice(document, control);
+      assert.equal(control.element.getAttribute("role"), "tablist");
+      assert.equal(control.element.getAttribute("aria-orientation"), orientation);
+      for (const button of [a, b, c]) {
+        const panel = document.getElementById(button.getAttribute("aria-controls"));
+        assert.ok(panel);
+        assert.equal(panel.getAttribute("aria-labelledby"), button.id);
+        assert.equal(panel.getAttribute("role"), "tabpanel");
+      }
+      a.focus();
+      a.dispatchEvent(createKeyboardEventForTest(orientation === "vertical" ? "ArrowDown" : "ArrowRight"));
+      assert.strictEqual(document.activeElement, c);
+      assert.equal(control.getValue(), "a");
+      assert.deepEqual(changes, []);
+      assert.equal(c.tabIndex, 0);
+      assert.equal(a.tabIndex, -1);
+      assert.equal(b.tabIndex, -1);
+      assert.equal(control.panels.get("a").hidden, false);
+      c.dispatchEvent(createKeyboardEventForTest("Enter"));
+      c.dispatchEvent({ type: "click" });
+      assert.deepEqual(changes, ["c"], "native click after Enter cannot activate twice");
+      assert.equal(c.getAttribute("aria-selected"), "true");
+      assert.equal(control.panels.get("a").hidden, true);
+      assert.equal(control.panels.get("c").hidden, false);
+      c.dispatchEvent(createKeyboardEventForTest(orientation === "vertical" ? "ArrowDown" : "ArrowRight"));
+      assert.strictEqual(document.activeElement, a);
+      a.dispatchEvent(createKeyboardEventForTest("End"));
+      assert.strictEqual(document.activeElement, c);
+      c.dispatchEvent(createKeyboardEventForTest("Home"));
+      assert.strictEqual(document.activeElement, a);
+      const perpendicular = createKeyboardEventForTest(orientation === "vertical" ? "ArrowRight" : "ArrowDown");
+      a.dispatchEvent(perpendicular);
+      assert.ok(!perpendicular.defaultPrevented);
+      const outside = document.createElement("input");
+      document.body.appendChild(outside);
+      outside.focus();
+      assert.equal(c.tabIndex, 0, "reentry targets the selected tab");
+      assert.equal(a.tabIndex, -1);
+      control.setValue("a");
+      assert.deepEqual(changes, ["c"], "snapshot updates never call onChange");
+      control.setDisabled(true);
+      assert.ok([a, b, c].every((button) => button.disabled && button.tabIndex === -1));
+      control.setDisabled(false);
+      assert.equal(a.tabIndex, 0);
+      control.dispose();
+      control.dispose();
+      c.click();
+      assert.deepEqual(changes, ["c"]);
+      assert.ok(Object.values(c.eventListeners).every((listeners) => listeners.length === 0));
+    });
+  }
+
+  it("requires accessible names and handles empty/all-disabled groups", () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    assert.throws(() => core.helpers.buildTabs({ id: "unnamed" }), /accessible name/);
+    assert.throws(() => core.helpers.buildSegmentedRadio({}), /accessible name/);
+    for (const options of [[], choiceOptions().map((option) => ({ ...option, disabled: true }))]) {
+      const control = core.helpers.buildTabs({ id: "empty", ariaLabel: "Empty", options });
+      const buttons = mountChoice(document, control);
+      control.focus();
+      assert.ok(buttons.every((button) => button.tabIndex === -1));
+      assert.strictEqual(document.activeElement, document.body);
+    }
+  });
+
+  it("keeps radio keyboard selection synchronous, skips disabled values and rolls back rejection", () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    let accept = true;
+    const control = core.helpers.buildSegmentedRadio({ id: "choice", ariaLabel: "Mode", value: "a",
+      options: choiceOptions(), onChange: () => accept });
+    const [a, b, c] = mountChoice(document, control);
+    a.focus();
+    a.dispatchEvent(createKeyboardEventForTest("ArrowRight"));
+    assert.strictEqual(document.activeElement, c);
+    assert.equal(control.getValue(), "c");
+    assert.equal(control.element.getAttribute("aria-busy"), "false");
+    assert.equal(c.getAttribute("aria-checked"), "true");
+    assert.equal(b.tabIndex, -1);
+    accept = false;
+    c.dispatchEvent(createKeyboardEventForTest("Home"));
+    assert.equal(control.getValue(), "c");
+    assert.equal(c.tabIndex, 0);
+    assert.equal(a.getAttribute("aria-checked"), "false");
+  });
+
+  for (const outcome of ["reject", "throw", "accept"]) {
+    it(`keeps authoritative snapshots and independent locks after async ${outcome}`, async () => {
+      const document = createChoiceDocument();
+      const core = loadSettingsCoreForTest({}, { document });
+      const deferred = createDeferred();
+      let calls = 0;
+      const control = core.helpers.buildSegmentedRadio({ id: "race", ariaLabel: "Mode", value: "a",
+        options: choiceOptions(), onChange: () => { calls++; return deferred.promise; } });
+      const [a, , c] = mountChoice(document, control);
+      c.focus();
+      c.click();
+      a.click();
+      c.dispatchEvent(createKeyboardEventForTest("Home"));
+      assert.equal(calls, 1);
+      assert.strictEqual(document.activeElement, c, "pending must not discard focus");
+      control.setValue("b");
+      control.setPending(true);
+      control.setDisabled(true);
+      if (outcome === "throw") deferred.reject(new Error("save failed"));
+      else deferred.resolve(outcome === "accept");
+      await settleChoice();
+      assert.equal(control.getValue(), "b", "an old result cannot overwrite a newer snapshot");
+      assert.equal(control.element.getAttribute("aria-busy"), "true");
+      control.setPending(false);
+      assert.equal(c.disabled, true, "clearing pending preserves business disabled");
+      control.setDisabled(false);
+      assert.equal(c.disabled, false);
+    });
+  }
+
+  it("locks before invoking a callback and makes disposal invalidate asynchronous completion", async () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    const deferred = createDeferred();
+    let calls = 0;
+    let buttons;
+    const control = core.helpers.buildSegmentedRadio({ ariaLabel: "Mode", value: "a", options: choiceOptions(),
+      onChange() { calls++; buttons[0].click(); return deferred.promise; } });
+    buttons = mountChoice(document, control);
+    buttons[2].focus();
+    buttons[2].click();
+    assert.equal(calls, 1);
+    control.dispose();
+    const before = control.element.getAttribute("aria-busy");
+    const outside = document.createElement("input");
+    document.body.appendChild(outside);
+    outside.focus();
+    deferred.resolve(false);
+    await settleChoice();
+    assert.equal(control.getValue(), "c");
+    assert.equal(control.element.getAttribute("aria-busy"), before, "disposed DOM must not be patched");
+    assert.strictEqual(document.activeElement, outside);
+    assert.equal(core.state.mountedControls.segmentedRadios.size, 0);
+  });
+
+  it("does not steal focus after an asynchronous save while still mounted", async () => {
+    const document = createChoiceDocument();
+    const core = loadSettingsCoreForTest({}, { document });
+    const deferred = createDeferred();
+    const control = core.helpers.buildSegmentedRadio({ ariaLabel: "Mode", value: "a", options: choiceOptions(),
+      onChange: () => deferred.promise });
+    const buttons = mountChoice(document, control);
+    buttons[2].focus();
+    buttons[2].click();
+    const outside = document.createElement("input");
+    document.body.appendChild(outside);
+    outside.focus();
+    deferred.resolve(false);
+    await settleChoice();
+    assert.strictEqual(document.activeElement, outside);
+    assert.equal(control.getValue(), "a");
+  });
+
+  it("restores focused-but-unselected tabs on sidebar and content replacement without stealing modal focus", () => {
+    const document = createChoiceDocument();
+    const sidebar = document.createElement("aside"); sidebar.id = "sidebar";
+    const content = document.createElement("main"); content.id = "content";
+    document.body.append(sidebar, content);
+    const core = loadSettingsCoreForTest({}, { document });
+    let control;
+    let options = choiceOptions();
+    let modalFocus = null;
+    const render = () => {
+      control?.dispose();
+      sidebar.innerHTML = "";
+      content.innerHTML = "";
+      control = core.helpers.buildTabs({ id: "navigation", ariaLabel: "Pages", value: "a", options });
+      sidebar.appendChild(control.element);
+      for (const panel of control.panels.values()) content.appendChild(panel);
+    };
+    core.ops.installRenderHooks({ sidebar: render, content: () => {}, modal: () => modalFocus?.focus() });
+    core.ops.requestRender({ sidebar: true, content: true });
+    control.focus("c");
+    core.ops.requestRender({ sidebar: true, content: true });
+    assert.equal(document.activeElement.dataset.value, "c");
+    assert.equal(document.activeElement.getAttribute("aria-selected"), "false");
+    assert.equal(document.activeElement.tabIndex, 0);
+    options = choiceOptions().filter((option) => option.value !== "c");
+    core.ops.requestRender({ sidebar: true, content: true });
+    assert.equal(document.activeElement.dataset.value, "a", "removed focus falls back to selected tab");
+    modalFocus = document.createElement("input");
+    document.body.appendChild(modalFocus);
+    core.ops.requestRender({ sidebar: true, content: true, modal: true });
+    assert.strictEqual(document.activeElement, modalFocus);
+  });
+
+  it("integrates the actual sidebar shell without coupling sidebar disposal to content refresh", () => {
+    const document = createChoiceDocument();
+    const sidebar = document.createElement("aside"); sidebar.id = "sidebar";
+    const content = document.createElement("main"); content.id = "content";
+    document.body.append(sidebar, content);
+    const core = loadSettingsCoreForTest({}, { document });
+    let exits = 0;
+    for (const id of ["general", "agents", "theme", "animOverrides", "shortcuts", "telegram-approval", "discord-presence", "remote-ssh", "recap", "about"]) {
+      core.tabs[id] = { render(panel) { const heading = document.createElement("h1"); heading.textContent = id; panel.appendChild(heading); },
+        onExit() { exits++; } };
+    }
+    const source = fs.readFileSync(SETTINGS_RENDERER, "utf8");
+    vm.runInNewContext(source.slice(0, source.indexOf("globalThis.ClawdSettingsTabGeneral.init(core);")), {
+      ClawdSettingsCore: core, document,
+      ClawdSettingsDoctorModal: { renderSidebarIndicator(parent) { parent.appendChild(document.createElement("button")); } },
+    });
+    core.ops.requestRender({ sidebar: true, content: true });
+    const group = sidebar.children[1];
+    assert.equal(group.getAttribute("role"), "tablist");
+    const [general, agents] = group.querySelectorAll("button");
+    general.focus();
+    general.dispatchEvent(createKeyboardEventForTest("ArrowDown"));
+    assert.strictEqual(document.activeElement, agents);
+    assert.equal(core.state.activeTab, "general");
+    assert.equal(exits, 0);
+    core.ops.requestRender({ content: true });
+    agents.dispatchEvent(createKeyboardEventForTest("Enter"));
+    assert.equal(core.state.activeTab, "agents");
+    assert.equal(exits, 1);
+    assert.equal(document.activeElement.dataset.value, "agents");
+    assert.equal(document.activeElement.getAttribute("aria-selected"), "true");
+    assert.equal(content.children.filter((panel) => !panel.hidden).length, 1);
+    assert.equal(content.children.find((panel) => !panel.hidden).textContent, "agents");
+    assert.equal(general.eventListeners.click.length, 0, "old sidebar listeners are removed");
+  });
+
+  it("preserves the Codex pending gate across full rerenders and recovers after failure", async () => {
+    const pending = createDeferred();
+    let calls = 0;
+    const harness = loadAgentsTabForTest({ snapshot: { agents: { codex: { enabled: true, permissionMode: "native" } } },
+      agentMetadata: [{ id: "codex", name: "Codex", capabilities: { permissionApproval: true } }],
+      collapsedGroups: { "agents:codex": false },
+      settingsAPI: { command() { calls++; return pending.promise; } } });
+    harness.core.ops.requestRender({ content: true });
+    let group = harness.content.querySelector(".codex-permission-mode-segmented");
+    group.querySelectorAll("button")[1].click();
+    assert.equal(calls, 1);
+    harness.core.ops.requestRender({ content: true });
+    group = harness.content.querySelector(".codex-permission-mode-segmented");
+    assert.equal(group.getAttribute("aria-busy"), "true");
+    group.querySelectorAll("button")[1].click();
+    assert.equal(calls, 1);
+    pending.resolve({ status: "error", message: "failed" });
+    await settleChoice();
+    assert.equal(group.getAttribute("aria-busy"), "false");
+    assert.equal(group.querySelectorAll("button")[0].getAttribute("aria-checked"), "true");
   });
 });

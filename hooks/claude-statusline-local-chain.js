@@ -4,14 +4,84 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { readJsonFile } = require("./json-utils");
+const { readJsonFile, writeTextAtomic } = require("./json-utils");
 
 const LOCAL_CHAIN_FLAG = "--local-chain";
 const LOCAL_CHAIN_FILE = "clawd-statusline-local-chain.json";
 const LOCAL_CHAIN_OWNER = "clawd.claude-statusline.local.v1";
+const PLAIN_OWNER_FILE = "clawd-statusline-owner.json";
+const PLAIN_OWNER = "clawd.claude-statusline.plain.v1";
+const REMOTE_CHAIN_FILE = "clawd-statusline-chain.json";
+const REMOTE_CHAIN_OWNER = "clawd.claude-statusline.remote.v1";
+const MAX_RECORD_BYTES = 65536;
 
 function statuslineFingerprint(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function readStatuslineOwnerRecord(file, expectedOwner) {
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) {
+    throw new Error(`Invalid statusline ownership record: ${file}`);
+  }
+  const record = readJsonFile(file);
+  const validPrevious = record && (record.previousManagedCommand === undefined
+    || (typeof record.previousManagedCommand === "string" && record.previousManagedCommand.trim()));
+  if (!record || record.owner !== expectedOwner || record.version !== 1
+    || typeof record.managedCommand !== "string" || !record.managedCommand.trim()
+    || !validPrevious) {
+    throw new Error(`Invalid statusline ownership record: ${file}`);
+  }
+  if (expectedOwner === REMOTE_CHAIN_OWNER) {
+    const original = record.statusLine;
+    if (original !== null && original !== undefined && (
+      !original || typeof original !== "object" || Array.isArray(original)
+      || original.type !== "command" || typeof original.command !== "string" || !original.command.trim()
+    )) {
+      throw new Error(`Invalid statusline ownership record: ${file}`);
+    }
+  }
+  return record;
+}
+
+function writeStatuslineOwnerRecord(file, record) {
+  const serialized = JSON.stringify(record, null, 2) + "\n";
+  if (Buffer.byteLength(serialized) > MAX_RECORD_BYTES) {
+    throw new Error("Statusline ownership record is too large; kept unchanged");
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let exists = false;
+  try { exists = fs.lstatSync(file).isFile(); } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (exists) writeTextAtomic(file, serialized, { encoding: "utf8", mode: 0o600 });
+  else writeTextExclusiveAtomic(file, serialized);
+  const reread = readStatuslineOwnerRecord(file, record.owner);
+  if (statuslineFingerprint(reread) !== statuslineFingerprint(record)) {
+    throw new Error(`Statusline ownership record verification failed: ${file}`);
+  }
+  return reread;
+}
+
+function writeTextExclusiveAtomic(file, serialized) {
+  const temp = `${file}.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  try {
+    fs.writeFileSync(temp, serialized, { flag: "wx", mode: 0o600 });
+    // A same-directory hard link publishes the fully written inode under the
+    // final name atomically and fails with EEXIST if another writer won.
+    fs.linkSync(temp, file);
+  } finally {
+    try { fs.unlinkSync(temp); } catch {}
+  }
+}
+
+function ownerRecordMatchesCommand(record, command) {
+  return !!(record && typeof command === "string"
+    && (record.managedCommand === command || record.previousManagedCommand === command));
 }
 
 function readLocalChainRecord(file) {
@@ -60,7 +130,7 @@ function createLocalChainRecord(file, statusLine, portableCommand, platform) {
   if (Buffer.byteLength(serialized) > 65536) throw new Error("Statusline recovery record is too large; kept unchanged");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // Exclusive creation also protects a record installed between read and write.
-  fs.writeFileSync(file, serialized, { flag: "wx", mode: 0o600 });
+  writeTextExclusiveAtomic(file, serialized);
   return record;
 }
 
@@ -111,6 +181,8 @@ function resolveLocalChainShell(options = {}) {
 }
 
 module.exports = {
-  LOCAL_CHAIN_FLAG, LOCAL_CHAIN_FILE, statuslineFingerprint,
+  LOCAL_CHAIN_FLAG, LOCAL_CHAIN_FILE, PLAIN_OWNER_FILE, PLAIN_OWNER,
+  REMOTE_CHAIN_FILE, REMOTE_CHAIN_OWNER, statuslineFingerprint,
   readLocalChainRecord, createLocalChainRecord, requireOwnedLocalChain, resolveLocalChainShell,
+  readStatuslineOwnerRecord, writeStatuslineOwnerRecord, ownerRecordMatchesCommand,
 };

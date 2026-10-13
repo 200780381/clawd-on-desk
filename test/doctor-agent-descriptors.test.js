@@ -23,6 +23,7 @@ describe("doctor agent descriptors", () => {
         "workbuddy",
         "grok-build",
         "kiro-cli",
+        "kirocrew",
         "kimi-cli",
         "qwen-code",
         "zcode",
@@ -30,6 +31,7 @@ describe("doctor agent descriptors", () => {
         "opencode",
         "mimocode",
         "pi",
+        "omp",
         "openclaw",
         "hermes",
         "qoder",
@@ -38,6 +40,7 @@ describe("doctor agent descriptors", () => {
         "traecode",
         "qwenwork",
         "deepseek-harness",
+        "minimax",
       ]
     );
   });
@@ -52,6 +55,7 @@ describe("doctor agent descriptors", () => {
     const codebuddy = require("../hooks/codebuddy-install");
     const workbuddy = require("../hooks/workbuddy-install");
     const kiro = require("../hooks/kiro-install");
+    const kirocrew = require("../hooks/kirocrew-install");
     const kimi = require("../hooks/kimi-install");
     const qwen = require("../hooks/qwen-code-install");
     const codewhale = require("../hooks/codewhale-install");
@@ -99,6 +103,10 @@ describe("doctor agent descriptors", () => {
 
     assert.strictEqual(getAgentDescriptor("kiro-cli").parentDir, kiro.DEFAULT_PARENT_DIR);
     assert.strictEqual(getAgentDescriptor("kiro-cli").configPath, kiro.DEFAULT_AGENTS_DIR);
+    assert.strictEqual(getAgentDescriptor("kirocrew").parentDir, kirocrew.DEFAULT_PARENT_DIR);
+    assert.strictEqual(getAgentDescriptor("kirocrew").configPath, kirocrew.DEFAULT_HOOKS_PATH);
+    assert.deepStrictEqual(getAgentDescriptor("kirocrew").hookEvents, kirocrew.KIROCREW_HOOK_EVENTS);
+    assert.strictEqual(getAgentDescriptor("kirocrew").flatArrayHookEvents, true);
 
     assert.strictEqual(getAgentDescriptor("kimi-cli").parentDir, kimi.DEFAULT_PARENT_DIR);
     assert.strictEqual(getAgentDescriptor("kimi-cli").configPath, kimi.DEFAULT_CONFIG_PATH);
@@ -176,6 +184,18 @@ describe("doctor agent descriptors", () => {
       dsh.resolveDshProfileDir(dsh.resolveDshHome())
     );
     assert.strictEqual(getAgentDescriptor("deepseek-harness").configMode, "dsh-plugin");
+
+    const minimax = require("../hooks/minimax-install");
+    assert.strictEqual(getAgentDescriptor("minimax").parentDir, minimax.resolveMinimaxDataDir());
+    assert.strictEqual(getAgentDescriptor("minimax").configPath, minimax.resolvePluginRoot());
+    assert.strictEqual(getAgentDescriptor("minimax").marker, minimax.MARKER);
+    assert.deepStrictEqual(getAgentDescriptor("minimax").hookEvents, minimax.MINIMAX_HOOK_EVENTS);
+    assert.strictEqual(getAgentDescriptor("minimax").configMode, "minimax-plugin");
+    assert.deepStrictEqual(getAgentDescriptor("minimax").managedFiles, [
+      minimax.OWNER_MARKER_FILE,
+      ".claude-plugin/plugin.json",
+      "hooks/hooks.json",
+    ]);
   });
 
   it("returns copies from public accessors", () => {
@@ -289,6 +309,65 @@ describe("doctor agent descriptors", () => {
       if (prevEnv === undefined) delete process.env.COPILOT_HOME;
       else process.env.COPILOT_HOME = prevEnv;
       fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it("checks OMP extensions with the dedicated omp-extension mode", () => {
+    const omp = require("../hooks/omp-install");
+    const descriptor = getAgentDescriptor("omp");
+
+    assert.strictEqual(descriptor.eventSource, "extension");
+    assert.strictEqual(descriptor.configMode, "omp-extension");
+    assert.strictEqual(descriptor.autoInstall, true);
+    assert.strictEqual(descriptor.marker, omp.EXTENSION_FILE);
+    assert.strictEqual(descriptor.coreFile, omp.CORE_FILE);
+    assert.strictEqual(descriptor.markerFile, omp.MARKER_FILE);
+  });
+
+  it("OMP descriptor resolves its agent directory at module-load time", () => {
+    // OMP loads extensions from the ACTIVE agent directory, which
+    // PI_CONFIG_DIR / PI_CODING_AGENT_DIR / OMP_PROFILE move. A descriptor
+    // frozen to the default would have Doctor judge — and the installation
+    // detector look in — a directory OMP never reads.
+    const path = require("node:path");
+    const os = require("node:os");
+    const fs = require("node:fs");
+
+    const tempAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-omp-agent-dir-"));
+    const prevEnv = {
+      PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+      OMP_PROFILE: process.env.OMP_PROFILE,
+      PI_PROFILE: process.env.PI_PROFILE,
+    };
+    process.env.PI_CODING_AGENT_DIR = tempAgentDir;
+    delete process.env.OMP_PROFILE;
+    delete process.env.PI_PROFILE;
+
+    const installerPath = require.resolve("../hooks/omp-install");
+    const descriptorsPath = require.resolve("../src/doctor-detectors/agent-descriptors");
+    const prevInstallerCache = require.cache[installerPath];
+    const prevDescriptorsCache = require.cache[descriptorsPath];
+    delete require.cache[installerPath];
+    delete require.cache[descriptorsPath];
+
+    try {
+      const descriptor = require("../src/doctor-detectors/agent-descriptors").getAgentDescriptor("omp");
+      assert.strictEqual(descriptor.parentDir, tempAgentDir,
+        "descriptor.parentDir should follow PI_CODING_AGENT_DIR");
+      assert.strictEqual(
+        descriptor.configPath,
+        path.join(tempAgentDir, "extensions", "clawd-on-desk")
+      );
+    } finally {
+      if (prevInstallerCache) require.cache[installerPath] = prevInstallerCache;
+      else delete require.cache[installerPath];
+      if (prevDescriptorsCache) require.cache[descriptorsPath] = prevDescriptorsCache;
+      else delete require.cache[descriptorsPath];
+      for (const [key, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      fs.rmSync(tempAgentDir, { recursive: true, force: true });
     }
   });
 

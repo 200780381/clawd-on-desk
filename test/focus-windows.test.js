@@ -5,6 +5,12 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert");
 const { EventEmitter } = require("node:events");
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function loadFocusWithMock(options = {}) {
   const cpKey = require.resolve("child_process");
   const focusKey = require.resolve("../src/focus");
@@ -116,6 +122,7 @@ describe("Windows terminal focus", () => {
     it(`Direct Send copies fallback after ${reason} without invoking paste`, async () => {
       const { createTelegramDirectSend, createClipboardFallbackDeliveryAdapter } = require("../src/telegram-direct-send");
       const harness = editorFocusHarness();
+      const focusEntered = deferred();
       const copied = [];
       const delivered = [];
       const entry = { id: "cursor-session", agentId: "cursor-agent", sourcePid: 1234, state: "idle", badge: "done" };
@@ -126,6 +133,7 @@ describe("Windows terminal focus", () => {
           focusSession: (sessionId, options) => {
             assert.equal(sessionId, entry.id);
             assert.equal(options.requestSource, "telegram-direct-send");
+            focusEntered.resolve();
             return harness.focus.focusTerminalWindow({ ...entry, sessionId, cwd, requestSource: options.requestSource });
           },
           deliveryAdapter: () => { delivered.push("paste"); return { status: "pasted", delivered: true }; },
@@ -134,6 +142,7 @@ describe("Windows terminal focus", () => {
         });
         assert.equal(direct.registerCompletionNotification({ messageId: 806, sessionId: entry.id }), true);
         const pending = direct.handleTextMessage({ text: "continue", replyToMessageId: 806 });
+        await focusEntered.promise;
         harness.finishRaise(reason);
         const result = await pending;
         assert.equal(result.status, "fallback_copied");

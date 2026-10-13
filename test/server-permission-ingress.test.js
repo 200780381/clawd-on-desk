@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const net = require("node:net");
-const { postPermissionToPort } = require("../hooks/server-config");
+const { postPermissionToPort, postStateToPort } = require("../hooks/server-config");
 const { runCodexHook } = require("../hooks/codex-hook");
 const { requestQwenPermission } = require("../hooks/qwen-code-hook");
 const { requestZcodePermission } = require("../hooks/zcode-hook");
@@ -28,6 +28,46 @@ test("local permission rejects browser requests before parsing or recording", as
   assert.deepEqual(h.updates, []);
   assert.deepEqual(h.logs, []);
   assert.deepEqual(h.api.getRecentHookEvents(), []);
+});
+
+test("local state and permission share the native hook transport guard", async (t) => {
+  const h = await setup(t);
+  for (const path of ["/state", "/permission"]) {
+    for (const [headers, status] of [
+      [{ Origin: "https://untrusted.example" }, 403],
+      [{ Host: "rebound.example" }, 403],
+      [{ "Content-Type": "text/plain" }, 415],
+    ]) {
+      const result = await postPermission(h.port, "not-json", headers, path).response;
+      assert.equal(result.status, status, JSON.stringify({ path, headers, result }));
+      assert.equal(result.body, "");
+    }
+  }
+  assert.deepEqual(h.shown, []);
+  assert.deepEqual(h.updates, []);
+  assert.deepEqual(h.logs, []);
+  assert.deepEqual(h.api.getRecentHookEvents(), []);
+  assert.deepEqual(h.debugLogs.sort(), [
+    "local-hook-transport-reject route=/permission reason=invalid-host status=403",
+    "local-hook-transport-reject route=/permission reason=origin-present status=403",
+    "local-hook-transport-reject route=/permission reason=unsupported-media-type status=415",
+    "local-hook-transport-reject route=/state reason=invalid-host status=403",
+    "local-hook-transport-reject route=/state reason=origin-present status=403",
+    "local-hook-transport-reject route=/state reason=unsupported-media-type status=415",
+  ]);
+  assert.equal(h.debugLogs.some((entry) => /untrusted|rebound|text\/plain|not-json/i.test(entry)), false);
+});
+
+test("local hook rejection telemetry is rate-limited per route and reason", async (t) => {
+  const h = await setup(t);
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal((await postPermission(h.port, "not-json", {
+      Origin: `https://secret-${index}.example`,
+    }, "/state").response).status, 403);
+  }
+  assert.deepEqual(h.debugLogs, [
+    "local-hook-transport-reject route=/state reason=origin-present status=403",
+  ]);
 });
 
 test("local permission requires JSON even on compatibility allow branches", async (t) => {
@@ -66,6 +106,30 @@ test("JSON native compatibility callers retain Pi and Task responses", async (t)
   assert.equal(pi.status, 200);
   assert.equal(JSON.parse(pi.body).hookSpecificOutput.decision.behavior, "allow");
   assert.deepEqual(h.shown, []);
+});
+
+test("the shared native transport satisfies both guarded endpoints", async (t) => {
+  const h = await setup(t);
+  const state = await new Promise((resolve) => {
+    postStateToPort(h.port, JSON.stringify({
+      agent_id: "claude-code",
+      session_id: "shared-transport-state",
+      state: "working",
+      event: "PreToolUse",
+    }), 2000, (ok, port) => resolve({ ok, port }));
+  });
+  assert.deepEqual(state, { ok: true, port: h.port });
+  assert.equal(h.updates.length, 1);
+
+  const permission = await new Promise((resolve) => {
+    postPermissionToPort(h.port, JSON.stringify(dummyPermission("shared", {
+      tool_name: "TaskCreate",
+    })), 2000, (ok, port, body, status) => resolve({ ok, port, body, status }));
+  });
+  assert.equal(permission.ok, true);
+  assert.equal(permission.port, h.port);
+  assert.equal(permission.status, 200);
+  assert.equal(JSON.parse(permission.body).hookSpecificOutput.decision.behavior, "allow");
 });
 
 test("rejected B cannot change, resolve, or dismiss pending A", async (t) => {
@@ -131,20 +195,22 @@ test("rejection does not wait for body bytes and missing media type is rejected"
 
 test("duplicate Host and Content-Type cannot hide a second authority or media type", async (t) => {
   const h = await setup(t);
-  for (const extra of ["Host: rebound.example", "Content-Type: text/plain"]) {
-    const response = await new Promise((resolve, reject) => {
-      const socket = net.connect(h.port, "127.0.0.1", () => {
-        socket.write(`POST /permission HTTP/1.1\r\nHost: 127.0.0.1:${h.port}\r\nContent-Type: application/json\r\n${extra}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+  for (const path of ["/state", "/permission"]) {
+    for (const extra of ["Host: rebound.example", "Content-Type: text/plain"]) {
+      const response = await new Promise((resolve, reject) => {
+        const socket = net.connect(h.port, "127.0.0.1", () => {
+          socket.write(`POST ${path} HTTP/1.1\r\nHost: 127.0.0.1:${h.port}\r\nContent-Type: application/json\r\n${extra}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+        });
+        let data = "";
+        socket.setEncoding("utf8");
+        socket.on("data", (chunk) => { data += chunk; });
+        socket.on("end", () => resolve(data));
+        socket.on("error", reject);
+        socket.setTimeout(2000, () => socket.destroy(new Error("raw request timed out")));
+        t.after(() => socket.destroy());
       });
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => { data += chunk; });
-      socket.on("end", () => resolve(data));
-      socket.on("error", reject);
-      socket.setTimeout(2000, () => socket.destroy(new Error("raw request timed out")));
-      t.after(() => socket.destroy());
-    });
-    assert.match(response, /^HTTP\/1\.1 400 /);
+      assert.match(response, /^HTTP\/1\.1 400 /);
+    }
   }
   assert.deepEqual(h.logs, []);
 });
@@ -168,6 +234,18 @@ test("authenticated SSH header, path and query ingress retain their separate con
     assert.equal(result.status, 200);
     assert.equal(JSON.parse(result.body).hookSpecificOutput.decision.behavior, "allow");
   }
+  const remoteState = await postPermission(port, {
+    agent_id: "claude-code",
+    session_id: "ssh-state",
+    state: "working",
+    event: "PreToolUse",
+  }, {
+    Host: "forwarded.fixture",
+    "Content-Type": "text/plain",
+    "x-clawd-routing-nonce": nonce,
+  }, "/state").response;
+  assert.equal(remoteState.status, 200);
+  assert.equal(h.updates.length, 1, "remote /state must bypass only the local header guard");
   for (const bad of ["", "b".repeat(32)]) {
     assert.equal((await postPermission(port, payload, { "x-clawd-routing-nonce": bad }).response).status, 404);
   }

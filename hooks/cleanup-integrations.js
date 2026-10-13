@@ -11,6 +11,7 @@ const { unregisterCursorHooks } = require("./cursor-install");
 const { unregisterCopilotHooks } = require("./copilot-install");
 const { unregisterCodeBuddyHooks } = require("./codebuddy-install");
 const { unregisterKiroHooks } = require("./kiro-install");
+const { unregisterKiroCrewHooks } = require("./kirocrew-install");
 const { unregisterKimiHooks } = require("./kimi-install");
 const { unregisterQwenCodeHooks } = require("./qwen-code-install");
 const { unregisterZcodeHooks } = require("./zcode-install");
@@ -22,6 +23,7 @@ const {
 const { unregisterOpencodePlugin } = require("./opencode-install");
 const { unregisterMimocodePlugin } = require("./mimocode-install");
 const { unregisterPiExtension } = require("./pi-install");
+const { resolveOmpAgentDir, unregisterOmpExtension } = require("./omp-install");
 const { unregisterOpenClawPlugin } = require("./openclaw-install");
 const { resolveHermesHome, unregisterHermesPlugin } = require("./hermes-install");
 const { unregisterQoderHooks } = require("./qoder-install");
@@ -31,6 +33,11 @@ const { unregisterQwenWorkHooks } = require("./qwenwork-install");
 const { unregisterWorkBuddyHooks } = require("./workbuddy-install");
 const { unregisterGrokHooks, resolveGrokConfigPath, resolveGrokHome } = require("./grok-install");
 const { unregisterTraeCodeHooks } = require("./traecode-install");
+const {
+  PLUGIN_DIR_NAME,
+  resolveMinimaxDataDir,
+  unregisterMinimaxPlugin,
+} = require("./minimax-install");
 const { unregisterDeepSeekHarness } = require("./dsh-install");
 
 const CODEX_MARKERS = ["codex-hook.js", "codex-debug-hook.js"];
@@ -44,6 +51,7 @@ const MANAGED_AGENT_IDS = Object.freeze([
   "copilot-cli",
   "codebuddy",
   "kiro-cli",
+  "kirocrew",
   "kimi-cli",
   "qwen-code",
   "zcode",
@@ -52,6 +60,7 @@ const MANAGED_AGENT_IDS = Object.freeze([
   "opencode",
   "mimocode",
   "pi",
+  "omp",
   "openclaw",
   "hermes",
   "qoder",
@@ -61,6 +70,7 @@ const MANAGED_AGENT_IDS = Object.freeze([
   "workbuddy",
   "grok-build",
   "traecode",
+  "minimax",
 ]);
 
 const AGENT_DISPLAY_NAMES = Object.freeze({
@@ -74,6 +84,7 @@ const AGENT_DISPLAY_NAMES = Object.freeze({
   workbuddy: "WorkBuddy",
   "grok-build": "Grok Build",
   "kiro-cli": "Kiro CLI",
+  kirocrew: "KiroCrew",
   "kimi-cli": "Kimi Code",
   "qwen-code": "Qwen Code",
   zcode: "ZCode",
@@ -82,6 +93,7 @@ const AGENT_DISPLAY_NAMES = Object.freeze({
   opencode: "opencode",
   mimocode: "MiMo Code",
   pi: "Pi",
+  omp: "OMP",
   openclaw: "OpenClaw",
   hermes: "Hermes Agent",
   qoder: "Qoder",
@@ -89,6 +101,7 @@ const AGENT_DISPLAY_NAMES = Object.freeze({
   qoderwork: "QoderWork",
   traecode: "TraeCode",
   qwenwork: "QwenWork",
+  minimax: "MiniMax Code",
 });
 
 function normalizeHomeDir(value) {
@@ -115,6 +128,11 @@ function buildTargetEnv(homeDir, options = {}) {
   } else if (options.ignoreInheritedDshHome) {
     delete env.DSH_HOME;
   }
+  if (typeof options.kirocrewHome === "string" && options.kirocrewHome.trim()) {
+    env.KIROCREW_HOME = path.resolve(options.kirocrewHome);
+  } else if (options.ignoreInheritedKiroCrewHome) {
+    delete env.KIROCREW_HOME;
+  }
   if ((options.platform || process.platform) === "win32") {
     env.LOCALAPPDATA = options.localAppData || path.join(homeDir, "AppData", "Local");
     env.APPDATA = options.appData || path.join(homeDir, "AppData", "Roaming");
@@ -140,12 +158,19 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
     : (options.env && typeof options.env.DSH_HOME === "string" && options.env.DSH_HOME.trim()
       ? options.env.DSH_HOME.trim()
       : null);
+  const explicitKiroCrewHome = typeof options.kirocrewHome === "string" && options.kirocrewHome.trim()
+    ? options.kirocrewHome.trim()
+    : (options.env && typeof options.env.KIROCREW_HOME === "string" && options.env.KIROCREW_HOME.trim()
+      ? options.env.KIROCREW_HOME.trim()
+      : null);
   const env = buildTargetEnv(homeDir, {
     ...options,
     dshHome: explicitDshHome,
+    kirocrewHome: explicitKiroCrewHome,
     ignoreInheritedHermesHome: explicitHomeDir && !options.hermesHome,
     ignoreInheritedReasonixHome: explicitHomeDir && !options.reasonixHome,
     ignoreInheritedDshHome: explicitHomeDir && !explicitDshHome,
+    ignoreInheritedKiroCrewHome: explicitHomeDir && !explicitKiroCrewHome,
   });
   const backup = options.backup !== false;
   const silent = options.silent !== false;
@@ -172,6 +197,10 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
     || path.join(openClawStateDir, "openclaw.json");
   const hermesHome = options.hermesHome
     || resolveHermesHome({ homeDir, env, platform: options.platform || process.platform });
+  const minimaxDataDir = resolveMinimaxDataDir(homeDir, env);
+  const kirocrewHome = env.KIROCREW_HOME && env.KIROCREW_HOME.trim()
+    ? env.KIROCREW_HOME.trim()
+    : path.join(homeDir, ".kiro", "crew");
 
   return {
     homeDir,
@@ -187,6 +216,8 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
         homeDir,
         env,
         dshHome: env.DSH_HOME || path.join(homeDir, ".dsh"),
+        // Test-only: keeps cleanup from discovering the real desktop app.
+        desktopDiscovery: options.dshDesktopDiscovery,
       },
       "gemini-cli": {
         ...common,
@@ -199,6 +230,7 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       },
       "cursor-agent": {
         ...common,
+        homeDir,
         hooksPath: path.join(homeDir, ".cursor", "hooks.json"),
       },
       "copilot-cli": {
@@ -214,6 +246,10 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       "kiro-cli": {
         ...common,
         agentsDir: path.join(homeDir, ".kiro", "agents"),
+      },
+      kirocrew: {
+        ...common,
+        hooksPath: path.join(kirocrewHome, "hooks.json"),
       },
       "kimi-cli": {
         ...common,
@@ -244,15 +280,29 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       },
       opencode: {
         ...common,
+        // #1026: managed generations live under the target home. Without
+        // homeDir the uninstaller would fall back to the real profile or be
+        // unable to locate the generation for cleanup.
+        homeDir,
+        managedRoot: options.managedRoot,
         configPath: path.join(homeDir, ".config", "opencode", "opencode.json"),
       },
       mimocode: {
         ...common,
+        homeDir,
+        managedRoot: options.managedRoot,
         configPath: path.join(homeDir, ".config", "mimocode", "mimocode.jsonc"),
       },
       pi: {
         ...common,
         parentDir: path.join(homeDir, ".pi", "agent"),
+      },
+      omp: {
+        ...common,
+        // Resolved through the installer's own resolver, like Grok below:
+        // a hardcoded default would remove a different directory than the one
+        // the install wrote whenever OMP's environment moves it.
+        parentDir: resolveOmpAgentDir({ homeDir, env }),
       },
       openclaw: {
         ...common,
@@ -308,6 +358,16 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
         ...common,
         hooksPath: path.join(homeDir, ".trae-cn", "hooks.json"),
       },
+      minimax: {
+        ...common,
+        // Same resolution the installer used — MINIMAX_DATA_DIR →
+        // MAVIS_DATA_DIR → ~/.minimax — so uninstalling from Settings or
+        // About cleanup always finds the directory install wrote, even when
+        // a custom data dir is configured. dataDir is where staging and removal
+        // directories go (beside `plugins/`, which MiniMax scans in full).
+        dataDir: minimaxDataDir,
+        pluginRoot: path.join(minimaxDataDir, "plugins", PLUGIN_DIR_NAME),
+      },
     },
   };
 }
@@ -355,6 +415,7 @@ const AGENT_CLEANERS = Object.freeze({
   "copilot-cli": unregisterCopilotHooks,
   codebuddy: unregisterCodeBuddyHooks,
   "kiro-cli": unregisterKiroHooks,
+  kirocrew: unregisterKiroCrewHooks,
   "kimi-cli": unregisterKimiHooks,
   "qwen-code": unregisterQwenCodeHooks,
   zcode: unregisterZcodeHooks,
@@ -363,6 +424,7 @@ const AGENT_CLEANERS = Object.freeze({
   opencode: unregisterOpencodePlugin,
   mimocode: unregisterMimocodePlugin,
   pi: unregisterPiExtension,
+  omp: unregisterOmpExtension,
   openclaw: unregisterOpenClawPlugin,
   hermes: unregisterHermesPlugin,
   qoder: unregisterQoderHooks,
@@ -372,6 +434,7 @@ const AGENT_CLEANERS = Object.freeze({
   workbuddy: unregisterWorkBuddyHooks,
   "grok-build": unregisterGrokHooks,
   traecode: unregisterTraeCodeHooks,
+  minimax: unregisterMinimaxPlugin,
 });
 
 function removedCountFromResult(result) {
@@ -435,6 +498,12 @@ async function cleanupIntegrations(options = {}) {
       notes: [],
       error: null,
       result: null,
+      // #1026 additive structured fields; other cleaners omit them entirely
+      // (undefined lets the About-cleanup commit fall back to status).
+      registrationRemoved: undefined,
+      activeEntryRemaining: undefined,
+      managedFilesRemoved: undefined,
+      residualPaths: [],
     };
 
     try {
@@ -483,9 +552,38 @@ async function cleanupIntegrations(options = {}) {
         agent.warnings = warningsFromResult(agentId, result);
         agent.notes = notesFromResult(agentId, result);
         agent.result = result;
+        if (result && (result.registrationRemoved === true || result.registrationRemoved === false || result.registrationRemoved === null)) {
+          agent.registrationRemoved = result.registrationRemoved;
+        }
+        if (result && (result.activeEntryRemaining === true || result.activeEntryRemaining === false || result.activeEntryRemaining === null)) {
+          agent.activeEntryRemaining = result.activeEntryRemaining;
+        }
+        if (result && typeof result.managedFilesRemoved === "boolean") {
+          agent.managedFilesRemoved = result.managedFilesRemoved;
+        }
+        if (result && Array.isArray(result.residualPaths)) {
+          for (const residualPath of result.residualPaths) {
+            if (typeof residualPath === "string" && residualPath) agent.residualPaths.push(residualPath);
+          }
+        }
+        // A buggy/legacy cleaner can return status "ok" while an active
+        // registration remains (#1026 r1 P0). Those structured signals are
+        // authoritative: the cleanup failed even if status says otherwise.
+        const registrationStillActive = result && (
+          result.registrationRemoved === false
+          || result.registrationRemoved === null
+          || result.activeEntryRemaining === true
+          || result.activeEntryRemaining === null
+        );
         if (result && result.status === "error") {
           agent.status = "failed";
           agent.error = result.message || `Failed to clean ${agent.displayName} integration`;
+          failed++;
+          if (changed || removed > 0) agentsAffected++;
+        } else if (registrationStillActive) {
+          agent.status = "failed";
+          agent.error = result.message
+            || `Failed to clean ${agent.displayName} integration: an active registration remains`;
           failed++;
           if (changed || removed > 0) agentsAffected++;
         } else if (changed || removed > 0) {

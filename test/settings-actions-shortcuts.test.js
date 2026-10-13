@@ -194,6 +194,7 @@ test("reset all rolls back an earlier persistent shortcut when a later one fails
   });
   const { deps, calls, registered } = makeDeps({
     snapshot,
+    platform: "win32",
     registered: [snapshot.shortcuts.togglePet, snapshot.shortcuts.quickSelectSession],
     failUnregister: new Set([snapshot.shortcuts.quickSelectSession]),
   });

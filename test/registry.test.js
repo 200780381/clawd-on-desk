@@ -16,6 +16,7 @@ describe("Agent Registry", () => {
       "cursor-agent",
       "codebuddy",
       "kiro-cli",
+      "kirocrew",
       "kimi-cli",
       "qwen-code",
       "zcode",
@@ -23,6 +24,7 @@ describe("Agent Registry", () => {
       "opencode",
       "mimocode",
       "pi",
+      "omp",
       "openclaw",
       "hermes",
       "qoder",
@@ -32,12 +34,13 @@ describe("Agent Registry", () => {
       "workbuddy",
       "traecode",
       "grok-build",
+      "minimax",
     ]);
   });
 
   it("should look up agents by ID", () => {
     assert.strictEqual(registry.getAgent("claude-code").name, "Claude Code");
-    assert.strictEqual(registry.getAgent("deepseek-harness").name, "DeepSeek Harness (web, experimental)");
+    assert.strictEqual(registry.getAgent("deepseek-harness").name, "DeepSeek Harness (experimental)");
     assert.strictEqual(registry.getAgent("codex").name, "Codex CLI");
     assert.strictEqual(registry.getAgent("copilot-cli").name, "Copilot CLI");
     assert.strictEqual(registry.getAgent("gemini-cli").name, "Gemini CLI");
@@ -57,6 +60,7 @@ describe("Agent Registry", () => {
     assert.strictEqual(registry.getAgent("workbuddy").name, "WorkBuddy");
     assert.strictEqual(registry.getAgent("traecode").name, "TraeCode");
     assert.strictEqual(registry.getAgent("grok-build").name, "Grok Build");
+    assert.strictEqual(registry.getAgent("minimax").name, "MiniMax Code");
     assert.strictEqual(registry.getAgent("nonexistent"), undefined);
   });
 
@@ -123,6 +127,11 @@ describe("Agent Registry", () => {
     assert.deepStrictEqual(traecode.processNames.win, ["Trae CN.exe", "trae cn.exe", "TraeCN.exe", "traecn.exe"]);
     assert.deepStrictEqual(traecode.processNames.mac, ["Trae", "trae"]);
     assert.deepStrictEqual(traecode.processNames.linux, ["trae", "Trae"]);
+
+    const minimax = registry.getAgent("minimax");
+    assert.deepStrictEqual(minimax.processNames.win, ["MiniMax Code.exe", "mcode.exe"]);
+    assert.deepStrictEqual(minimax.processNames.mac, ["MiniMax Code", "mcode"]);
+    assert.deepStrictEqual(minimax.processNames.linux, ["mcode", "MiniMax Code"]);
   });
 
   it("should include explicit Linux process names", () => {
@@ -271,6 +280,10 @@ describe("Agent Registry", () => {
       { win: [], mac: [], linux: [] }
     );
     assert.deepStrictEqual(
+      registry.getAgent("minimax").startupRecoveryProcessNames,
+      { win: [], mac: [], linux: [] }
+    );
+    assert.deepStrictEqual(
       registry.getAgent("pi").startupRecoveryProcessNames,
       { win: ["pi.exe"], mac: [], linux: [] }
     );
@@ -294,7 +307,7 @@ describe("Agent Registry", () => {
     const codex = registry.getAgent("codex");
     assert.strictEqual(codex.capabilities.httpHook, false);
     assert.strictEqual(codex.capabilities.permissionApproval, true);
-    assert.strictEqual(codex.capabilities.sessionEnd, false);
+    assert.strictEqual(codex.capabilities.sessionEnd, true);
     assert.strictEqual(codex.capabilities.subagent, false);
 
     const zcode = registry.getAgent("zcode");
@@ -579,6 +592,24 @@ describe("Agent Registry", () => {
     assert.strictEqual(traecode.eventMap.SessionEnd, undefined);
     assert.strictEqual(traecode.eventMap.PermissionRequest, undefined);
     assert.strictEqual(traecode.eventMap.PreCompact, undefined);
+
+    const minimax = registry.getAgent("minimax");
+    assert.strictEqual(minimax.eventSource, "hook");
+    assert.strictEqual(minimax.eventMap.SessionStart, "idle");
+    assert.strictEqual(minimax.eventMap.SessionEnd, "sleeping");
+    assert.strictEqual(minimax.eventMap.UserPromptSubmit, "thinking");
+    assert.strictEqual(minimax.eventMap.PreToolUse, "working");
+    assert.strictEqual(minimax.eventMap.PostToolUse, "working");
+    assert.strictEqual(minimax.eventMap.Stop, "attention");
+    assert.strictEqual(minimax.eventMap.SubagentStart, "juggling");
+    assert.strictEqual(minimax.eventMap.SubagentStop, "working");
+    assert.strictEqual(minimax.eventMap.PreCompact, "sweeping");
+    assert.strictEqual(minimax.eventMap.PostCompact, "thinking");
+    // Phase 1 is state-only: PermissionRequest is not registered at all
+    // (MiniMax's plugin-hook timeout budget makes blocking approval
+    // impossible) and there is no Notification event.
+    assert.strictEqual(minimax.eventMap.PermissionRequest, undefined);
+    assert.strictEqual(minimax.eventMap.Notification, undefined);
   });
 
   it("treats Gemini CLI as a hook-only agent", () => {
@@ -606,6 +637,22 @@ describe("Agent Registry", () => {
     assert.ok(traecode.hookConfig);
     assert.strictEqual(traecode.hookConfig.configFormat, "traecode-hooks-json");
     assert.strictEqual(traecode.logConfig, undefined);
+  });
+
+  it("treats MiniMax Code as a hook-only agent delivered through a local plugin", () => {
+    const minimax = registry.getAgent("minimax");
+
+    assert.strictEqual(minimax.eventSource, "hook");
+    assert.ok(minimax.hookConfig);
+    assert.strictEqual(minimax.hookConfig.configFormat, "minimax-plugin-hooks");
+    assert.strictEqual(minimax.logConfig, undefined);
+    // State-only Phase 1: no HTTP hook, no permission routing, no Notification.
+    assert.strictEqual(minimax.capabilities.httpHook, false);
+    assert.strictEqual(minimax.capabilities.permissionApproval, false);
+    assert.strictEqual(minimax.capabilities.interactiveBubble, false);
+    assert.strictEqual(minimax.capabilities.notificationHook, false);
+    assert.strictEqual(minimax.capabilities.sessionEnd, true);
+    assert.strictEqual(minimax.capabilities.subagent, false);
   });
 
   it("should have logEventMap for poll-based agents", () => {

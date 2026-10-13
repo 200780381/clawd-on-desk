@@ -2,6 +2,14 @@
 
 This document holds the state machine, theme system, UI runtime, and platform caveats that were previously embedded in the root `AGENTS.md`.
 
+## Linux AppImage Runtime Lifetime
+
+AppImage 的 FUSE wrapper 被提前终止时，Electron 仍可能在退出清理中读取挂载内的代码页，触发 SIGBUS（#1048）。Linux `afterPack` 用 `scripts/prepare-appimage-launcher.js` 在生成的 AppRun 路径导出之前接入 `build/appimage-launcher.sh`：仅 FUSE 启动先复制到本次独占、权限 0700 的 `$TMPDIR/clawd-appimage.XXXXXXXX/app`（未设置 TMPDIR 时用 `/tmp`），再启动 Electron。每次启动都需要一份解包大小的可执行临时空间，tmpfs 上会占用内存；复制失败不会启动半成品。空间不足或临时目录挂载为 `noexec` 时，可把 TMPDIR 指向其他可写、可执行的非 FUSE 目录，或手动解包运行。FUSE 的识别比较 `stat -f -c %t` 的 statfs 编号 `65735546`，不比较类型名（coreutils 9.6 起把 `fuseblk` 改报为 `fuse`）；守卫与 TMPDIR 检查必须用同一种判断。
+
+监督进程使用系统 Bash 和内存中的脚本，保留原始 `APPIMAGE`、参数、HOME、cwd 和 TMPDIR，只把 APPDIR 切到普通文件目录。主进程和同组子进程退出后删除本次目录；尚有子进程时最多等待 5 秒，再保留文件供系统临时目录策略处理。强杀监督进程可能留下该目录。自动 XWayland 重启与并发启动各用自己的目录；手动解包运行不再复制，deb、源码、macOS 和 Windows 的启动路径不变。监督进程关闭继承来的 errexit 和 job control（job control 会让 setsid fork，`$!` 不再指向应用），也不开启 nounset：SHELLOPTS 一旦处于导出状态，nounset 会传给 AppRun 模板，使其在没有默认值的变量处中止。shell 在 job control 关闭时后台启动 AppImage，且启动前没有重置 SIGINT 时，监督进程会继承「忽略 SIGINT」；这时发给启动/监督进程 PID 的 SIGINT 无法转发，请向该 PID 发 SIGTERM。
+
+打包产物检查同时验证 AppRun 的四个安全路径导出、守卫的精确内容及其位置早于路径导出，以及监督脚本的精确内容；Wayland smoke 的 `appimage-wrapper-termination` 场景先终止本次 FUSE wrapper、确认挂载消失且状态服务仍正常，再验证主进程正常退出与临时文件回收。WSL/X11 的通过不能替代 Bazzite/Wayland 原问题的用户复测。
+
 ## Dual-Window Model
 
 桌宠使用两个独立的顶层窗口：
@@ -19,27 +27,34 @@ Windows 的 hit window 在原生 activation controller 可用时按前台全屏�
 - 状态优先级：`error(8) > notification(7) > sweeping(6) > attention(5) > carrying/juggling(4) > working(3) > thinking(2) > idle(1) > sleeping(0)`
 - 最小显示时长：防止快速闪切（`error=5s`、`attention/notification=4s`、`carrying=3s`、`sweeping=2s`、`working/thinking=1s`）
 - 一次性状态：`attention/error/sweeping/notification/carrying` 显示后自动回退（`AUTO_RETURN_MS`）
+- Codex `PreCompact` 为清扫额外建立按对话的显示持有，普通其他对话活动不会提前切回工作；完成或同对话恢复活动后释放，再按完成提示的最小显示时长回退。丢失完成最多持有 10 分钟，headless 不持有，DND/禁用动画/审批锁保持原有语义。
 - 睡眠序列：20s 鼠标静止 → idle-look → 60s → yawning(3s) → dozing → 10min → collapsing(0.8s) → sleeping；鼠标移动触发 waking(1.5s) → 恢复
 - 逻辑 `idle` 与静置视觉分离：Settings 可为当前主题选择一个常驻 idle 变体，但不改变状态优先级；thinking / working / permission / completion / sleep / reaction / roam 仍会覆盖它，结束后再回到所选视觉
 - 逻辑状态与真正显示的视觉也彼此分离：所有 state、reaction、随机 idle、低功耗替换和回退都先生成带 `visualGeneration` 的显示请求；renderer 结算后，main 才提交 `{ displayState, file, hitBox, source, visualGeneration }`。原生 hit window、配饰投影与 Presence 只读这份 committed visual，输入窗口仍即时读取逻辑状态做反应门控
 - DND 模式：跳过 dozing，直接 yawning → collapsing → sleeping；同时屏蔽 hook 事件
 - 隐藏桌宠（petHidden，入口：托盘 / 右键菜单 / 快捷键）：语义是「看不见宠物」而非免打扰——隐藏时收起宠物、Session HUD、update bubble 和当时 pending 的权限气泡（恢复显示时回来），但隐藏期间新到的权限请求仍照常弹气泡，这是有意设计、不要当 bug 修；要连权限气泡都静默是 DND 的职责（它有回终端确认的 fallback）。Allow/Deny 全局快捷键跟随「可见气泡」：隐藏期间只要有可见气泡就保持注册，但只作用于可见的请求，收起的旧气泡不会被盲操作（#601）。petHidden 不持久化，重启恢复显示
 - Windows 全屏自动隐藏会同时收起桌宠与浮层，并压住全屏期间新到的本地权限请求；退出全屏只恢复仍 pending 且未被其他隐藏条件排除的请求。它不同于手动 petHidden 的新请求例外。隐藏本身不产生决定，远程审批通道与用户配置的 auto-close 仍按原合同运行。
-- working 子动画：Clawd 主题为 1 个会话 → typing，2 个 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building
-- juggling 子动画：1 个 subagent → juggling，2+ → conducting
+- working 子动画：Clawd 主题为 1 个会话 → typing，2 个 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作，Whale-chan（鲸鱼娘，可选安装）为今天也在努力呀 / 魔法添饭 / 雨天踩水
+- juggling 子动画：1 个 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作；Whale-chan：1+ → 魔法添饭）
 
 ## Theme System
 
 Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数都来自主题配置。
 
 - 内置主题目录：`themes/clawd/`、`themes/calico/`、`themes/cloudling/`；`themes/template/` 是脚手架模板
+- 官方可下载主题：Clawd 主仓库**不**打包 Hash Sage、Whale-chan 等官方主题的素材；设置页从固定远端 catalog（`https://raw.githubusercontent.com/rullerzhou-afk/clawd-themes/main/catalog-v1.json`）读取主题信息、受限到 `<theme-id>-art.pages.dev/progress/` 的动画展示页，以及一个不超过 1 MiB 的版本化预览图。卡片显示“查看动画”与安装操作，不显示许可摘要或许可链接；完整许可仍保留在 catalog、仓库与主题包中。预览图与主题包都由 Electron main 下载到本地并校验固定 bytes/SHA-256 后才以 `file:` URL 交给 renderer；renderer 不直接加载远程图片。完整主题安装到 `<userData>/themes/<id>/`，并以 **external theme**（`isBuiltin=false`）加载，`trustedRuntime` 不生效。主题包下载/解压只在用户显式点击后发生，首版不做一键更新、backup/rollback 或断点续传。下载用 Electron main `net.request`（继承系统代理/证书，但**不能**像 Codex Pet 那样 pin DNS 结果），因此以「初始 URL 精确 repo/path + 每跳精确 CDN host allowlist + HTTPS/TLS + 无凭据 + 固定 bytes/SHA-256 + manual redirect/no-store/no-referrer」收窄请求面；catalog 无权扩展 host allowlist，未支持 host 返回稳定 `DOWNLOAD_HOST_UNSUPPORTED`。主仓库另附带一份目录快照 `src/official-theme-catalog-snapshot.json`（打包进安装包）。回落规则：网络拉取失败时，列表先用上一次成功加载的目录（内存 LKG 或磁盘缓存），都没有才用快照；第一次拉取有结果之前（`uninitialized`）不用快照；快照**不作安装依据**，安装只认经校验的网络/磁盘目录，保证卡片显示的版本和实际安装的版本同源。快照**不含任何主题素材或预览图**，要过 `parseCatalogText` 校验，参与版本不能回退的比较，只读不写盘，界面仍按 `offline` 显示并提供重试
+- 官方主题的 manager 专属目录：下载 `.part` 位于 `<userData>/theme-downloads/official/`，解压 staging 位于 `<userData>/theme-staging/official/`，均不在 `themes/` 下；manager 写入的 `.clawd-official-theme.json` marker 在 staging 内、最终同卷 `rename` 之前写入并复验。启动清理只遍历这两个专属目录的直接子级、只处理严格合法且超过 24 小时的孤儿
+- 主题目录的点号直接子目录（staging/backup/lock 等）永远不是主题：`theme-loader._scanThemesDir`、`theme-metadata.scanMetadata` 与 `_readThemeJson` 的按 id 直接读取用同一个「非点号直接子目录」判定，因此点目录既不会被扫描、也不会被选择或直接读取
+- 主题 mutation 的统一 domain lock：`setThemeSelection`、通用 `removeTheme`、内部 `officialTheme.commitInstall` / `officialTheme.uninstall` 共用 `lockKey = "theme"`；destructive fs 操作前在锁内复检 active/target/lstat/marker。`activateTheme` 在 fade sequencer 完成前就返回，因此卸载 active 主题必须等待 `waitForThemeReloadSettled()`；sequencer 在 runtime 切换后同步抛错时走无淡入淡出 fallback 并返回成功
 - 用户主题目录：`<userData>/themes/<id>/theme.json`
+- `mirroredFiles`（顶层，`{ 原文件: 镜像显示用变体 }`）：只要运行时要把某个文件镜像画出（判定复用 `pet-accessory-mirror.js`：Mini 左边缘、向左漫游、走向左边缘的 crabwalk，也覆盖 `roamFlipAssets` / `miniMode.flipAssets` 反向绘制的主题），main 在 `requestDisplayedVisual` 生成显示请求时就换成变体，renderer、结算 ACK 与 committed visual 看到同一个文件；hitbox 仍按原文件解析（变体只改字纹）。漫游中途掉头不产生新 state，所以 `setRoamHeading` 在朝向真的变化、且当前 roam 文件有变体时，会重发一次 roam 显示请求
 - `theme.json` 必需状态：`idle`、`working`、`thinking`
-- `states.idle[0]` 是主题默认的 follow-idle；Settings 的“默认待机动画”选项来自该主题声明的 idle 状态与 idle animation pool，并按主题分别持久化到 `prefs.idleVisual`
+- `states.idle[0]` 是主题默认的 follow-idle；Settings 的“默认待机动画”选项依次来自 `states.idle`、`idleAnimations` 和可选的 `idleVisualOptions`（去重），并按主题分别持久化到 `prefs.idleVisual`。`idleVisualOptions` 只供用户选择，不进入随机待机池
 - 若启用 `eyeTracking.enabled`，`eyeTracking.states` 所列状态中的全部文件都必须是 SVG（`idleAnimations` 池不受此 schema 约束）；实际挂载眼追的文件还必须提供配置对应的追踪目标。逻辑 `idle` 只有 `states.idle[0]` 这个 follow-idle 会挂载眼追（模板的 legacy 目标是 `#eyes-js`），用户选择的非默认静置视觉不启用眼球跟随或 spin-to-dizzy
 - 若 `sleepSequence.mode` 为 `full`（默认），需提供 `yawning / dozing / collapsing / waking`；`direct` 可直接进入 `sleeping`
-- 若 `miniMode.supported` 为 true，需提供 8 个基础 mini 状态；`mini-working` 是可选增强，缺失时优雅跳过
+- 若 `miniMode.supported` 为 true，需提供 8 个基础 mini 状态；`mini-working`、`mini-peek-hold`、`mini-sleep-peek` 是可选增强，缺失时优雅降级
 - 能力缺失时走 `VISUAL_FALLBACK_STATES` 回退链
+- `thinking` / `working` / `juggling` 的视觉在每个 hook 事件都会经 `getSvgOverride` 重新解析。`states.thinking`、无 `workingTiers` 时的 `states.working`、无 `jugglingTiers` 时的 `states.juggling`，以及 tier 的 `files` 列出多个文件时随机抽一个；抽中结果由 `state-visual-resolver.js` 的 `createStableVisualPicker` 按状态保持：同一状态、同一候选列表下重复解析返回同一文件（否则每次工具调用都会换动画）。`applyState` 提交新状态时丢弃其他状态的抽签，候选列表变化（tier 随会话数 / 子代理数切换）或 `refreshTheme` 时重抽。tier 的 `files` 优先于 `file`；两者并存时 `file` 只供旧版本读取，并继续作为 Animation Override 的 tier 键。`displayHintMap` 命中时仍然优先
 - 默认配置集中在 `theme-loader.js` 顶部的 `DEFAULT_*` 常量；loader 保持 stateless，`src/theme-runtime.js` 是唯一 active-theme owner，主题 reload/sync/cache 不得另设模块级真相
 - 变体是白名单 deep-merge；数组和特定字段会整体替换
 - Animation override 是用户 per-slot 覆盖，和作者定义的 variants 正交
@@ -60,12 +75,80 @@ Clawd 是主题化桌宠：动画资源、计时、hitbox、眼球追踪参数�
 main 中的 displayed-visual projection 是文件、hitbox 和视觉来源的唯一权威。renderer 对每个仍有效的 request 恰好返回一个终结结果：正常加载为 `swapped`，当前文件已经显示为 `already-displayed`，实际显示了可投影的替代文件为 `fallback`，无法验证则为 `failed`；被后续请求取代的 generation 由 main 标为 `superseded`，renderer 不伪造 ACK。
 
 - renderer 的 object → img → accessory-settle 回退链必须先自行走完；main 的 9750ms settlement deadline 只是无 ACK 兜底
+- 显式 `restartAnimation: true` 请求绕过 renderer 的同文件复用，重播动画并走正常结算；超时重投递保留该标记。Codex 压缩完成用它重播与 `PreCompact` 相同的清扫文件，同时从完成事件重新计入最小显示时间；普通请求继续复用同文件。
 - 同一 logical visual 最多自动 re-request 一次；连续两个 request 都没有 ACK 时，同一 displayed-visual projection 实例最多尝试 reload 一次，失败也消耗预算。当前 main 只创建一个实例，因此该预算覆盖当前主进程寿命，不随 renderer reload 重置；独立 crash recovery 有自己的限制。visual timeout 本身不得循环 reload
 - 只有 `verified: true` 且实际 basename 合法的结果可提交；不可投影的 fallback 以 failed 终结，保留上一份 committed visual
 - reaction 也走 generation 合同，但不广播到 Presence；hit renderer 继续即时消费 logical state，不等待视觉 ACK
 - committed visual 到达后触发原生 hit-window 同步。拖拽锁、窗口未 live 或 Linux sliver 导致的 deferred sync，由 drag release、窗口恢复和现有 transition-end sweep 补做
 
 ## Settings Panel
+
+### Tabs and segmented choices
+
+Settings navigation uses `helpers.buildTabs({ id, ariaLabel | labelledBy, orientation,
+options, value, onChange })`. Options have `value`, `label`, and optional `disabled`;
+`renderLabel(button, option)` adds trusted icons or badges. The result exposes
+`element` (tablist), `panels` (a Map of stable panel shells), `getValue`, `setValue`,
+`setDisabled`, `focus`, and idempotent `dispose`. `setValue` never invokes `onChange`.
+Pages mount only their active panel's content and retain ownership of rendering,
+exit cleanup, drafts, persistence and scrolling. An existing `panels` Map may be
+passed when rebuilding only the sidebar, preserving the mounted page.
+
+Tabs use manual activation: arrows/Home/End move focus; Enter/Space/click activate.
+Horizontal tabs leave Up/Down available for scrolling; the vertical sidebar uses
+Up/Down. Disabled options are skipped. Focus and selection are separate; leaving
+the tablist resets its Tab entry to the selected available option. Each tab has a
+stable `aria-controls`/`aria-labelledby` panel relationship. Sidebar ownership is
+separate from content disposal; Animation Overrides owns its persistent subtab
+controller across local body refreshes and disposes it on full render/exit.
+
+Animation/Sound, Remote Approval and Recap share `helpers.createSubpageHost({
+disposeBody })`. Its `render(panel, renderBody, { scrollTop })` replaces only the
+active body, cleans up outgoing body controls, restores lost keyed focus, and
+preserves the current scroll position unless the page supplies another one.
+Pages dispose the host and their navigation controller on full render/exit;
+global content teardown still owns final mounted-control disposal. Navigation
+must remain outside body disposal. `dispose()` invalidates queued scroll work.
+Tabs offer `onBeforeChange(next, previous)` for capturing outgoing scroll before
+the previous panel is hidden; Animation/Sound uses it for per-subpage positions.
+Remote Approval retains its Channels-to-LAN credential/lookup cleanup.
+
+Recap periods remain radios. A period change captures the requested period and
+fences stale responses, retains the previous chart as inert/busy until new data
+arrives, then commits only the data body. A loading badge appears after 150 ms
+for slow queries; fast queries do not flash a placeholder. Query errors replace
+only the data body with retry UI. Background refreshes likewise leave page chrome
+and recording controls mounted; leaving the page invalidates outstanding queries
+and cancels loading/peek timers. No period preference or response cache is added.
+Recap grids initialize keyboard navigation at the current date/hour (falling back
+to the latest activity), and show a single cell focus ring only for keyboard
+focus. All non-placeholder cells share the same popover for pointer and keyboard
+inspection, including empty/unknown/future coverage states; native title tooltips
+are omitted. Blur, Escape and body disposal dismiss the popover.
+
+Enumerated values use the existing `buildSegmentedRadio`: Codex permission mode,
+Feishu platform and ID type, Recap period, and the General/approval choices. Add a
+stable `id` for focus restoration and an accessible name (`ariaLabel` or
+`labelledBy`). Arrows select immediately. `onChange` may return synchronously or
+asynchronously; false/rejection rolls back unless a newer `setValue` snapshot has
+arrived. `setPending` and `setDisabled` are independent. Pending radios retain
+focus with `aria-disabled` and suppress activation; business-disabled options use
+native disabled. Disposal invalidates asynchronous completions. Pages retain
+cross-render command gates (including Codex permission mode); the primitive does
+not persist settings. `onValueSync(value, element)` can update the Codex pill's CSS
+position alongside checked state, including rollback and snapshot updates.
+
+`requestRender` captures stable focus keys before replacing sidebar or content and
+restores only lost focus after modal rendering. Removed/disabled choices fall back
+to the group's selected available option, then its first enabled option. It must
+not steal focus from an input or dialog opened by the interaction.
+
+The choice inventory test rejects handwritten tabs and segmented controls in
+Settings business modules. Theme Card's existing radio role, Asset Picker's
+listbox selection, and Recap row highlighting are deliberate specialized
+exceptions; they are not part of the segmented contract. Native QA should cover
+keyboard/Accessibility Tree, light/dark, zoom, language, reduced motion, failed
+saves and rerendered focus separately from browser-environment unit tests.
 
 Settings 是独立 `BrowserWindow`，采用 5 层结构：
 
@@ -119,6 +202,8 @@ Settings 是独立 `BrowserWindow`，采用 5 层结构：
 - `checkMiniModeSnap()` 检查所有显示器右边缘
 - `miniIdleNow` 独立于 `idleNow`，只走眼球追踪，不走睡眠序列
 - `animateWindowX()` + `animateWindowParabola()` 负责滑动与抛物线动画
+- 醒着悬停立即切 `mini-peek`；其 autoReturn 到时若鼠标仍在，有 `mini-peek-hold` 则循环保持，否则回 `mini-idle`，两者均以 `miniPeeked` 防止重复探身。睡着悬停有 `mini-sleep-peek` 才切图；没有时只滑窗口。离开分别回 `mini-idle` / `mini-sleep`，关闭 DND 会让睡眠探身滑回并回 `mini-idle`
+- `miniMode.peek` 可选设置 `offsetRatio`（按当前窗口宽取整，默认固定 25px）、`delayMs`（默认 0）和 `durationMs`（默认 200，滑出滑回共用）；`miniMode.sleepPeek` 逐字段继承 `peek`，再回默认。缓动仍为 `t·(2−t)`。延迟期间离开、退出 mini、主题刷新、拖拽、菜单、mini 过渡或显示器变化会取消待执行滑动；滑动仍通过 mini 的窗口保护与 `finalizeMiniProtectionExit` 收尾。点击横向加宽读取实际滑动距离
 - `savePrefs()` 会持久化 `miniMode/preMiniX/preMiniY`
 
 Mini 状态映射：
@@ -128,20 +213,22 @@ Mini 状态映射：
 | `mini-idle` | `clawd-mini-idle.svg` | 待机：呼吸、眨眼、手臂晃动、眼球追踪 |
 | `mini-enter` | `clawd-mini-enter.svg` | 一次性滑入弹跳 |
 | `mini-peek` | `clawd-mini-peek.svg` | Hover 探头 |
+| `mini-peek-hold` | 主题可选 | `mini-peek` autoReturn 后仍悬停时循环保持；缺失则 `mini-idle` |
 | `mini-alert` | `clawd-mini-alert.svg` | 通知 |
 | `mini-happy` | `clawd-mini-happy.svg` | 完成 |
 | `mini-crabwalk` | `clawd-mini-crabwalk.svg` | 右键进入时的螃蟹步 |
 | `mini-enter-sleep` | `clawd-mini-enter-sleep.svg` | DND 下入场 |
 | `mini-sleep` | `clawd-mini-sleep.svg` | DND 休眠 |
+| `mini-sleep-peek` | 主题可选 | DND 休眠时悬停；缺失则保持 `mini-sleep` 画面 |
 | `mini-working` | 主题可选 | 1 会话 mini typing；缺失则静默跳过 |
 
 ## State To Animation Mapping
 
 权威表格见 `docs/guides/state-mapping.md`。这里只保留实现层面的补充：
 
-- working 子动画：Clawd 主题为 1 会话 → typing，2 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building
-- juggling 子动画：1 subagent → juggling，2+ → conducting
-- mini 状态有独立动画槽；`mini-working` 是可选能力
+- working 子动画：Clawd 主题为 1 会话 → typing，2 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作，Whale-chan（鲸鱼娘，可选安装）为今天也在努力呀 / 魔法添饭 / 雨天踩水
+- juggling 子动画：1 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作；Whale-chan：1+ → 魔法添饭）
+- mini 状态有独立动画槽；`mini-working`、`mini-peek-hold`、`mini-sleep-peek` 是可选能力
 - 睡眠序列和 DND 行为见上面的 State Machine
 - `attention / error / sweeping / notification / carrying` 是一次性状态，显示后按 `autoReturn` 回退
 
@@ -158,7 +245,7 @@ Mini 状态映射：
 
 ### Session History（本机 Claude 手动继续）
 
-- 普通 Dashboard 在 live cards 下方展示独立历史区，最多 25 条；历史不参与 quick-select 数字映射。显示标题 / session ID、目录 basename、最近时间与可选中断 / transcript 缺失提示，不展示完整路径或对话内容。有历史但无 live 会话时空状态改为紧凑布局，不能占满整屏把恢复按钮推到首屏之外。
+- 普通 Dashboard 在 live cards 下方展示独立历史区，主列表最多 25 条已确认可恢复的行，未确认可恢复的行进默认收起的折叠组（「显示另外 {n} 条未确认可恢复的会话」）；历史不参与 quick-select 数字映射。显示标题（无标题时标题位显示完整 session ID）、目录 basename、最近时间与可选中断 / transcript 缺失提示，meta 行始终带 session ID 前 8 位，不展示完整路径或完整对话内容；没有显式标题时按 live prompt 标题同一规则从已确认 transcript 的第一条用户输入生成标题，只用于显示、不写入历史记录。有历史但无 live 会话时空状态改为紧凑布局，不能占满整屏把恢复按钮推到首屏之外。
 - 恢复中禁点由 main 持有，页面缓存只负责显示；提交终端后继续等待真实 live snapshot，不立即移除卡片或声称成功。30 秒未观察到会话时提示先检查终端，并允许手动重试；已知启动失败立即显示错误且保留原卡。
 - 历史在初始加载和 live 集合变化时重读，1 秒 UI tick 不读磁盘。加载期间的新失效通知必须排队重读；渲染时再次过滤当前本机 live ID，避免迟到历史回包让已恢复的卡片复活。存储、隐私与运行时边界见 `agent-runtime-architecture.md` 的 Local Claude Session History。
 
