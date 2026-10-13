@@ -2,6 +2,8 @@
 
 const crypto = require("crypto");
 const path = require("path");
+const { i18n } = require("./i18n");
+const { isCodexDesktopOriginator } = require("../hooks/codex-originator");
 const { sessionAliasKey } = require("./session-alias");
 const { getSessionFocusTarget } = require("./session-focus");
 const {
@@ -10,8 +12,6 @@ const {
 } = require("./state-session-dedupe");
 const { bareCodexSessionId, readCodexThreadName, readCodexThreadNames } = require("../hooks/codex-session-index");
 const { isWslSourced } = require("./remote-process-metadata");
-const { isCodexDesktopOriginator } = require("../hooks/codex-originator");
-const { i18n } = require("./i18n");
 
 // ── Session source derivation ────────────────────────────────────────
 
