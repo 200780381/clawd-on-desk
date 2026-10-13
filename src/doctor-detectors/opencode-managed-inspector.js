@@ -381,7 +381,116 @@ function inspectManagedOpencode(descriptor, options = {}) {
     }
   }
 
+  // Health on a detected opencode v2 host is judged from the `plugins` key: on
+  // v2 Clawd registers ONLY that key, and any legacy `plugin` entry is leftover
+  // (opencode 2.x runs the same strict loader on it, so a v1 function entry
+  // surfaces as "Plugin failed: <path>" / id `-`). Returns null when the config
+  // has no Clawd evidence at all, so the shared not-connected handling below
+  // still applies.
+  function inspectV2HostPrimary() {
+    // Any Clawd v1 `plugin` entry anywhere (effective or masked) is leftover on
+    // a v2 host: opencode 2.x rejects the function entry and Repair sweeps it.
+    const v1Entries = [];
+    for (const state of existing) {
+      if (!hasPluginArray(state)) continue;
+      v1Entries.push(...entryOwnership.classifyPluginEntries(state.tree.plugin, makeContext()).entries);
+    }
+    const v1Blocking = v1Entries.filter((entry) => FAIL_CLOSED.has(entry.category));
+    const v1Owned = v1Entries.filter((entry) => SAFE_CATEGORIES.has(entry.category));
+    const v2Missing = !v2Assessment || v2Assessment.state === "missing";
+    if (!v1Blocking.length && !v1Owned.length && v2Missing) return null;
+    const baseFields = {
+      parentDirExists: true,
+      configFileExists: true,
+      configPath: effective.path,
+      opencodeEntries: v1Entries.map((entry) => entry.rawEntry),
+      v2Entries: v2Assessment ? v2Assessment.entries || [] : [],
+    };
+    if (v1Blocking.length) {
+      return makeResult(descriptor, "needs-review", {
+        level: "warning",
+        ...baseFields,
+        detail: `${effective.path} legacy "plugin" entry needs manual review: ${v1Blocking.map(describeEntry).join("; ")}`,
+        opencodeEntryIssue: v1Blocking[0].category,
+        opencodeRemediation: v1Blocking.map((entry) => ({
+          category: entry.category,
+          reason: entry.reason || null,
+          remediation: entryOwnership.describeRemediation(entry, effective.path),
+        })),
+      });
+    }
+    const leftover = v1Owned.length
+      ? `; ${v1Owned.length} leftover legacy v1 plugin entr${v1Owned.length === 1 ? "y" : "ies"} remain and Repair removes ${v1Owned.length === 1 ? "it" : "them"}`
+      : "";
+    if (v2Missing) {
+      return makeResult(descriptor, "legacy-path", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "missing",
+        legacyEntries: v1Owned.map((entry) => entry.rawEntry),
+        detail: `${effective.path} opencode v2 entry is not registered${v2Assessment ? ` (${v2Assessment.detail})` : ""}; Repair registers it and removes the leftover v1 entry`,
+      });
+    }
+    if (v2Assessment.state === "needs-review") {
+      return makeResult(descriptor, "needs-review", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "needs-review",
+        detail: `${effective.path} v2 entry needs manual review: ${v2Assessment.detail}`,
+      });
+    }
+    if (v2Assessment.state === "duplicate") {
+      return makeResult(descriptor, "duplicate-entry", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "duplicate",
+        detail: `${effective.path} declares duplicate v2 plugins-key entries: ${v2Assessment.detail}`,
+      });
+    }
+    if (v2Assessment.state === "stale") {
+      return makeResult(descriptor, "broken-path", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "stale",
+        detail: `${effective.path} v2 plugins-key entry can be safely migrated (${v2Assessment.detail})${leftover}`,
+      });
+    }
+    if (v1Owned.length) {
+      return makeResult(descriptor, "duplicate-entry", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "ok",
+        legacyEntries: v1Owned.map((entry) => entry.rawEntry),
+        detail: `${effective.path} v2 plugins-key entry verified, but ${v1Owned.length} leftover legacy v1 plugin entr${v1Owned.length === 1 ? "y" : "ies"} remain (opencode 2.x rejects them); Repair removes ${v1Owned.length === 1 ? "it" : "them"}`,
+      });
+    }
+    return makeResult(descriptor, "ok", {
+      level: null,
+      ...baseFields,
+      v2EntryState: "ok",
+      detail: `${effective.path} v2 plugins-key entry verified`,
+    });
+  }
+
+  if (v2Host === "v2" && cfg.v2PluginDirName) {
+    const v2Primary = inspectV2HostPrimary();
+    if (v2Primary) return v2Primary;
+  }
+
   if (!hasPluginArray(effective)) {
+    // A v1/unknown host with a leftover Clawd v2 entry is repairable (opencode
+    // <= 1.18.15 rejects the whole config), never a silent not-connected.
+    if (v2Host === "v1" && v2Assessment && v2Assessment.state === "ok") {
+      return makeResult(descriptor, "broken-path", {
+        level: "warning",
+        parentDirExists: true,
+        configFileExists: true,
+        configPath: effective.path,
+        v2EntryState: "leftover",
+        v2Entries: v2Assessment.entries || [],
+        detail: `${effective.path} has no Clawd v1 plugin entry, but a Clawd v2 plugins-key entry remains and no opencode v2 host was detected (opencode <= 1.18.15 rejects the key); Repair removes it and registers the v1 entry`,
+      });
+    }
     // No effective plugin array. If a valid canonical generation is lying
     // around unreferenced, warn without claiming correctness.
     const residual = generationResidual(target, cfg, agentId, fsImpl);

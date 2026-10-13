@@ -298,11 +298,15 @@ describe("opencode installer CLI entry (node hooks/opencode-install.js)", () => 
     fs.mkdirSync(configDir, { recursive: true });
     const configPath = path.join(configDir, "opencode.json");
 
-    // The dual-key contract below needs a v2 verdict in the CLI child; pin it
-    // so CI machines without an opencode binary stay deterministic.
+    // The v2 verdict below needs to be pinned in the CLI child so CI machines
+    // without an opencode binary stay deterministic.
     const out = runCli([], home, { CLAWD_OPENCODE_HOST: "v2" });
     assert.match(out, /Registered: /);
-    const registered = readConfig(configPath).plugin;
+    const config = readConfig(configPath);
+    // opencode 2.x registers ONLY the `plugins` key; the legacy `plugin` key is
+    // left free of the v1 function entry opencode 2.x rejects.
+    assert.ok(!Object.hasOwn(config, "plugin") || config.plugin.length === 0, "v1 key is not registered on a v2 host");
+    const registered = config.plugins;
     assert.strictEqual(registered.length, 1);
     // #1026: packaged/source paths are no longer registered directly. The
     // entry must point at a user-writable content-addressed managed generation
@@ -311,15 +315,15 @@ describe("opencode installer CLI entry (node hooks/opencode-install.js)", () => 
       registered[0].includes("/.clawd/integrations/opencode-family/opencode/homes/"),
       `expected managed generation path, got ${registered[0]}`
     );
-    assert.ok(/\/generations\/[0-9a-f]{64}\/opencode-plugin$/.test(registered[0]), registered[0]);
+    assert.ok(/\/generations\/[0-9a-f]{64}\/opencode-plugin-v2$/.test(registered[0]), registered[0]);
     assert.ok(fs.existsSync(path.join(registered[0].replace(/\//g, path.sep))), "generation plugin dir must exist");
 
     const out2 = runCli(["--uninstall"], home);
-    // #1039: both generation entries are swept — the v1 `plugin` entry and the
-    // v2 `plugins` entry.
-    assert.match(out2, /entries removed: 2/);
-    assert.deepStrictEqual(readConfig(configPath).plugin, []);
-    assert.strictEqual(Object.hasOwn(readConfig(configPath), "plugins"), false);
+    // On a v2 host only the v2 `plugins` entry exists; uninstall sweeps it.
+    assert.match(out2, /entries removed: 1/);
+    const after = readConfig(configPath);
+    assert.deepStrictEqual(after.plugins || [], []);
+    assert.ok(!Object.hasOwn(after, "plugin") || after.plugin.length === 0);
   });
 
   it("skips politely when opencode is not installed (exit 0, no config created)", () => {
