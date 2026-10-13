@@ -307,8 +307,8 @@ function sessionDisplayTitle(id, sessionLike, sessionAliases = {}, options = {})
   if (alias && typeof alias.title === "string" && alias.title) return alias.title;
   const title = getEffectiveSessionTitle(id, sessionLike, options);
   if (title) return title;
-  // An unnamed Desktop thread is still a separate session. Label it without
-  // borrowing prompt content or presenting its working directory as a chat name.
+  // An unnamed Desktop thread is still a separate session. Keep its project
+  // context plus a stable tag without borrowing prompt content as a chat name.
   // Official child state is normalized to headless before reaching snapshots.
   const source = sessionLike && sessionLike.codexSource;
   const sourceName = typeof source === "string" ? source.trim().toLowerCase() : "";
@@ -321,6 +321,8 @@ function sessionDisplayTitle(id, sessionLike, sessionAliases = {}, options = {})
     && !["cli", "codex-cli", "codex-tui", "exec", "internal", "subagent", "agent-subagent"].includes(sourceName)) {
     const tag = buildDisplaySessionTag(id);
     if (tag) {
+      const folder = normalizeTitle(sessionDisplayFolder(id, sessionLike));
+      if (folder) return `${folder} · ${tag}`;
       const translated = typeof options.t === "function" ? options.t("sessionCodexUntitled") : null;
       const template = typeof translated === "string" && translated.includes("{tag}")
         ? translated : i18n.en.sessionCodexUntitled;

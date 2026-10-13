@@ -41,7 +41,7 @@ describe("Codex Desktop untitled display fallback", () => {
     assert.equal(snapshot.sessions.length, 2);
     assert.notEqual(snapshot.sessions[0].displayTitle, snapshot.sessions[1].displayTitle);
     for (const entry of snapshot.sessions) {
-      assert.equal(entry.displayTitle, `Codex chat · ${buildDisplaySessionTag(entry.id)}`);
+      assert.equal(entry.displayTitle, `project · ${buildDisplaySessionTag(entry.id)}`);
       assert.equal(entry.sessionTitle, null, "a display label is not a native chat title");
       assert.equal(entry.displayFolder, "project");
       assert.equal(entry.cwd, "C:\\workspace\\project");
@@ -84,7 +84,7 @@ describe("Codex Desktop untitled display fallback", () => {
     for (const transcriptPath of [null, "C:\\synthetic\\rollout.jsonl"]) {
       const entry = desktop({ transcriptPath });
       Object.defineProperty(entry, "prompt", { get() { throw new Error("prompt must not be read"); } });
-      assert.equal(sessionDisplayTitle(idA, entry, {}, options), `Codex chat · ${tag}`);
+      assert.equal(sessionDisplayTitle(idA, entry, {}, options), `project · ${tag}`);
     }
     assert.equal(sessionDisplayTitle(idA, desktop({ codexOriginator: null }), {}, options), "project");
   });
@@ -94,12 +94,23 @@ describe("Codex Desktop untitled display fallback", () => {
     let lang = "zh";
     const t = createTranslator(() => lang);
     for (lang of SUPPORTED_LANGS) {
-      const label = sessionDisplayTitle(idA, desktop(), {}, { ...options, t });
+      const label = sessionDisplayTitle(idA, desktop({ cwd: "" }), {}, { ...options, t });
       assert.equal(label, i18n[lang].sessionCodexUntitled.replace("{tag}", tag));
       assert.ok(label.endsWith(tag));
     }
     lang = "zh";
-    assert.equal(sessionDisplayTitle(idA, desktop(), {}, { ...options, t }), `Codex 对话 · ${tag}`);
+    assert.equal(sessionDisplayTitle(idA, desktop({ cwd: "" }), {}, { ...options, t }), `Codex 对话 · ${tag}`);
+  });
+
+  it("keeps folder-based labels stable across language changes and sanitizes the project text", () => {
+    const tag = buildDisplaySessionTag(idA);
+    for (const lang of SUPPORTED_LANGS) {
+      assert.equal(sessionDisplayTitle(idA, desktop(), {}, { ...options, t: createTranslator(() => lang) }), `project · ${tag}`);
+    }
+    const long = "a".repeat(120);
+    const label = sessionDisplayTitle(idA, desktop({ cwd: `C:\\fixture\\${long}` }), {}, options);
+    assert.equal(label, `${"a".repeat(79)}… · ${tag}`);
+    assert.equal(sessionDisplayTitle(idA, desktop({ cwd: "C:\\fixture\\ab\u202ecd" }), {}, options), `ab cd · ${tag}`);
   });
 
   for (const [label, overrides] of [
@@ -142,7 +153,7 @@ function renderRow(entry, feedback = "", language = "zh") {
     return match[0];
   }).join("\n");
   const element = () => ({
-    children: [], className: "", classList: { add() {} }, dataset: {},
+    children: [], className: "", classList: { add() {} }, dataset: {}, style: {},
     appendChild(child) { this.children.push(child); }, setAttribute() {}, addEventListener() {},
   });
   const context = {
@@ -162,7 +173,7 @@ describe("compact HUD fallback suffix", () => {
     for (const entry of snapshot.sessions) {
       const title = renderRow(entry);
       assert.equal(title.children[1].className, "title-fallback-tag");
-      assert.equal(title.children[1].textContent, entry.displaySessionTag);
+      assert.equal(title.children[1].textContent, ` · ${entry.displaySessionTag}`);
       assert.equal(title.children.map((child) => child.textContent).join(""), entry.displayTitle);
       assert.equal(title.title, entry.displayTitle);
     }
@@ -178,7 +189,7 @@ describe("compact HUD fallback suffix", () => {
       { displayTitle: label, displaySessionTag: tag, hasAlias: true },
       { displayTitle: "Ordinary chat title" },
     ]) {
-      const title = renderRow({ ...entry, id: idA, canFocus: true });
+      const title = renderRow({ agentId: "codex", displayFolder: "project", ...entry, id: idA, canFocus: true });
       assert.equal(title.children.length, 0);
       assert.ok(title.textContent);
     }
@@ -208,7 +219,7 @@ describe("settings language change for an idle untitled Desktop row", () => {
     };
     ctx.t = createTranslator(() => ctx.lang);
     const state = require("../src/state")(ctx);
-    const idle = desktop({ state: "idle", lastStopAt: 1234, recentEvents: [{ event: "Stop", at: 1234 }] });
+    const idle = desktop({ cwd: "", state: "idle", lastStopAt: 1234, recentEvents: [{ event: "Stop", at: 1234 }] });
     Object.defineProperty(idle, "prompt", { get() { throw new Error("language refresh must not read prompt"); } });
     state.sessions.set(idA, idle);
     const before = JSON.stringify(idle);
@@ -235,7 +246,7 @@ describe("settings language change for an idle untitled Desktop row", () => {
       state.emitSessionSnapshot({ force: true });
       const initial = delivered.at(-1).sessions[0];
       const tag = initial.displaySessionTag;
-      assert.equal(renderRow(initial, "", rendererLang).children[1].textContent, tag);
+      assert.equal(renderRow(initial, "", rendererLang).children[1].textContent, ` · ${tag}`);
       for (const lang of ["zh", "ja"]) {
         calls.length = 0;
         const count = delivered.length;
@@ -244,7 +255,7 @@ describe("settings language change for an idle untitled Desktop row", () => {
         assert.equal(delivered.length, count + 1);
         const entry = delivered.at(-1).sessions[0];
         assert.equal(entry.displayTitle, i18n[lang].sessionCodexUntitled.replace("{tag}", tag));
-        assert.equal(renderRow(entry, "", rendererLang).children[1].textContent, tag);
+        assert.equal(renderRow(entry, "", rendererLang).children[1].textContent, ` · ${tag}`);
         for (const field of ["id", "rawSessionId", "displaySessionTag", "updatedAt", "state", "badge", "lastEvent", "cwd", "focusTarget"]) {
           assert.deepEqual(entry[field], initial[field], field);
         }

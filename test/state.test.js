@@ -4664,7 +4664,7 @@ describe("buildSessionSnapshot", () => {
   });
   afterEach(() => api.cleanup());
 
-  it("localizes the untitled Desktop label and retains a formal title without new activity", () => {
+  it("keeps the untitled Desktop project label across languages and retains a formal title without new activity", () => {
     const id = "codex:00000000-0000-4000-8000-000000000009";
     update(api, {
       id, state: "working", event: "PreToolUse", agentId: "codex",
@@ -4673,10 +4673,10 @@ describe("buildSessionSnapshot", () => {
     const live = api.sessions.get(id);
     const before = JSON.stringify(live);
     const initial = api.buildSessionSnapshot().sessions[0];
-    assert.strictEqual(initial.displayTitle, `Codex chat · ${initial.displaySessionTag}`);
+    assert.strictEqual(initial.displayTitle, `project · ${initial.displaySessionTag}`);
     assert.strictEqual(live.sessionTitle, null);
     ctx.lang = "zh";
-    assert.strictEqual(api.buildSessionSnapshot().sessions[0].displayTitle, `Codex 对话 · ${initial.displaySessionTag}`);
+    assert.strictEqual(api.buildSessionSnapshot().sessions[0].displayTitle, `project · ${initial.displaySessionTag}`);
     assert.strictEqual(JSON.stringify(live), before, "language/display changes cannot refresh activity or persistence fields");
 
     assert.strictEqual(api.updateSessionMetadata(id, { sessionTitle: "Native title", expectedAgentId: "codex" }), true);

@@ -190,7 +190,13 @@ body { padding: 2px 3px 8px; }
   font-weight: 500;
 }
 
-.title-tagged-fallback { display: flex; }
+.row.row-tagged-fallback { gap: 4px; }
+.row .left.left-tagged-fallback { min-width: min-content; gap: 4px; }
+.title-tagged-fallback {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  min-width: min-content;
+}
 .title-fallback-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .title-fallback-tag { flex: 0 0 auto; }
 
@@ -230,6 +236,8 @@ body { padding: 2px 3px 8px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.right-tagged-fallback { display: grid; gap: 3px; }
 
 .state-chip {
   flex: 0 0 auto;

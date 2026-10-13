@@ -66,7 +66,9 @@ function untitledCodexTag(session) {
   const tag = session.displaySessionTag;
   if (session.agentId !== "codex" || session.hasAlias || session.sessionTitle || typeof tag !== "string"
     || !/^[0-9a-f]{10}$/.test(tag)) return "";
-  return session.displayTitle === t("sessionCodexUntitled").replace("{tag}", tag) ? tag : "";
+  return typeof session.displayTitle === "string"
+    && session.displayTitle !== session.displayFolder
+    && session.displayTitle.endsWith(` · ${tag}`) ? tag : "";
 }
 
 function titleUnits(value) {
@@ -298,14 +300,18 @@ function createRowForSession(session, now) {
   title.className = feedbackText ? "title session-inline-feedback" : "title";
   const fallbackTag = !feedbackText && untitledCodexTag(session);
   if (fallbackTag) {
-    // Keep the identity suffix visible when the compact HUD clips the label.
+    // Reserve the entire separator/tag, yielding project text and elapsed time
+    // first when the compact HUD cannot fit every secondary field.
     title.classList.add("title-tagged-fallback");
+    left.classList.add("left-tagged-fallback");
+    row.classList.add("row-tagged-fallback");
+    const suffix = ` · ${fallbackTag}`;
     const label = document.createElement("span");
     label.className = "title-fallback-label";
-    label.textContent = fullTitle.slice(0, -fallbackTag.length);
+    label.textContent = fullTitle.slice(0, -suffix.length);
     const tag = document.createElement("span");
     tag.className = "title-fallback-tag";
-    tag.textContent = fallbackTag;
+    tag.textContent = suffix;
     title.appendChild(label);
     title.appendChild(tag);
     title.title = fullTitle;
@@ -409,7 +415,16 @@ function createRowForSession(session, now) {
   }
 
   row.appendChild(left);
-  if (hasRightContent) row.appendChild(right);
+  if (hasRightContent) {
+    if (fallbackTag) {
+      // The elapsed column contributes zero to the grid's intrinsic floor;
+      // mandatory chips retain their complete width while time can ellipsize.
+      right.classList.add("right-tagged-fallback");
+      right.style.gridTemplateColumns = Array.from(right.children, (child) =>
+        child.className === "elapsed" ? "minmax(0, 1fr)" : "max-content").join(" ");
+    }
+    row.appendChild(right);
+  }
 
   row.addEventListener("click", () => {
     unreadSessions.delete(session.id);
