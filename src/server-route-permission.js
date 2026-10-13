@@ -162,6 +162,23 @@ function shouldInterceptCodexPermission(ctx, data) {
     && ctx.isCodexPermissionInterceptEnabled();
 }
 
+// Auto hands remote and WSL shell/file requests back to Codex because their
+// transcript is not readable here. When the user's global automation would
+// allow such a request on the spot, Clawd answers it instead, as Intercept
+// did before Auto (#1186). Only the nonlocal reason qualifies: a local
+// automatic reviewer was chosen in Codex and stays in charge. Anything that
+// would wait for a human still goes to Codex, and MCP/app requests stay
+// native because they can carry their own reviewer.
+function shouldClaimCodexPermissionForAutomation(ctx, data, probe) {
+  if (data.tool_name !== "Bash" && data.tool_name !== "apply_patch") return false;
+  if (typeof ctx.getCodexPermissionMode !== "function"
+    || ctx.getCodexPermissionMode() !== "auto") return false;
+  if (typeof ctx.wouldAutoAllowPermission !== "function") return false;
+  if (shouldBypassCodexBubble(ctx)) return false;
+  if (resolveCodexApprovalRoute(data).reason !== "nonlocal") return false;
+  return ctx.wouldAutoAllowPermission(probe) === true;
+}
+
 function shouldMuteCodexNativeNotificationSound(ctx) {
   if (typeof ctx.isCodexNativeNotificationSoundEnabled !== "function") return false;
   return ctx.isCodexNativeNotificationSoundEnabled() === false;
@@ -1283,7 +1300,23 @@ function handlePermissionPost(req, res, options) {
           return;
         }
 
-        if (!shouldInterceptCodexPermission(ctx, data)) {
+        const codexAutomationClaim = shouldClaimCodexPermissionForAutomation(ctx, data, {
+          agentId: "codex",
+          isCodex: true,
+          codexAutoManual: true,
+          toolName,
+          toolInput,
+          ...permissionReminder,
+          interaction,
+          sessionId,
+          ...trustedSessionFields(sessionIdentity),
+          sessionAutomationIdentity,
+          codexInteractiveSubagent: isCodexSubagent,
+          headless: data.headless === true,
+        });
+        if (codexAutomationClaim) {
+          ctx.permLog(`codex auto mode: global automation claims delegated request (tool=${toolName})`);
+        } else if (!shouldInterceptCodexPermission(ctx, data)) {
           codexSessionOptions = resolveCodexSessionProcessMetadata();
           const nativeSessionOptions = { ...codexSessionOptions };
           if (shouldMuteCodexNativeNotificationSound(ctx)) {
@@ -1332,6 +1365,7 @@ function handlePermissionPost(req, res, options) {
           codexAutoManual: typeof ctx.getCodexPermissionMode === "function"
             && ctx.getCodexPermissionMode() === "auto",
           codexInteractiveSubagent: isCodexSubagent,
+          codexAutomationClaim,
           headless: data.headless === true,
           codexSessionRole: codexSessionOptions.codexSessionRole || null,
           codexAgentNickname: codexSessionOptions.codexAgentNickname || null,

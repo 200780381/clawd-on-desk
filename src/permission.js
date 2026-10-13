@@ -2592,6 +2592,32 @@ function buildAutoApproveElicitationAnswers(toolInput) {
   return answers;
 }
 
+// Codex Auto routing hands remote/WSL requests back to Codex because their
+// transcript is not readable here. A user who turned on global automation
+// still expects Clawd to allow those tool requests, as Intercept did before
+// Auto (#1186). The route asks this
+// before claiming such a request: only an immediate global auto-allow
+// qualifies. Session overrides and interactive subagents need the live gate
+// on a real pending entry, and a held or deferred request must stay with
+// Codex rather than open a bubble Auto promised not to show.
+function wouldAutoAllowPermission(permEntry) {
+  if (!permEntry || isPassiveNotifyEntry(permEntry)) return false;
+  if (typeof ctx.getEffectivePermissionAutomationMode !== "function"
+    && typeof ctx.getPermissionAutomationMode !== "function") return false;
+  if (typeof ctx.hasSessionAutomationOverride === "function"
+    && ctx.hasSessionAutomationOverride(permEntry)) return false;
+  if (isInteractiveCodexSubagentEntry(permEntry)) return false;
+  const mode = typeof ctx.getEffectivePermissionAutomationMode === "function"
+    ? ctx.getEffectivePermissionAutomationMode(permEntry, { sessionOnly: false })
+    : ctx.getPermissionAutomationMode();
+  return evaluatePermissionAutomation({
+    mode,
+    interaction: permEntry.interaction,
+    entry: permEntry,
+    reminderHold: permissionReminderHolds(permEntry),
+  }) === AUTOMATION_ACTION.AUTO_ALLOW;
+}
+
 function maybeAutoApprovePermission(permEntry) {
   if (!permEntry) return false;
   if (isPassiveNotifyEntry(permEntry)) return false;
@@ -2680,6 +2706,18 @@ function handlePermissionBubbleFailure(permEntry, reason) {
 function showPermissionBubble(permEntry) {
   // Auto-pilot: if enabled, approve immediately and never render a bubble.
   if (maybeAutoApprovePermission(permEntry)) return;
+  // Claimed only for automation (see wouldAutoAllowPermission). If settings
+  // changed since the route asked, give the request back to Codex.
+  if (permEntry.codexAutomationClaim === true) {
+    permLog(`codex automation claim no longer applies -> no decision, native prompt fallback (tool=${permEntry.toolName})`);
+    resolvePermissionEntry(
+      permEntry,
+      "no-decision",
+      "Automation no longer applies",
+      resolutionOptions("cancelled", false)
+    );
+    return;
+  }
   ensureBubblePresentationState(permEntry);
   ensurePermissionUiIdentity(permEntry);
 
@@ -5800,6 +5838,7 @@ return {
   reconcilePermissionPresentation,
   addPendingPermission, removePendingPermission,
   isPermissionEntryLive, canAutoResolvePendingPermission,
+  wouldAutoAllowPermission,
   beginSessionTrustConfirmation, endSessionTrustConfirmation,
   syncPermissionBubbleContent,
   maybeStartRemoteApproval,
