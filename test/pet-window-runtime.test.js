@@ -2801,7 +2801,7 @@ function makePatchedBrowserWindow(patchWindow = () => {}) {
   };
 }
 
-function createPetRenderWindowForTest(harness, BrowserWindow) {
+function createPetRenderWindowForTest(harness, BrowserWindow, extraOptions = {}) {
   return harness.runtime.createRenderWindow({
     BrowserWindow,
     size: { width: 120, height: 120 },
@@ -2812,6 +2812,7 @@ function createPetRenderWindowForTest(harness, BrowserWindow) {
     themeConfig: { ok: true },
     setRenderWindow: harness.setRenderWin,
     isQuitting: () => false,
+    ...extraOptions,
   });
 }
 
@@ -3000,6 +3001,52 @@ describe("pet-window-runtime", () => {
         assert.ok(names.indexOf("setVisibleOnAllWorkspaces") < names.indexOf("showInactive"));
         assert.ok(names.includes("loadFile"));
       }
+    });
+
+    // The sticky render window must never take WM keyboard focus, or mutter's
+    // MRU focus hands it the keyboard on every workspace switch.
+    it("marks the Linux render window no-input before showInactive()", () => {
+      const harness = createRuntime(LINUX);
+      const BrowserWindow = makePatchedBrowserWindow();
+      const hinted = [];
+      const renderWin = createPetRenderWindowForTest(harness, BrowserWindow, {
+        applyNoInputHint: (win) => {
+          hinted.push(win);
+          win.calls.push(["applyNoInputHint"]);
+        },
+      });
+
+      assert.deepStrictEqual(hinted, [renderWin]);
+      const names = callNames(renderWin);
+      assert.ok(names.indexOf("applyNoInputHint") < names.indexOf("showInactive"));
+    });
+
+    it("leaves the no-input hint alone on Windows and macOS", () => {
+      for (const platform of [WINDOWS, MAC]) {
+        const harness = createRuntime(platform);
+        let hinted = 0;
+        createPetRenderWindowForTest(harness, makePatchedBrowserWindow(), {
+          applyNoInputHint: () => { hinted += 1; },
+        });
+        assert.equal(hinted, 0);
+      }
+    });
+
+    it("still shows the Linux render window when the no-input hint throws", () => {
+      const harness = createRuntime(LINUX);
+      let throws = 0;
+      let renderWin;
+      assert.doesNotThrow(() => {
+        renderWin = createPetRenderWindowForTest(harness, makePatchedBrowserWindow(), {
+          applyNoInputHint: () => {
+            throws += 1;
+            throw new Error("X server refused the hint");
+          },
+        });
+      });
+      assert.equal(throws, 1);
+      assert.ok(callNames(renderWin).includes("showInactive"));
+      assert.ok(callNames(renderWin).includes("loadFile"));
     });
   });
 

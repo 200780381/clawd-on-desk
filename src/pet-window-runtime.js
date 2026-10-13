@@ -2236,6 +2236,14 @@ function createPetWindowRuntime(options = {}) {
 
     if (isLinux) {
       applyLinuxAllWorkspaces(renderWin);
+      // Output-only window: keep WM keyboard focus off it, or the sticky pet
+      // wins mutter's MRU focus on every workspace switch (see
+      // src/linux-x11-input-hint.js). Best-effort, like the sticky hint.
+      if (typeof optionsArg.applyNoInputHint === "function") {
+        try {
+          optionsArg.applyNoInputHint(renderWin);
+        } catch {}
+      }
       renderWin.on("close", (event) => {
         if (!isQuitting()) {
           event.preventDefault();

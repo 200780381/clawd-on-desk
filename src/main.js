@@ -247,6 +247,18 @@ const _hitWindowActivationRuntime = createHitWindowActivationRuntime({
   onError: (err) => console.warn("Clawd: win-hit-window-activation failed:", err && err.message),
 });
 
+// ── Linux/X11: keep the output-only pet render window out of WM focus ──
+// Best-effort; a no-op off the X11 backend or without koffi/libxcb. Chromium
+// writes its resolved Ozone backend back onto the command line, so the switch
+// reads "x11" under the XWayland relaunch and on an Xorg session alike, and
+// "wayland" on native Wayland, where there is no X11 window to hint.
+const { createLinuxX11InputHint } = require("./linux-x11-input-hint");
+const _linuxX11InputHint = createLinuxX11InputHint({
+  isLinuxX11: isLinux && app.commandLine.getSwitchValue("ozone-platform") === "x11",
+  displayName: app.commandLine.getSwitchValue("display"),
+  onError: (err) => console.warn("Clawd: linux-x11-input-hint failed:", err && err.message),
+});
+
 // ── Windows: DWM cloak inspection + un-cloak (#525 self-heal) ──
 // Best-effort; degrades to "never cloaked / recovery no-op" when koffi/dwmapi
 // or the virtual-desktop COM manager is unavailable.
@@ -5221,6 +5233,7 @@ function createWindow() {
     setRenderWindow: (createdWindow) => { win = createdWindow; },
     isQuitting: () => isQuitting,
     applyDockVisibility,
+    applyNoInputHint: (createdWindow) => _linuxX11InputHint.applyNoInputHint(createdWindow),
   });
   finalizePetAccessorySlotsDelivery(initialAccessoryDelivery, true);
 
