@@ -394,7 +394,7 @@ A tier can list several files in `files` instead of a single `file`, and Clawd p
 
 - The same applies to `states.thinking`, to `states.working` when there are no `workingTiers`, and to `states.juggling` when there are no `jugglingTiers`: when they list several files, one is picked at random.
 - A pick holds for as long as the pet stays in that state, so repeated hook events (every tool call) keep the same file. Clawd picks again when the pet enters the state anew (for example thinking → working → thinking), when the tier changes because the session or subagent count crossed a `minSessions` threshold, and after a theme reload.
-- `files` wins over `file`. Keep `file` next to `files` only when the theme must also run on Clawd 1.2.0 or earlier, which reads `file` and ignores `files`; list that file inside `files` too. `validate-theme` warns when it is missing from `files`.
+- `files` wins over `file`. Keep `file` next to `files` only when the theme must also run on Clawd 1.3.0 or earlier, which reads `file` and ignores `files`; list that file inside `files` too. `validate-theme` warns when it is missing from `files`.
 - Every file in `files` is a required asset, and accessory attachments must cover it like any other visual.
 - A matching `displayHintMap` entry still wins over the pool.
 - Settings → Animation Overrides shows one card per tier with the first file of its pool. Replacing it swaps that first file and keeps the rest of the pool, as it does for a state with several files.
