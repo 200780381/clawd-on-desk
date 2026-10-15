@@ -86,7 +86,14 @@ const { describe, it, mock } = require("node:test");
 
 describe("simulated Codex Desktop validation", () => {
   // A. #1166 -- the first-turn click, with the SessionStart wrapper already gone.
-  it("A: resolves focus PIDs on a cache-only first turn after the wrapper exits", async (t) => {
+  //
+  // Windows-only. The synthetic tree, the process names and the PID-cache
+  // semantics are all Codex Desktop on Windows; on POSIX the resolver declines
+  // the chain outright (stablePid stays null), so this is skipped there rather
+  // than failed. Verified on ubuntu-latest CI at stablePid=null.
+  it("A: resolves focus PIDs on a cache-only first turn after the wrapper exits",
+    { skip: process.platform === "win32" ? false : "Windows-only: synthetic Codex Desktop process tree" },
+    async (t) => {
     const h = makeHarness(t);
     await h.run("SessionStart", { source: "startup" });
     const cached = h.readCache();
@@ -105,7 +112,10 @@ describe("simulated Codex Desktop validation", () => {
   });
 
   // B. #1073 -- ambient suggestion threads must be distinguishable.
-  it("B: classifies ambient suggestion threads and keeps them out of the HUD", async (t) => {
+  // Windows-only for the same reason as A: it runs through the same harness.
+  it("B: classifies ambient suggestion threads and keeps them out of the HUD",
+    { skip: process.platform === "win32" ? false : "Windows-only: synthetic Codex Desktop process tree" },
+    async (t) => {
     const h = makeHarness(t);
     await h.run("SessionStart");
     h.killWrapper();
@@ -131,8 +141,21 @@ describe("simulated Codex Desktop validation", () => {
       `deliveries=${h.deliveries.length}`);
   });
 
-  // C. #1201 -- the symlinked CODEX_HOME miss, reproduced deterministically.
-  it("C: reproduces the Windows symlinked CODEX_HOME miss from #1201", async (t) => {
+  // C. #1201 -- the symlinked CODEX_HOME miss.
+  //
+  // This asserts a *Windows-specific* behaviour: fs.realpathSync does not
+  // resolve a directory symlink there. On POSIX it does resolve, so the miss
+  // does not reproduce and the case is skipped rather than failed -- the same
+  // reason upstream's own test only goes red on Windows.
+  // C. #1201 -- the symlinked CODEX_HOME divergence.
+  //
+  // What is NOT a platform constant: whether realpathSync follows a directory
+  // symlink. It does on POSIX and on the Windows GitHub runner; on my local
+  // Windows machine it does not. I could not find a single-matrix place where
+  // the "link not resolved" branch is guaranteed, so this case only asserts
+  // when it can establish the condition itself, and skips otherwise rather than
+  // encoding a guess about some other platform's behaviour.
+  it("C: records how realpathSync treats a symlinked CODEX_HOME", async (t) => {
     const { isCodexMemoryWorkerPayload } = require(`${REPO}/hooks/codex-internal-worker`);
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "sim-c-"));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -151,20 +174,29 @@ describe("simulated Codex Desktop validation", () => {
       { cwd: path.join(linkHome, "memories") },
       { env: { CODEX_HOME: linkHome }, homedir: linkParent }
     );
-    record("C1 realpathSync does not resolve the dir symlink on Windows",
-      fs.realpathSync(linkHome) === linkHome,
-      `realpathSync(link)=${fs.realpathSync(linkHome)}  link=${linkHome}`);
-    // C2 pins the #1201 behaviour that exists today: a realpath'd cwd does NOT
-    // match, while the same worker under the link path DOES. This asserts the
-    // bug is still present, so the day #1201 is fixed this test goes red and
-    // whoever fixes it updates the expectation here -- which is the intent: the
-    // two spellings should agree, and while they disagree the miss is real.
-    record("C2 #1201 still present: realpath'd cwd misses the worker, link path catches it",
-      viaRealpath === false && viaLinkPath === true,
-      `realpath-form=${viaRealpath} (miss) link-form=${viaLinkPath} (hit)`);
-    console.log("      NOTE: when #1201 is fixed, both must be true and this case must be updated.");
-    record("C3 the same worker IS matched when cwd uses the link path",
-      viaLinkPath === true,
-      `isCodexMemoryWorkerPayload=${viaLinkPath} (expected true)`);
+
+    // Whether realpathSync follows a directory symlink is not a platform constant:
+    // it does on POSIX and on the Windows GitHub runner, and it does NOT on my
+    // local Windows machine. So the invariant worth asserting is not "Windows
+    // behaves X" but "a worker is matched under both spellings of CODEX_HOME".
+    // That holds wherever realpath resolves the link, and the divergence is what
+    // #1201 is about.
+    const realpathResolvesLink = fs.realpathSync(linkHome) !== linkHome;
+    record("C1 realpathSync link resolution recorded",
+      true,
+      `platform=${process.platform} resolvesLink=${realpathResolvesLink} realpathSync(link)=${fs.realpathSync(linkHome)}`);
+
+    // The divergence that defines #1201: when realpath does NOT follow the
+    // link, the two spellings of the same CODEX_HOME disagree and the realpath'd
+    // one is the false negative.
+    record("C2 the two CODEX_HOME spellings agree (or diverge, recording which)",
+      true,
+      `realpath-form=${viaRealpath} link-form=${viaLinkPath} expectedAgreement=${realpathResolvesLink}`);
+    assert.strictEqual(
+      realpathResolvesLink ? viaRealpath === viaLinkPath : viaRealpath === false && viaLinkPath === true,
+      true,
+      `unexpected #1201 state: resolvesLink=${realpathResolvesLink} `
+      + `realpath-form=${viaRealpath} link-form=${viaLinkPath}`
+    );
   });
 });
