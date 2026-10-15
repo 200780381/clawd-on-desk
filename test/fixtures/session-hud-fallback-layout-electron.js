@@ -76,14 +76,25 @@ async function main() {
           { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true },
           { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: false },
           { hudShowStateLabels: false, hudShowElapsed: false, hudShowContextUsage: false },
+          // Every remaining show-toggle combination. hudShowElapsed=false is the
+          // tightest case: the HUD window narrows while the fallback tag still
+          // needs its intrinsic width, which previously pushed the status label
+          // under the pin at 160% text.
+          { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: false },
+          { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: true },
+          { hudShowStateLabels: false, hudShowElapsed: true, hudShowContextUsage: false },
+          { hudShowStateLabels: false, hudShowElapsed: true, hudShowContextUsage: true },
+          { hudShowStateLabels: false, hudShowElapsed: false, hudShowContextUsage: true },
           ...(scale === 1.6 ? [
             { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureDone: true },
             { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureUnfocusable: true },
+            { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: true, fixtureDone: true },
+            { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: true, fixtureUnfocusable: true },
           ] : []),
         ]) {
           const snapshot = snapshotFor(language, flags);
           win.setContentSize(computeHudOuterWidth(getHudWidth(flags.hudShowElapsed, flags.hudShowStateLabels,
-            flags.hudShowContextUsage), scale, getHudWidthScale(scale)), 160);
+            flags.hudShowContextUsage, snapshot.sessions.some((entry) => entry.displaySessionTag)), scale, getHudWidthScale(scale)), 160);
           applyZoomToWindow(win, scale);
           await win.webContents.__clawdTextZoomQueue;
           const rows = await win.webContents.executeJavaScript(`(async () => {
@@ -99,6 +110,8 @@ async function main() {
                 contentRight: row.getBoundingClientRect().right - Number.parseFloat(getComputedStyle(row).paddingRight)
                   * Number.parseFloat(getComputedStyle(document.documentElement).zoom),
                 chips: [...row.querySelectorAll(".state-chip, .usage-chip, .completion-bell, .focus-unavailable, .open-folder-button")]
+                  .map(chip => chip.getBoundingClientRect().toJSON()),
+                stateChips: [...row.querySelectorAll(".state-chip")]
                   .map(chip => chip.getBoundingClientRect().toJSON()),
                 pin: document.querySelector(".pin-btn").getBoundingClientRect().toJSON(),
                 glyphs: (() => { const range = document.createRange(); range.selectNodeContents(row.querySelector(".title-fallback-tag"));
@@ -131,6 +144,13 @@ async function main() {
                   "a mandatory chip is clipped by the secondary container");
                 assert.ok(!(chip.left < row.pin.right && chip.right > row.pin.left
                   && chip.top < row.pin.bottom && chip.bottom > row.pin.top), "a mandatory chip overlaps the pin");
+              }
+              // The state chip sits inside .right, which is pinned right of the
+              // title. A too-narrow HUD window pushed .right under the pin.
+              for (const chip of row.stateChips) {
+                assert.ok(!(chip.left < row.pin.right && chip.right > row.pin.left
+                  && chip.top < row.pin.bottom && chip.bottom > row.pin.top),
+                  "the status label overlaps the pin");
               }
               assert.ok(snapshot.sessions.some(entry => row.tagText.endsWith(entry.displaySessionTag)));
               if (flags.hudShowElapsed && !flags.fixtureDone) assert.ok(row.elapsedText.includes("1"), "exercise a real >1 minute label");
