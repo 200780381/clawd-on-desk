@@ -422,7 +422,7 @@ function drainActiveTimers(harness, predicate, limit = 100) {
   return count;
 }
 
-function attachFakeSvgDocument(objectEl, { withEyes = false } = {}) {
+function attachFakeSvgDocument(objectEl, { withEyes = false, animations = null } = {}) {
   const root = new FakeElement("svg");
   const elements = new Map();
   const svgDoc = {
@@ -443,6 +443,9 @@ function attachFakeSvgDocument(objectEl, { withEyes = false } = {}) {
   root.unpauseCalls = 0;
   root.pauseAnimations = () => { root.pauseCalls++; };
   root.unpauseAnimations = () => { root.unpauseCalls++; };
+  if (animations) {
+    svgDoc.getAnimations = () => animations;
+  }
   if (withEyes) {
     const eyes = new FakeElement("g");
     eyes.id = "eyes-js";
@@ -856,6 +859,268 @@ describe("renderer directional drag reactions (#620)", () => {
       .filter((call) => call.name === "notifyPetVisualSettled")
       .map((call) => call.args[0]);
     assert.deepStrictEqual(settlements.map((entry) => entry.visualGeneration), [93]);
+  });
+});
+
+describe("renderer discrete animation sampling", () => {
+  function makeAnimation(duration) {
+    const calls = [];
+    return {
+      calls,
+      effect: {
+        getComputedTiming: () => ({ duration }),
+        updateTiming(timing) { calls.push(timing); },
+      },
+    };
+  }
+
+  function commitObject(harness, file, animations) {
+    harness.api.swapToFile(file, "working", true);
+    const pending = harness.api.pendingNext;
+    attachFakeSvgDocument(pending, { animations });
+    pending.listeners.get("load")();
+    return pending;
+  }
+
+  // The real load callback can fire before the nested SVG document is reachable;
+  // commit the OBJECT with no contentDocument so the sampler has to wait.
+  function commitObjectWithoutDocument(harness, file) {
+    harness.api.swapToFile(file, "working", true);
+    const pending = harness.api.pendingNext;
+    pending.listeners.get("load")();
+    return pending;
+  }
+
+  function samplingHarness(files, transitions) {
+    return createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: files,
+          discreteSampling: Object.fromEntries(files.map((file) => [file, 24])),
+        },
+        ...(transitions ? { transitions } : {}),
+      },
+    });
+  }
+
+  it("maps a declared file rate onto steps() for a finite animation duration", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const animation = makeAnimation(12000);
+    commitObject(harness, "sweeping.svg", [animation]);
+    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("skips animations that lack a finite positive duration", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const automatic = makeAnimation("auto");
+    const zero = makeAnimation(0);
+    commitObject(harness, "sweeping.svg", [automatic, zero]);
+    assert.deepStrictEqual(automatic.calls, []);
+    assert.deepStrictEqual(zero.calls, []);
+  });
+
+  it("leaves undeclared files and img playbacks untouched", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg", "other.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const undeclared = makeAnimation(12000);
+    commitObject(harness, "other.svg", [undeclared]);
+    assert.deepStrictEqual(undeclared.calls, []);
+
+    const imgAnimation = makeAnimation(12000);
+    harness.api.swapToFile("plain.svg", "working", false);
+    const img = harness.api.pendingNext;
+    assert.strictEqual(img.tagName, "IMG");
+    attachFakeSvgDocument(img, { animations: [imgAnimation] });
+    img.listeners.get("load")();
+    assert.deepStrictEqual(imgAnimation.calls, [], "the img channel exposes no contentDocument to sample");
+  });
+
+  it("reapplies the cap when the same file is committed as a fresh document", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const first = makeAnimation(12000);
+    commitObject(harness, "sweeping.svg", [first]);
+    assert.deepStrictEqual(first.calls.map((call) => call.easing), ["steps(288, end)"]);
+
+    const second = makeAnimation(12000);
+    harness.api.swapToFile("sweeping.svg", "working", true, { forceDocumentReload: true });
+    const pending = harness.api.pendingNext;
+    attachFakeSvgDocument(pending, { animations: [second] });
+    pending.listeners.get("load")();
+    assert.deepStrictEqual(second.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("keeps low-power pause working on a sampled object document", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sleeping.svg"],
+          discreteSampling: { "sleeping.svg": 24 },
+        },
+      },
+    });
+    const animation = makeAnimation(12000);
+    const objectEl = commitObject(harness, "sleeping.svg", [animation]);
+    harness.api.setCurrentState("sleeping");
+    harness.api.setLowPowerIdleMode(true);
+    harness.api.pauseCurrentSvgForLowPower();
+
+    assert.equal(harness.api.lowPowerSvgPaused, true);
+    assert.ok(objectEl.contentDocument.getElementById("clawd-low-power-pause-svg"));
+  });
+
+  it("samples an object once its document arrives after the load callback", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+    assert.deepStrictEqual(animation.calls, [], "no document yet, so nothing was sampled");
+
+    attachFakeSvgDocument(objectEl, { animations: [animation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("stops quietly after the retry budget when the document never arrives", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+    assert.ok(objectEl, "the object was committed even without a document");
+
+    const drained = drainActiveTimers(harness, (timer) => timer.ms === 16, 200);
+    assert.strictEqual(drained, 60, "after the synchronous first attempt the retry budget is bounded to 60 retries");
+    assert.deepStrictEqual(animation.calls, []);
+    assert.strictEqual(
+      harness.warnings.filter((warning) => warning.includes("discrete sampling")).length,
+      1,
+      "the exhausted retry warns at most once",
+    );
+  });
+
+  it("does not sample a superseded object whose document arrives late", () => {
+    const harness = samplingHarness(["sweeping.svg", "fallback.svg"]);
+    const supersededAnimation = makeAnimation(12000);
+    const supersededObject = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    const fallbackAnimation = makeAnimation(12000);
+    commitObject(harness, "fallback.svg", [fallbackAnimation]);
+    assert.deepStrictEqual(fallbackAnimation.calls.map((call) => call.easing), ["steps(288, end)"]);
+
+    attachFakeSvgDocument(supersededObject, { animations: [supersededAnimation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(supersededAnimation.calls, [], "the retired object is never sampled");
+  });
+
+  it("keeps sampling a displayed object when a newer swap fails", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    // A click reaction / cue starts a newer IMG swap for another file...
+    harness.api.swapToFile("reaction.svg", "working", false);
+    const pendingImg = harness.api.pendingNext;
+    assert.strictEqual(pendingImg.tagName, "IMG");
+    // ...and that newer swap fails, so the old object keeps displaying.
+    pendingImg.listeners.get("error")();
+    assert.strictEqual(harness.api.clawdEl, objectEl, "the failed swap left the old object on screen");
+    assert.strictEqual(harness.api.pendingNext, null);
+
+    attachFakeSvgDocument(objectEl, { animations: [animation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(
+      animation.calls.map((call) => call.easing),
+      ["steps(288, end)"],
+      "the still-displayed object finishes its pending sampling",
+    );
+  });
+
+  it("resumes the displayed object's sampling when a pending swap is cancelled", () => {
+    const harness = samplingHarness(["sweeping.svg", "fallback.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    // A newer OBJECT is pending but not yet loaded when the cue returns to A.
+    harness.api.swapToFile("fallback.svg", "working", true);
+    const pendingObject = harness.api.pendingNext;
+    assert.strictEqual(pendingObject.tagName, "OBJECT");
+
+    harness.electronHandlers.onStateChange("working", "sweeping.svg");
+    assert.strictEqual(harness.api.clawdEl, objectEl, "the displayed object is unchanged");
+    assert.strictEqual(harness.api.pendingNext, null, "the pending swap was cancelled");
+
+    attachFakeSvgDocument(objectEl, { animations: [animation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("stops retrying once the committed object is detached from the DOM", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    objectEl.remove();
+    assert.strictEqual(objectEl.isConnected, false);
+
+    const drained = drainActiveTimers(harness, (timer) => timer.ms === 16, 200);
+    assert.ok(drained < 60, `a detached object stops early, drained ${drained} retries`);
+    assert.deepStrictEqual(animation.calls, []);
+    assert.strictEqual(
+      harness.warnings.filter((warning) => warning.includes("discrete sampling")).length,
+      0,
+      "a detached object never exhausts the retry budget",
+    );
+  });
+
+  it("does not sample a fading-out object replaced by a fresh document of the same file", () => {
+    const harness = samplingHarness(["sweeping.svg"], { "sweeping.svg": { out: 500 } });
+    const retiredAnimation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    // Re-entering the same file with a forced reload commits a second, distinct
+    // OBJECT while the first is still fading out (its 500ms removal is pending).
+    harness.api.swapToFile("sweeping.svg", "working", true, { forceDocumentReload: true });
+    const freshObject = harness.api.pendingNext;
+    assert.notStrictEqual(freshObject, objectEl);
+    const freshAnimation = makeAnimation(12000);
+    attachFakeSvgDocument(freshObject, { animations: [freshAnimation] });
+    freshObject.listeners.get("load")();
+
+    assert.strictEqual(harness.api.clawdEl, freshObject);
+    assert.strictEqual(objectEl.isConnected, true, "the old object is still fading out");
+    assert.deepStrictEqual(freshAnimation.calls.map((call) => call.easing), ["steps(288, end)"]);
+
+    // The retired element's document arrives while it is still connected, but it
+    // is no longer the displayed object, so its retry must retire by identity.
+    attachFakeSvgDocument(objectEl, { animations: [retiredAnimation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(retiredAnimation.calls, []);
+    assert.deepStrictEqual(freshAnimation.calls.map((call) => call.easing), ["steps(288, end)"]);
+    assert.strictEqual(objectEl.isConnected, true, "the 500ms fade timer was not advanced");
   });
 });
 
@@ -1585,10 +1850,11 @@ describe("renderer low-power idle mode", () => {
 });
 
 describe("renderer object-channel selection", () => {
-  it("uses OBJECT for Clawd's long-lived sleep SVGs when the theme lists them", () => {
+  it("uses OBJECT for Clawd's sleep and thinking SVGs when the theme lists them", () => {
     for (const [state, file] of [
       ["collapsing", "clawd-collapse-sleep.svg"],
       ["sleeping", "clawd-sleeping.svg"],
+      ["thinking", "clawd-working-thinking.svg"],
     ]) {
       const harness = createRendererHarness({
         themeConfig: {
