@@ -283,6 +283,7 @@ test("bender uses the one-unit anti-crop viewBox and its measured face-plant hit
     "clawd-outlaw-bender.svg",
     "clawd-collapse-sleep.svg",
     "clawd-sleeping.svg",
+    "clawd-working-thinking.svg",
   ]);
   assert.deepStrictEqual(theme.fileViewBoxes["clawd-outlaw-bender.svg"], {
     x: -15,

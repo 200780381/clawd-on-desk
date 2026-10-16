@@ -1585,10 +1585,11 @@ describe("renderer low-power idle mode", () => {
 });
 
 describe("renderer object-channel selection", () => {
-  it("uses OBJECT for Clawd's long-lived sleep SVGs when the theme lists them", () => {
+  it("uses OBJECT for Clawd's sleep and thinking SVGs when the theme lists them", () => {
     for (const [state, file] of [
       ["collapsing", "clawd-collapse-sleep.svg"],
       ["sleeping", "clawd-sleeping.svg"],
+      ["thinking", "clawd-working-thinking.svg"],
     ]) {
       const harness = createRendererHarness({
         themeConfig: {

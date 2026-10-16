@@ -110,14 +110,19 @@ describe("hit geometry", () => {
     approx(rect.h, 261);
   });
 
-  it("keeps Clawd sleep geometry and hit regions identical across OBJECT and IMG", () => {
+  it("keeps Clawd sleep and thinking geometry and hit regions identical across OBJECT and IMG", () => {
     const imageTheme = structuredClone(clawd);
     imageTheme.rendering.objectChannelFiles = imageTheme.rendering.objectChannelFiles
-      .filter((file) => !["clawd-collapse-sleep.svg", "clawd-sleeping.svg"].includes(file));
+      .filter((file) => ![
+        "clawd-collapse-sleep.svg",
+        "clawd-sleeping.svg",
+        "clawd-working-thinking.svg",
+      ].includes(file));
 
     for (const [state, file] of [
       ["collapsing", "clawd-collapse-sleep.svg"],
       ["sleeping", "clawd-sleeping.svg"],
+      ["thinking", "clawd-working-thinking.svg"],
     ]) {
       const objectAsset = hitGeometry.getAssetRectScreen(clawd, bounds, state, file);
       const imageAsset = hitGeometry.getAssetRectScreen(imageTheme, bounds, state, file);
