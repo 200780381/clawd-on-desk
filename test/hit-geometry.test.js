@@ -123,7 +123,20 @@ describe("hit geometry", () => {
       ["collapsing", "clawd-collapse-sleep.svg"],
       ["sleeping", "clawd-sleeping.svg"],
       ["thinking", "clawd-working-thinking.svg"],
+      ["working", "clawd-working-thinking.svg"],
+      ["juggling", "clawd-working-thinking.svg"],
     ]) {
+      assert.strictEqual(
+        hitGeometry.usesObjectChannel(clawd, state, file),
+        true,
+        `${state}/${file} should use OBJECT in Clawd`
+      );
+      assert.strictEqual(
+        hitGeometry.usesObjectChannel(imageTheme, state, file),
+        false,
+        `${state}/${file} should use IMG in the comparison theme`
+      );
+
       const objectAsset = hitGeometry.getAssetRectScreen(clawd, bounds, state, file);
       const imageAsset = hitGeometry.getAssetRectScreen(imageTheme, bounds, state, file);
       assert.deepStrictEqual(objectAsset, imageAsset, `${file} asset geometry changed`);

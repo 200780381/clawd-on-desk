@@ -270,6 +270,16 @@ test("every visible animated cigarette has a measured or authored hit envelope",
   );
 });
 
+test("Clawd lists bender, both sleep poses and thinking as object-channel SVGs", () => {
+  const theme = themeLoader.loadTheme("clawd", { strict: true });
+  assert.deepStrictEqual(theme.rendering.objectChannelFiles, [
+    "clawd-outlaw-bender.svg",
+    "clawd-collapse-sleep.svg",
+    "clawd-sleeping.svg",
+    "clawd-working-thinking.svg",
+  ]);
+});
+
 test("bender uses the one-unit anti-crop viewBox and its measured face-plant hitbox", () => {
   const theme = themeLoader.loadTheme("clawd", { strict: true });
   assert.deepStrictEqual(theme.idleEasterEggs, [{
@@ -279,12 +289,6 @@ test("bender uses the one-unit anti-crop viewBox and its measured face-plant hit
     cooldownMs: 1800000,
     requiresAccessories: { head: "western-cowboy-hat", mouth: "cigarette" },
   }]);
-  assert.deepStrictEqual(theme.rendering.objectChannelFiles, [
-    "clawd-outlaw-bender.svg",
-    "clawd-collapse-sleep.svg",
-    "clawd-sleeping.svg",
-    "clawd-working-thinking.svg",
-  ]);
   assert.deepStrictEqual(theme.fileViewBoxes["clawd-outlaw-bender.svg"], {
     x: -15,
     y: -25,
