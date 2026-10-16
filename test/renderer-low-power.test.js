@@ -891,13 +891,14 @@ describe("renderer discrete animation sampling", () => {
     return pending;
   }
 
-  function samplingHarness(files) {
+  function samplingHarness(files, transitions) {
     return createRendererHarness({
       themeConfig: {
         rendering: {
           objectChannelFiles: files,
           discreteSampling: Object.fromEntries(files.map((file) => [file, 24])),
         },
+        ...(transitions ? { transitions } : {}),
       },
     });
   }
@@ -1093,6 +1094,33 @@ describe("renderer discrete animation sampling", () => {
       0,
       "a detached object never exhausts the retry budget",
     );
+  });
+
+  it("does not sample a fading-out object replaced by a fresh document of the same file", () => {
+    const harness = samplingHarness(["sweeping.svg"], { "sweeping.svg": { out: 500 } });
+    const retiredAnimation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    // Re-entering the same file with a forced reload commits a second, distinct
+    // OBJECT while the first is still fading out (its 500ms removal is pending).
+    harness.api.swapToFile("sweeping.svg", "working", true, { forceDocumentReload: true });
+    const freshObject = harness.api.pendingNext;
+    assert.notStrictEqual(freshObject, objectEl);
+    const freshAnimation = makeAnimation(12000);
+    attachFakeSvgDocument(freshObject, { animations: [freshAnimation] });
+    freshObject.listeners.get("load")();
+
+    assert.strictEqual(harness.api.clawdEl, freshObject);
+    assert.strictEqual(objectEl.isConnected, true, "the old object is still fading out");
+    assert.deepStrictEqual(freshAnimation.calls.map((call) => call.easing), ["steps(288, end)"]);
+
+    // The retired element's document arrives while it is still connected, but it
+    // is no longer the displayed object, so its retry must retire by identity.
+    attachFakeSvgDocument(objectEl, { animations: [retiredAnimation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(retiredAnimation.calls, []);
+    assert.deepStrictEqual(freshAnimation.calls.map((call) => call.easing), ["steps(288, end)"]);
+    assert.strictEqual(objectEl.isConnected, true, "the 500ms fade timer was not advanced");
   });
 });
 
