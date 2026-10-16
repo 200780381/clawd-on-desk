@@ -1149,6 +1149,46 @@ describe("renderer test-result reactions", () => {
 });
 
 describe("renderer low-power idle mode", () => {
+  it("includes collapsing and sleeping in the renderer and tick pause sets", () => {
+    const rendererSource = readNormalized(RENDERER);
+    const tickSource = readNormalized(path.join(__dirname, "..", "src", "tick.js"));
+    const expected = '["idle", "mini-idle", "dozing", "collapsing", "sleeping"]';
+
+    assert.ok(rendererSource.includes(`LOW_POWER_PAUSE_STATES = new Set(${expected})`));
+    assert.ok(tickSource.includes(`LOW_POWER_PAUSE_STATES = new Set(${expected})`));
+  });
+
+  it("pauses collapsing and sleeping SVG animations at a stable currentTime", () => {
+    for (const state of ["collapsing", "sleeping"]) {
+      const harness = createRendererHarness();
+      const svg = attachFakeSvgDocument(harness.clawd);
+      let paused = false;
+      let time = 120;
+      const animation = {
+        playState: "running",
+        get currentTime() {
+          return paused ? time : (time += 10);
+        },
+      };
+      svg.root.getAnimations = () => [animation];
+      const pause = svg.root.pauseAnimations;
+      svg.root.pauseAnimations = () => {
+        paused = true;
+        pause();
+      };
+
+      harness.api.setCurrentState(state);
+      harness.api.setLowPowerIdleMode(true);
+      harness.api.pauseCurrentSvgForLowPower();
+
+      const firstTime = animation.currentTime;
+      const secondTime = animation.currentTime;
+      assert.equal(firstTime, secondTime, `${state} animation currentTime must stop`);
+      assert.ok(svg.svgDoc.getElementById("clawd-low-power-pause-svg"));
+      assert.equal(harness.api.lowPowerSvgPaused, true);
+    }
+  });
+
   it("waits for an animation boundary before pausing the current SVG", () => {
     const source = readNormalized(RENDERER);
 
@@ -1545,6 +1585,23 @@ describe("renderer low-power idle mode", () => {
 });
 
 describe("renderer object-channel selection", () => {
+  it("uses OBJECT for Clawd's long-lived sleep SVGs when the theme lists them", () => {
+    for (const [state, file] of [
+      ["collapsing", "clawd-collapse-sleep.svg"],
+      ["sleeping", "clawd-sleeping.svg"],
+    ]) {
+      const harness = createRendererHarness({
+        themeConfig: {
+          rendering: { objectChannelFiles: [file] },
+          eyeTracking: { states: [] },
+        },
+      });
+
+      harness.api.swapToFile(file, state);
+      assert.equal(harness.api.pendingNext.tagName, "OBJECT", `${state} should use OBJECT`);
+    }
+  });
+
   it("allows built-in trusted scripted SVG files to use <object>", () => {
     const source = readNormalized(RENDERER);
 
