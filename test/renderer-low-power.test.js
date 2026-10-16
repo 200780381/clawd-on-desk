@@ -882,6 +882,26 @@ describe("renderer discrete animation sampling", () => {
     return pending;
   }
 
+  // The real load callback can fire before the nested SVG document is reachable;
+  // commit the OBJECT with no contentDocument so the sampler has to wait.
+  function commitObjectWithoutDocument(harness, file) {
+    harness.api.swapToFile(file, "working", true);
+    const pending = harness.api.pendingNext;
+    pending.listeners.get("load")();
+    return pending;
+  }
+
+  function samplingHarness(files) {
+    return createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: files,
+          discreteSampling: Object.fromEntries(files.map((file) => [file, 24])),
+        },
+      },
+    });
+  }
+
   it("maps a declared file rate onto steps() for a finite animation duration", () => {
     const harness = createRendererHarness({
       themeConfig: {
@@ -972,6 +992,47 @@ describe("renderer discrete animation sampling", () => {
 
     assert.equal(harness.api.lowPowerSvgPaused, true);
     assert.ok(objectEl.contentDocument.getElementById("clawd-low-power-pause-svg"));
+  });
+
+  it("samples an object once its document arrives after the load callback", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+    assert.deepStrictEqual(animation.calls, [], "no document yet, so nothing was sampled");
+
+    attachFakeSvgDocument(objectEl, { animations: [animation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("stops quietly after the retry budget when the document never arrives", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+    assert.ok(objectEl, "the object was committed even without a document");
+
+    const drained = drainActiveTimers(harness, (timer) => timer.ms === 16, 200);
+    assert.strictEqual(drained, 60, "the retry budget is bounded to 60 attempts");
+    assert.deepStrictEqual(animation.calls, []);
+    assert.strictEqual(
+      harness.warnings.filter((warning) => warning.includes("discrete sampling")).length,
+      1,
+      "the exhausted retry warns at most once",
+    );
+  });
+
+  it("does not sample a superseded object whose document arrives late", () => {
+    const harness = samplingHarness(["sweeping.svg", "fallback.svg"]);
+    const supersededAnimation = makeAnimation(12000);
+    const supersededObject = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    const fallbackAnimation = makeAnimation(12000);
+    commitObject(harness, "fallback.svg", [fallbackAnimation]);
+    assert.deepStrictEqual(fallbackAnimation.calls.map((call) => call.easing), ["steps(288, end)"]);
+
+    attachFakeSvgDocument(supersededObject, { animations: [supersededAnimation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(supersededAnimation.calls, [], "the retired object is never sampled");
   });
 });
 

@@ -23,6 +23,10 @@ const ACCESSORY_SETTLE_TIMEOUT_MS = visualSwapPolicy.ACCESSORY_SETTLE_TIMEOUT_MS
 const SWAP_VISIBILITY_RESCUE_BUFFER_MS = visualSwapPolicy.SWAP_VISIBILITY_RESCUE_BUFFER_MS || 750;
 const EYE_ATTACH_RETRY_MS = 16;
 const EYE_ATTACH_MAX_ATTEMPTS = 60;
+// A freshly-committed <object> may not expose its contentDocument at the exact
+// load callback; retry sampling on the same bounded cadence as eye attachment.
+const DISCRETE_SAMPLING_RETRY_MS = 16;
+const DISCRETE_SAMPLING_MAX_ATTEMPTS = 60;
 const WAKE_OBJECT_RELOAD_RETRIES = 1;
 const LOW_POWER_PAUSE_STYLE_ID = "clawd-low-power-pause-svg";
 const LOW_POWER_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing", "collapsing", "sleeping"]);
@@ -1759,6 +1763,9 @@ let currentDisplayedAssetUrl = null;
 let pendingSvgFile = null; // tracks the SVG currently being loaded (for dedup)
 let pendingAssetUrl = null;
 let activeSwapToken = 0;
+// Invalidates discrete-sampling retries owned by a superseded OBJECT swap,
+// mirroring activeSwapToken's role for the visibility rescue timer.
+let discreteSamplingToken = 0;
 let swapVisibilityRescueTimer = null;
 let petVisualReadyNotified = false;
 currentIdleSvg = currentDisplayedSvg;
@@ -1830,49 +1837,75 @@ function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
 }
 
 /**
- * Cap a document-backed SVG's CSS animations to a discrete number of frames per
- * second. The <object> channel hands its animation timeline to the compositor,
- * which otherwise advances it once per display refresh — needlessly expensive
- * for a background pet on high-refresh panels. Only files the theme opts in via
- * rendering.discreteSampling are touched; every animation is sampled by
- * rewriting its easing to steps() over one full duration, so frame count scales
- * with the authored duration. SMIL animations are not CSS animations and are
- * deliberately out of scope, as are <img> playbacks (no contentDocument).
+ * Give each CSS animation in a document-backed SVG about `rate` sample steps per
+ * full cycle, by rewriting its easing to steps() over one duration. Only files
+ * the theme opts into via rendering.discreteSampling are touched, and only on
+ * the <object> channel (an <img> playback exposes no contentDocument). SMIL
+ * animations are not CSS animations and are deliberately out of scope.
+ *
+ * The contentDocument can still be transiently null at the commit point, so the
+ * attempt is retried a bounded number of times against this exact OBJECT element
+ * and file; a later swap bumps discreteSamplingToken and retires those retries.
+ * Sampling stays best-effort: if the document never arrives we stop quietly.
  */
 function applyDiscreteSampling(objectEl, file) {
   const rate = _discreteSampling.get(file);
   if (!rate || !objectEl || objectEl.tagName !== "OBJECT") return;
-  let animations = [];
-  try {
-    const contentDocument = objectEl.contentDocument;
-    if (!contentDocument || typeof contentDocument.getAnimations !== "function") return;
-    animations = contentDocument.getAnimations();
-  } catch {
-    return;
-  }
-  for (const animation of animations) {
-    const effect = animation && animation.effect;
-    if (
-      !effect
-      || typeof effect.getComputedTiming !== "function"
-      || typeof effect.updateTiming !== "function"
-    ) {
-      continue;
-    }
-    let timing = null;
+  const token = discreteSamplingToken;
+
+  const trySample = (attempt) => {
+    // Identity check binds the retry to the element that was committed: any
+    // theme change, file change, or IMG fallback must retire it silently.
+    if (token !== discreteSamplingToken) return;
+    if (clawdEl !== objectEl || currentDisplayedSvg !== file) return;
+
+    let contentDocument = null;
     try {
-      timing = effect.getComputedTiming();
+      contentDocument = objectEl.contentDocument;
     } catch {
-      continue;
+      contentDocument = null;
     }
-    const durationMs = timing && Number.isFinite(timing.duration) ? timing.duration : NaN;
-    if (!Number.isFinite(durationMs) || durationMs <= 0) continue;
+    if (!contentDocument || typeof contentDocument.getAnimations !== "function") {
+      if (attempt < DISCRETE_SAMPLING_MAX_ATTEMPTS) {
+        setTimeout(() => trySample(attempt + 1), DISCRETE_SAMPLING_RETRY_MS);
+      } else {
+        console.warn("Timed out waiting for SVG document to apply discrete sampling");
+      }
+      return;
+    }
+
+    let animations = [];
     try {
-      effect.updateTiming({
-        easing: `steps(${Math.max(1, Math.round((durationMs / 1000) * rate))}, end)`,
-      });
-    } catch {}
-  }
+      animations = contentDocument.getAnimations();
+    } catch {
+      return;
+    }
+    for (const animation of animations) {
+      const effect = animation && animation.effect;
+      if (
+        !effect
+        || typeof effect.getComputedTiming !== "function"
+        || typeof effect.updateTiming !== "function"
+      ) {
+        continue;
+      }
+      let timing = null;
+      try {
+        timing = effect.getComputedTiming();
+      } catch {
+        continue;
+      }
+      const durationMs = timing && Number.isFinite(timing.duration) ? timing.duration : NaN;
+      if (!Number.isFinite(durationMs) || durationMs <= 0) continue;
+      try {
+        effect.updateTiming({
+          easing: `steps(${Math.max(1, Math.round((durationMs / 1000) * rate))}, end)`,
+        });
+      } catch {}
+    }
+  };
+
+  trySample(0);
 }
 
 /**
@@ -2048,6 +2081,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
   }
 
   const swapToken = ++activeSwapToken;
+  discreteSamplingToken++;
   cancelPendingSwap("superseded", { retainedRequest: visualRequest });
 
   pendingSvgFile = file; // track what's loading for dedup
