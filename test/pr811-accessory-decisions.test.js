@@ -279,7 +279,11 @@ test("bender uses the one-unit anti-crop viewBox and its measured face-plant hit
     cooldownMs: 1800000,
     requiresAccessories: { head: "western-cowboy-hat", mouth: "cigarette" },
   }]);
-  assert.deepStrictEqual(theme.rendering.objectChannelFiles, ["clawd-outlaw-bender.svg"]);
+  assert.deepStrictEqual(theme.rendering.objectChannelFiles, [
+    "clawd-outlaw-bender.svg",
+    "clawd-collapse-sleep.svg",
+    "clawd-sleeping.svg",
+  ]);
   assert.deepStrictEqual(theme.fileViewBoxes["clawd-outlaw-bender.svg"], {
     x: -15,
     y: -25,

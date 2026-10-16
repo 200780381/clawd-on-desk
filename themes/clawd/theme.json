@@ -7,7 +7,9 @@
   "repo": "https://github.com/nicepkg/clawd",
   "rendering": {
     "objectChannelFiles": [
-      "clawd-outlaw-bender.svg"
+      "clawd-outlaw-bender.svg",
+      "clawd-collapse-sleep.svg",
+      "clawd-sleeping.svg"
     ]
   },
   "customization": {
