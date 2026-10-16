@@ -422,7 +422,7 @@ function drainActiveTimers(harness, predicate, limit = 100) {
   return count;
 }
 
-function attachFakeSvgDocument(objectEl, { withEyes = false } = {}) {
+function attachFakeSvgDocument(objectEl, { withEyes = false, animations = null } = {}) {
   const root = new FakeElement("svg");
   const elements = new Map();
   const svgDoc = {
@@ -443,6 +443,9 @@ function attachFakeSvgDocument(objectEl, { withEyes = false } = {}) {
   root.unpauseCalls = 0;
   root.pauseAnimations = () => { root.pauseCalls++; };
   root.unpauseAnimations = () => { root.unpauseCalls++; };
+  if (animations) {
+    svgDoc.getAnimations = () => animations;
+  }
   if (withEyes) {
     const eyes = new FakeElement("g");
     eyes.id = "eyes-js";
@@ -856,6 +859,119 @@ describe("renderer directional drag reactions (#620)", () => {
       .filter((call) => call.name === "notifyPetVisualSettled")
       .map((call) => call.args[0]);
     assert.deepStrictEqual(settlements.map((entry) => entry.visualGeneration), [93]);
+  });
+});
+
+describe("renderer discrete animation sampling", () => {
+  function makeAnimation(duration) {
+    const calls = [];
+    return {
+      calls,
+      effect: {
+        getComputedTiming: () => ({ duration }),
+        updateTiming(timing) { calls.push(timing); },
+      },
+    };
+  }
+
+  function commitObject(harness, file, animations) {
+    harness.api.swapToFile(file, "working", true);
+    const pending = harness.api.pendingNext;
+    attachFakeSvgDocument(pending, { animations });
+    pending.listeners.get("load")();
+    return pending;
+  }
+
+  it("maps a declared file rate onto steps() for a finite animation duration", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const animation = makeAnimation(12000);
+    commitObject(harness, "sweeping.svg", [animation]);
+    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("skips animations that lack a finite positive duration", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const automatic = makeAnimation("auto");
+    const zero = makeAnimation(0);
+    commitObject(harness, "sweeping.svg", [automatic, zero]);
+    assert.deepStrictEqual(automatic.calls, []);
+    assert.deepStrictEqual(zero.calls, []);
+  });
+
+  it("leaves undeclared files and img playbacks untouched", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg", "other.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const undeclared = makeAnimation(12000);
+    commitObject(harness, "other.svg", [undeclared]);
+    assert.deepStrictEqual(undeclared.calls, []);
+
+    const imgAnimation = makeAnimation(12000);
+    harness.api.swapToFile("plain.svg", "working", false);
+    const img = harness.api.pendingNext;
+    assert.strictEqual(img.tagName, "IMG");
+    attachFakeSvgDocument(img, { animations: [imgAnimation] });
+    img.listeners.get("load")();
+    assert.deepStrictEqual(imgAnimation.calls, [], "the img channel exposes no contentDocument to sample");
+  });
+
+  it("reapplies the cap when the same file is committed as a fresh document", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sweeping.svg"],
+          discreteSampling: { "sweeping.svg": 24 },
+        },
+      },
+    });
+    const first = makeAnimation(12000);
+    commitObject(harness, "sweeping.svg", [first]);
+    assert.deepStrictEqual(first.calls.map((call) => call.easing), ["steps(288, end)"]);
+
+    const second = makeAnimation(12000);
+    harness.api.swapToFile("sweeping.svg", "working", true, { forceDocumentReload: true });
+    const pending = harness.api.pendingNext;
+    attachFakeSvgDocument(pending, { animations: [second] });
+    pending.listeners.get("load")();
+    assert.deepStrictEqual(second.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("keeps low-power pause working on a sampled object document", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          objectChannelFiles: ["sleeping.svg"],
+          discreteSampling: { "sleeping.svg": 24 },
+        },
+      },
+    });
+    const animation = makeAnimation(12000);
+    const objectEl = commitObject(harness, "sleeping.svg", [animation]);
+    harness.api.setCurrentState("sleeping");
+    harness.api.setLowPowerIdleMode(true);
+    harness.api.pauseCurrentSvgForLowPower();
+
+    assert.equal(harness.api.lowPowerSvgPaused, true);
+    assert.ok(objectEl.contentDocument.getElementById("clawd-low-power-pause-svg"));
   });
 });
 

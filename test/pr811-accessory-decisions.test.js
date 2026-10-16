@@ -280,6 +280,13 @@ test("Clawd lists bender, both sleep poses and thinking as object-channel SVGs",
   ]);
 });
 
+test("Clawd caps its thinking object-channel animation to 24 discrete steps per second", () => {
+  const theme = themeLoader.loadTheme("clawd", { strict: true });
+  assert.deepStrictEqual(theme.rendering.discreteSampling, {
+    "clawd-working-thinking.svg": 24,
+  });
+});
+
 test("bender uses the one-unit anti-crop viewBox and its measured face-plant hitbox", () => {
   const theme = themeLoader.loadTheme("clawd", { strict: true });
   assert.deepStrictEqual(theme.idleEasterEggs, [{

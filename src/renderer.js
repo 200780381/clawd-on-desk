@@ -102,6 +102,11 @@ function initWithConfig(cfg) {
       ? tc.rendering.objectChannelFiles
       : []
   );
+  _discreteSampling = new Map(
+    tc.rendering && tc.rendering.discreteSampling && typeof tc.rendering.discreteSampling === "object"
+      ? Object.entries(tc.rendering.discreteSampling)
+      : []
+  );
   _lowPowerStaticImageOverrides = (tc.rendering && tc.rendering.lowPowerStaticImageOverrides) || {};
   _petTintSupported = tc.petTintSupported === true;
   if (Object.prototype.hasOwnProperty.call(tc, "petTintPayload")) {
@@ -502,6 +507,7 @@ let _eyeTrackingStates;
 let _trustedScriptedSvgFiles = new Set();
 let _forceSvgObjectChannel = false;
 let _objectChannelFiles = new Set();
+let _discreteSampling = new Map();
 let _imgCacheBustSeq = 0;
 let _miniViewBox = null;
 let _fileViewBoxes = {};
@@ -1824,6 +1830,52 @@ function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
 }
 
 /**
+ * Cap a document-backed SVG's CSS animations to a discrete number of frames per
+ * second. The <object> channel hands its animation timeline to the compositor,
+ * which otherwise advances it once per display refresh — needlessly expensive
+ * for a background pet on high-refresh panels. Only files the theme opts in via
+ * rendering.discreteSampling are touched; every animation is sampled by
+ * rewriting its easing to steps() over one full duration, so frame count scales
+ * with the authored duration. SMIL animations are not CSS animations and are
+ * deliberately out of scope, as are <img> playbacks (no contentDocument).
+ */
+function applyDiscreteSampling(objectEl, file) {
+  const rate = _discreteSampling.get(file);
+  if (!rate || !objectEl || objectEl.tagName !== "OBJECT") return;
+  let animations = [];
+  try {
+    const contentDocument = objectEl.contentDocument;
+    if (!contentDocument || typeof contentDocument.getAnimations !== "function") return;
+    animations = contentDocument.getAnimations();
+  } catch {
+    return;
+  }
+  for (const animation of animations) {
+    const effect = animation && animation.effect;
+    if (
+      !effect
+      || typeof effect.getComputedTiming !== "function"
+      || typeof effect.updateTiming !== "function"
+    ) {
+      continue;
+    }
+    let timing = null;
+    try {
+      timing = effect.getComputedTiming();
+    } catch {
+      continue;
+    }
+    const durationMs = timing && Number.isFinite(timing.duration) ? timing.duration : NaN;
+    if (!Number.isFinite(durationMs) || durationMs <= 0) continue;
+    try {
+      effect.updateTiming({
+        easing: `steps(${Math.max(1, Math.round((durationMs / 1000) * rate))}, end)`,
+      });
+    } catch {}
+  }
+}
+
+/**
  * Swap to a new animation file.
  * @param {string} file - animation filename
  * @param {string|null} state - current state name (for eye tracking decision)
@@ -2067,6 +2119,10 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       settleSuccessfulVisual(next.__clawdVisualRequest, file, "object", {
         fallback: next.__clawdFallbackFromObject === true,
       });
+      // Fresh document every time (first load, same-file re-entry, system-wake
+      // force reload): each carries its own refreshed animation timeline, so the
+      // cap must be reapplied here rather than once per file.
+      applyDiscreteSampling(next, file);
 
       if (commitState && tracksEyesForFile(commitState, file)) {
         attachEyeTracking(next);

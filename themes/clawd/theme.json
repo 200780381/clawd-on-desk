@@ -11,7 +11,10 @@
       "clawd-collapse-sleep.svg",
       "clawd-sleeping.svg",
       "clawd-working-thinking.svg"
-    ]
+    ],
+    "discreteSampling": {
+      "clawd-working-thinking.svg": 24
+    }
   },
   "customization": {
     "petTint": true,
