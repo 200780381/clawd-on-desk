@@ -384,9 +384,11 @@ function runMainTickOnce() {
     if (!idleNow && !miniIdleNow && !roamNow) return nextDelay();
 
     // ── Free roam: cancel roaming when mouse moves ──
-    if (roamNow && moved) {
-      resetIdlePeriodForMouseMove();
-      if (ctx.roam && ctx.roam.enabled) ctx.roam.cancelRoam();
+    if (ctx.roam && moved && ctx.roam.enabled) {
+      // Pointer movement during an idle gap must defer the queued walk;
+      // during a walk it also ends the unattended period.
+      if (roamNow) resetIdlePeriodForMouseMove();
+      ctx.roam.cancelRoam();
     }
 
     // ── Below: idle or mini-idle logic ──

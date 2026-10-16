@@ -871,6 +871,30 @@ describe("tick free roam cancellation (#569)", () => {
     assert.equal(ctx.roamCancels, 0, "a still mouse must never cancel the walk");
   });
 
+  it("defers a queued walk when the mouse moves during state 'idle'", () => {
+    ctx = makeRoamCtx();
+    ctx.currentState = "idle";
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    mock.timers.tick(800);
+    assert.equal(ctx.roamCancels, 0, "no cancel while the mouse is still");
+
+    cursor = { x: 300, y: 260 };
+    mock.timers.tick(800);
+    assert.ok(ctx.roamCancels >= 1, "mouse move during idle must defer the queued walk");
+  });
+
+  it("does not cancel a queued walk while the mouse stays still during state 'idle'", () => {
+    ctx = makeRoamCtx();
+    ctx.currentState = "idle";
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+
+    for (let i = 0; i < 6; i++) mock.timers.tick(800);
+    assert.equal(ctx.roamCancels, 0, "a still mouse during idle must leave the queued walk intact");
+  });
+
   it("does not cancel a walk while idlePaused (e.g. menu open)", () => {
     ctx = makeRoamCtx();
     ctx.idlePaused = true;
