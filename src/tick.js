@@ -18,9 +18,9 @@ let idleLookReturnTimer = null;
 let idleLookVisualGeneration = null;
 let idleLookAttempt = null;
 let yawnDelayTimer = null;     // tracked setTimeout for yawn/idle-look transitions
-// True while the previous tick was in the continuous idle/roam period. A
-// completed or cancelled roam must not look like fresh user activity.
-let idleOrRoamWasActive = false;
+// Track idle visual edges separately from walks that preserve unattended timing.
+let idleWasActive = false;
+let roamWasActive = false;
 let lastEyeDx = 0, lastEyeDy = 0;
 let lastPointerBridgeKey = null;
 let lastPointerBridgePayload = null;
@@ -296,13 +296,12 @@ function runMainTickOnce() {
     const roamNow = ctx.currentState === "roam" && !ctx.idlePaused;
     const nextDelay = () => getNextTickDelay(idleNow, miniIdleNow);
 
-    if (idleNow && !idleOrRoamWasActive) {
+    const enteredIdle = idleNow && !idleWasActive;
+    const cameFromWalk = enteredIdle && roamWasActive;
+    if (enteredIdle) {
+      // Every idle entry starts a fresh visual, including after a walk has
+      // interrupted an idle animation, eye tracking, or cursor spin.
       isMouseIdle = false;
-      hasTriggeredYawn = false;
-      idleLookPlayed = false;
-      lastCursorX = null;
-      lastCursorY = null;
-      mouseStillSince = Date.now();
       lastEyeDx = 0;
       lastEyeDy = 0;
       lastCursorAngle = null;
@@ -312,15 +311,25 @@ function runMainTickOnce() {
       idleLookAttempt = null;
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
+      if (!cameFromWalk) {
+        // A completed or cancelled automatic walk is not user activity: keep
+        // its unattended clock, consumed animations, and cursor baseline.
+        hasTriggeredYawn = false;
+        idleLookPlayed = false;
+        lastCursorX = null;
+        lastCursorY = null;
+        mouseStillSince = Date.now();
+      }
     }
 
-    if (!idleNow && idleOrRoamWasActive) {
+    if (!idleNow && idleWasActive) {
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
       idleLookVisualGeneration = null;
       idleLookAttempt = null;
     }
-    idleOrRoamWasActive = idleNow || roamNow;
+    idleWasActive = idleNow;
+    roamWasActive = roamNow;
 
     // Skip expensive native IPC calls (getCursorScreenPoint, getBounds) when
     // cursor tracking is not needed — saves ~20 calls/sec to the OS layer.
@@ -628,7 +637,8 @@ function cleanup() {
   isMouseIdle = false;
   hasTriggeredYawn = false;
   idleLookPlayed = false;
-  idleOrRoamWasActive = false;
+  idleWasActive = false;
+  roamWasActive = false;
   lastEyeDx = 0;
   lastEyeDy = 0;
   lastPointerBridgeKey = null;

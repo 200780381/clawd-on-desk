@@ -956,6 +956,52 @@ describe("tick unattended roam sleep (#1202)", () => {
     assert.equal(statesSeen.includes("yawning"), false);
   });
 
+  it("restores eye tracking after roam interrupts an idle animation without restarting the unattended period", () => {
+    const theme = cloneTheme(_defaultTheme);
+    theme.idleAnimations = [{ file: "clawd-idle-look.svg", duration: 5000 }];
+    theme.timings.mouseIdleTimeout = 60;
+    theme.timings.mouseSleepTimeout = 100000;
+    ctx = makeCtx(theme, statesSeen);
+    ctx.roam = { enabled: true, cancelRoam() {}, tick() {} };
+    let visualGeneration = 0;
+    ctx.sendToRenderer = (channel, state, svg, options) => {
+      if (channel !== "state-change") return;
+      ctx.currentSvg = svg;
+      const request = { visualGeneration: ++visualGeneration };
+      if (state === "idle" && svg === "clawd-idle-look.svg") {
+        statesSeen.push("idle-animation");
+      }
+      if (options && typeof options.onLogicalSettlement === "function") {
+        options.onLogicalSettlement({ status: "committed", visualGeneration: request.visualGeneration });
+      }
+      return request;
+    };
+    tickApi = loader.initTick(ctx);
+    tickApi.startMainTick();
+    mock.timers.tick(1);
+    const stillSince = tickApi._mouseStillSince;
+
+    for (let i = 0; i < 20 && statesSeen.length === 0; i++) mock.timers.tick(50);
+    assert.deepStrictEqual(statesSeen, ["idle-animation"], "the idle animation must start before roam interrupts it");
+
+    ctx.currentState = "roam";
+    tickApi.scheduleSoon(0);
+    mock.timers.tick(1);
+    ctx.currentState = "idle";
+    tickApi.scheduleSoon(0);
+    mock.timers.tick(1);
+    assert.equal(tickApi._mouseStillSince, stillSince, "the automatic walk must preserve the unattended period");
+
+    ctx.forceEyeResend = true;
+    ctx.currentSvg = theme.states.idle[0];
+    tickApi.scheduleSoon(0);
+    mock.timers.tick(1);
+    assert.equal(ctx.forceEyeResend, false, "eye tracking must resume after the interrupted idle animation");
+
+    for (let i = 0; i < 20; i++) mock.timers.tick(50);
+    assert.deepStrictEqual(statesSeen, ["idle-animation"], "the idle animation must stay consumed for this unattended period");
+  });
+
   it("starts a fresh unattended period when another state returns to idle", () => {
     const theme = cloneTheme(_defaultTheme);
     ctx = makeCtx(theme, statesSeen);
@@ -987,7 +1033,7 @@ describe("tick unattended roam sleep (#1202)", () => {
     assert.ok(tickApi._mouseStillSince > beforeMovement);
   });
 
-  it("finishes an expired walk and then follows the full sleep chain without another roam", () => {
+  it("finishes an expired walk and then enters yawning without another roam", () => {
     const theme = cloneTheme(_defaultTheme);
     theme.idleAnimations = [];
     theme.timings.mouseSleepTimeout = 1000;
