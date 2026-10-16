@@ -18,7 +18,9 @@ let idleLookReturnTimer = null;
 let idleLookVisualGeneration = null;
 let idleLookAttempt = null;
 let yawnDelayTimer = null;     // tracked setTimeout for yawn/idle-look transitions
-let idleWasActive = false;
+// True while the previous tick was in the continuous idle/roam period. A
+// completed or cancelled roam must not look like fresh user activity.
+let idleOrRoamWasActive = false;
 let lastEyeDx = 0, lastEyeDy = 0;
 let lastPointerBridgeKey = null;
 let lastPointerBridgePayload = null;
@@ -255,6 +257,20 @@ function sendPointerBridge(cursor, bounds) {
   ctx.sendToRenderer("cloudling-pointer", payload);
 }
 
+function resetIdlePeriodForMouseMove() {
+  mouseStillSince = Date.now();
+  hasTriggeredYawn = false;
+  idleLookPlayed = false;
+  if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
+  idleLookVisualGeneration = null;
+  idleLookAttempt = null;
+  if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
+  if (isMouseIdle) {
+    isMouseIdle = false;
+    ctx.sendToRenderer("state-change", "idle", idleRestSvg());
+  }
+}
+
 function shouldSuppressPassiveIpc() {
   return !!ctx.lowPowerIdlePaused && LOW_POWER_PAUSE_STATES.has(ctx.currentState);
 }
@@ -280,7 +296,7 @@ function runMainTickOnce() {
     const roamNow = ctx.currentState === "roam" && !ctx.idlePaused;
     const nextDelay = () => getNextTickDelay(idleNow, miniIdleNow);
 
-    if (idleNow && !idleWasActive) {
+    if (idleNow && !idleOrRoamWasActive) {
       isMouseIdle = false;
       hasTriggeredYawn = false;
       idleLookPlayed = false;
@@ -292,15 +308,19 @@ function runMainTickOnce() {
       lastCursorAngle = null;
       accumulatedSpin = 0;
       lastSpinTickAt = 0;
+      idleLookVisualGeneration = null;
+      idleLookAttempt = null;
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
     }
 
-    if (!idleNow && idleWasActive) {
+    if (!idleNow && idleOrRoamWasActive) {
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
+      idleLookVisualGeneration = null;
+      idleLookAttempt = null;
     }
-    idleWasActive = idleNow;
+    idleOrRoamWasActive = idleNow || roamNow;
 
     // Skip expensive native IPC calls (getCursorScreenPoint, getBounds) when
     // cursor tracking is not needed — saves ~20 calls/sec to the OS layer.
@@ -364,27 +384,16 @@ function runMainTickOnce() {
     if (!idleNow && !miniIdleNow && !roamNow) return nextDelay();
 
     // ── Free roam: cancel roaming when mouse moves ──
-    if (ctx.roam) {
-      if (moved && ctx.roam.enabled) {
-        ctx.roam.cancelRoam();
-      }
+    if (roamNow && moved) {
+      resetIdlePeriodForMouseMove();
+      if (ctx.roam && ctx.roam.enabled) ctx.roam.cancelRoam();
     }
 
     // ── Below: idle or mini-idle logic ──
     // Normal idle: mouse idle detection + sleep sequence
     if (idleNow) {
       if (moved) {
-        mouseStillSince = Date.now();
-        hasTriggeredYawn = false;
-        idleLookPlayed = false;
-        if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
-        idleLookVisualGeneration = null;
-        idleLookAttempt = null;
-        if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
-        if (isMouseIdle) {
-          isMouseIdle = false;
-          ctx.sendToRenderer("state-change", "idle", idleRestSvg());
-        }
+        resetIdlePeriodForMouseMove();
       }
 
       const elapsed = Date.now() - mouseStillSince;
@@ -617,7 +626,7 @@ function cleanup() {
   isMouseIdle = false;
   hasTriggeredYawn = false;
   idleLookPlayed = false;
-  idleWasActive = false;
+  idleOrRoamWasActive = false;
   lastEyeDx = 0;
   lastEyeDy = 0;
   lastPointerBridgeKey = null;

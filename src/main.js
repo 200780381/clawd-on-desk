@@ -5677,6 +5677,11 @@ const _roamCtx = {
   clampToScreenVisual,
   getMiniMode: () => _mini.getMiniMode(),
   getCurrentState: () => _state.getCurrentState(),
+  getUnattendedMs: () => {
+    const mouseStillSince = _tick ? _tick._mouseStillSince : Date.now();
+    return Date.now() - mouseStillSince;
+  },
+  getSleepTimeoutMs: () => getActiveTheme().timings.mouseSleepTimeout,
   isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),
   get miniTransitioning() { return _mini.getMiniTransitioning(); },
   applyState: (state, svgOverride, opts) => _state.applyState(state, svgOverride, opts),
