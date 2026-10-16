@@ -26,7 +26,10 @@ const EYE_ATTACH_MAX_ATTEMPTS = 60;
 // A freshly-committed <object> may not expose its contentDocument at the exact
 // load callback; retry sampling on the same bounded cadence as eye attachment.
 const DISCRETE_SAMPLING_RETRY_MS = 16;
-const DISCRETE_SAMPLING_MAX_ATTEMPTS = 60;
+// A synchronous first attempt runs immediately; only its failures schedule
+// retries, so this many retries means at most DISCRETE_SAMPLING_MAX_RETRIES + 1
+// document-ready checks per committed OBJECT.
+const DISCRETE_SAMPLING_MAX_RETRIES = 60;
 const WAKE_OBJECT_RELOAD_RETRIES = 1;
 const LOW_POWER_PAUSE_STYLE_ID = "clawd-low-power-pause-svg";
 const LOW_POWER_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing", "collapsing", "sleeping"]);
@@ -1763,9 +1766,6 @@ let currentDisplayedAssetUrl = null;
 let pendingSvgFile = null; // tracks the SVG currently being loaded (for dedup)
 let pendingAssetUrl = null;
 let activeSwapToken = 0;
-// Invalidates discrete-sampling retries owned by a superseded OBJECT swap,
-// mirroring activeSwapToken's role for the visibility rescue timer.
-let discreteSamplingToken = 0;
 let swapVisibilityRescueTimer = null;
 let petVisualReadyNotified = false;
 currentIdleSvg = currentDisplayedSvg;
@@ -1838,26 +1838,30 @@ function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
 
 /**
  * Give each CSS animation in a document-backed SVG about `rate` sample steps per
- * full cycle, by rewriting its easing to steps() over one duration. Only files
+ * second — a full cycle lasting D seconds becomes round(D * rate) steps — by
+ * rewriting its easing to steps() over one duration. Only files
  * the theme opts into via rendering.discreteSampling are touched, and only on
  * the <object> channel (an <img> playback exposes no contentDocument). SMIL
  * animations are not CSS animations and are deliberately out of scope.
  *
  * The contentDocument can still be transiently null at the commit point, so the
- * attempt is retried a bounded number of times against this exact OBJECT element
- * and file; a later swap bumps discreteSamplingToken and retires those retries.
+ * synchronous first attempt plus at most DISCRETE_SAMPLING_MAX_RETRIES retries
+ * wait for this exact OBJECT element and file. Retries live only while that
+ * element is still the displayed, connected object for the file: a successful
+ * swap changes clawdEl, releasing the element disconnects it, and a failed or
+ * cancelled swap simply leaves the old object in place with its retry intact.
  * Sampling stays best-effort: if the document never arrives we stop quietly.
  */
 function applyDiscreteSampling(objectEl, file) {
   const rate = _discreteSampling.get(file);
   if (!rate || !objectEl || objectEl.tagName !== "OBJECT") return;
-  const token = discreteSamplingToken;
 
   const trySample = (attempt) => {
-    // Identity check binds the retry to the element that was committed: any
-    // theme change, file change, or IMG fallback must retire it silently.
-    if (token !== discreteSamplingToken) return;
-    if (clawdEl !== objectEl || currentDisplayedSvg !== file) return;
+    // Bind the retry to the element that was committed. A newer committed
+    // object, a different displayed file, or a released element silently
+    // retires it; a failed/cancelled swap keeps the same element on screen and
+    // therefore keeps this retry alive.
+    if (clawdEl !== objectEl || currentDisplayedSvg !== file || !objectEl.isConnected) return;
 
     let contentDocument = null;
     try {
@@ -1866,7 +1870,7 @@ function applyDiscreteSampling(objectEl, file) {
       contentDocument = null;
     }
     if (!contentDocument || typeof contentDocument.getAnimations !== "function") {
-      if (attempt < DISCRETE_SAMPLING_MAX_ATTEMPTS) {
+      if (attempt < DISCRETE_SAMPLING_MAX_RETRIES) {
         setTimeout(() => trySample(attempt + 1), DISCRETE_SAMPLING_RETRY_MS);
       } else {
         console.warn("Timed out waiting for SVG document to apply discrete sampling");
@@ -2081,7 +2085,6 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
   }
 
   const swapToken = ++activeSwapToken;
-  discreteSamplingToken++;
   cancelPendingSwap("superseded", { retainedRequest: visualRequest });
 
   pendingSvgFile = file; // track what's loading for dedup

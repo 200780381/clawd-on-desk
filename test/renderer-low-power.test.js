@@ -1012,7 +1012,7 @@ describe("renderer discrete animation sampling", () => {
     assert.ok(objectEl, "the object was committed even without a document");
 
     const drained = drainActiveTimers(harness, (timer) => timer.ms === 16, 200);
-    assert.strictEqual(drained, 60, "the retry budget is bounded to 60 attempts");
+    assert.strictEqual(drained, 60, "after the synchronous first attempt the retry budget is bounded to 60 retries");
     assert.deepStrictEqual(animation.calls, []);
     assert.strictEqual(
       harness.warnings.filter((warning) => warning.includes("discrete sampling")).length,
@@ -1033,6 +1033,66 @@ describe("renderer discrete animation sampling", () => {
     attachFakeSvgDocument(supersededObject, { animations: [supersededAnimation] });
     drainActiveTimers(harness, (timer) => timer.ms === 16);
     assert.deepStrictEqual(supersededAnimation.calls, [], "the retired object is never sampled");
+  });
+
+  it("keeps sampling a displayed object when a newer swap fails", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    // A click reaction / cue starts a newer IMG swap for another file...
+    harness.api.swapToFile("reaction.svg", "working", false);
+    const pendingImg = harness.api.pendingNext;
+    assert.strictEqual(pendingImg.tagName, "IMG");
+    // ...and that newer swap fails, so the old object keeps displaying.
+    pendingImg.listeners.get("error")();
+    assert.strictEqual(harness.api.clawdEl, objectEl, "the failed swap left the old object on screen");
+    assert.strictEqual(harness.api.pendingNext, null);
+
+    attachFakeSvgDocument(objectEl, { animations: [animation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(
+      animation.calls.map((call) => call.easing),
+      ["steps(288, end)"],
+      "the still-displayed object finishes its pending sampling",
+    );
+  });
+
+  it("resumes the displayed object's sampling when a pending swap is cancelled", () => {
+    const harness = samplingHarness(["sweeping.svg", "fallback.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    // A newer OBJECT is pending but not yet loaded when the cue returns to A.
+    harness.api.swapToFile("fallback.svg", "working", true);
+    const pendingObject = harness.api.pendingNext;
+    assert.strictEqual(pendingObject.tagName, "OBJECT");
+
+    harness.electronHandlers.onStateChange("working", "sweeping.svg");
+    assert.strictEqual(harness.api.clawdEl, objectEl, "the displayed object is unchanged");
+    assert.strictEqual(harness.api.pendingNext, null, "the pending swap was cancelled");
+
+    attachFakeSvgDocument(objectEl, { animations: [animation] });
+    drainActiveTimers(harness, (timer) => timer.ms === 16);
+    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  });
+
+  it("stops retrying once the committed object is detached from the DOM", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(12000);
+    const objectEl = commitObjectWithoutDocument(harness, "sweeping.svg");
+
+    objectEl.remove();
+    assert.strictEqual(objectEl.isConnected, false);
+
+    const drained = drainActiveTimers(harness, (timer) => timer.ms === 16, 200);
+    assert.ok(drained < 60, `a detached object stops early, drained ${drained} retries`);
+    assert.deepStrictEqual(animation.calls, []);
+    assert.strictEqual(
+      harness.warnings.filter((warning) => warning.includes("discrete sampling")).length,
+      0,
+      "a detached object never exhausts the retry budget",
+    );
   });
 });
 
