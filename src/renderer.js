@@ -32,7 +32,18 @@ const DISCRETE_SAMPLING_RETRY_MS = 16;
 const DISCRETE_SAMPLING_MAX_RETRIES = 60;
 const WAKE_OBJECT_RELOAD_RETRIES = 1;
 const LOW_POWER_PAUSE_STYLE_ID = "clawd-low-power-pause-svg";
-const LOW_POWER_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing", "collapsing", "sleeping"]);
+// Deep sleep can sit on screen all night, so those states always pause: the
+// user's low-power switch is about optional idle states, not about burning CPU
+// on a sleeping pose.
+const DEEP_SLEEP_PAUSE_STATES = new Set(["collapsing", "sleeping"]);
+const LOW_POWER_OPTIONAL_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing"]);
+// Mirrors the set in src/tick.js (the main process keeps its own copy). Keep
+// this as the union of both policies even though the renderer now consults the
+// split sets directly.
+const LOW_POWER_PAUSE_STATES = new Set([
+  ...LOW_POWER_OPTIONAL_PAUSE_STATES,
+  ...DEEP_SLEEP_PAUSE_STATES,
+]);
 const LOW_POWER_BOUNDARY_EPSILON_MS = 80;
 const CLOUDLING_POINTER_BRIDGE_STATES = new Set(["idle", "mini-idle", "mini-peek"]);
 const CODEX_PET_VISUAL_BY_FILE = Object.freeze({
@@ -291,13 +302,18 @@ function setCurrentScriptedSvgLowPowerPaused(paused) {
   } catch {}
 }
 
+function shouldPauseAnimationsForState(state) {
+  return DEEP_SLEEP_PAUSE_STATES.has(state)
+    || (lowPowerIdleMode && LOW_POWER_OPTIONAL_PAUSE_STATES.has(state));
+}
+
 function shouldPauseForLowPower() {
   if (isReacting || isDragReacting) return false;
-  return lowPowerIdleMode && LOW_POWER_PAUSE_STATES.has(currentState);
+  return shouldPauseAnimationsForState(currentState);
 }
 
 function shouldSuppressPassiveTrackingForLowPower() {
-  return lowPowerIdleMode && lowPowerSvgPaused && shouldPauseForLowPower();
+  return lowPowerSvgPaused && shouldPauseForLowPower();
 }
 
 function setLowPowerSvgPaused(paused) {
@@ -344,11 +360,27 @@ function getLowPowerAnimationBoundaryDelayMs(root) {
       : (Number.isFinite(animation.currentTime) ? animation.currentTime : null);
     if (!Number.isFinite(localTime) || localTime < 0) continue;
 
+    // endTime is the end of the whole effect and already includes any delay;
+    // activeDuration alone would undercount a delayed animation and pause it
+    // mid-tail.
+    if (Number.isFinite(timing.endTime) && timing.endTime > localTime) {
+      delayMs = Math.max(delayMs, timing.endTime - localTime);
+      continue;
+    }
+
     const activeDuration = Number.isFinite(timing.activeDuration)
       ? timing.activeDuration
       : (Number.isFinite(timing.endTime) ? timing.endTime : null);
     if (Number.isFinite(activeDuration) && activeDuration > localTime) {
       delayMs = Math.max(delayMs, activeDuration - localTime);
+      continue;
+    }
+
+    const delay = Number.isFinite(timing.delay) ? timing.delay : 0;
+    // An infinite animation still waiting out its delay has no loop boundary;
+    // its next meaningful boundary is the end of that delay.
+    if (delay > 0 && localTime < delay) {
+      delayMs = Math.max(delayMs, delay - localTime);
       continue;
     }
 
@@ -423,7 +455,9 @@ function scheduleLowPowerIdlePause() {
 }
 
 function noteLowPowerActivity() {
-  if (!lowPowerIdleMode && !lowPowerSvgPaused) return;
+  // Cheap path for the default configuration: nothing is paused and the
+  // current state has no mandatory pause, so there is nothing to reschedule.
+  if (!shouldPauseForLowPower() && !lowPowerSvgPaused) return;
   if (lowPowerSvgPaused) {
     resumeCurrentSvgForLowPower();
   }
@@ -432,11 +466,9 @@ function noteLowPowerActivity() {
 
 function setLowPowerIdleMode(enabled) {
   lowPowerIdleMode = !!enabled;
-  if (lowPowerIdleMode) {
-    scheduleLowPowerIdlePause();
-  } else {
-    resumeCurrentSvgForLowPower();
-  }
+  // Re-evaluate either way: turning the switch off must still keep deep sleep
+  // paused, while optional idle states resume.
+  scheduleLowPowerIdlePause();
 }
 
 function isSvgFile(file) {
@@ -1450,7 +1482,9 @@ function refreshAccessoryMediaChannel() {
 }
 
 function resolveLowPowerStaticImageOverride(state, file) {
-  if (!lowPowerIdleMode) return null;
+  // Scripted SVGs cannot be stopped by the CSS pause injection, so deep sleep
+  // needs its static substitute even when low-power idle mode is off.
+  if (!shouldPauseAnimationsForState(state)) return null;
   const override = _lowPowerStaticImageOverrides && _lowPowerStaticImageOverrides[state];
   if (!override || override.from !== file || !override.to) return null;
   return override.to;
@@ -2815,7 +2849,9 @@ function recoverFromSystemWake(payload) {
   // Do this even when the local mirror says false: the injected pause style or
   // the embedded SVG timeline can outlive that boolean across a system sleep.
   resumeCurrentSvgForLowPower();
-  if (lowPowerIdleMode) scheduleLowPowerIdlePause();
+  // Re-run the whole policy (including the fresh 5s grace) instead of freezing
+  // deep sleep on the first frame after wake.
+  scheduleLowPowerIdlePause();
 
   const needsEyes = tracksEyesForFile(currentState, currentDisplayedSvg);
   const shouldReloadEyeObject = lowPowerIdleMode
@@ -2922,7 +2958,7 @@ window.electronAPI.onEyeMove((dx, dy) => {
   lastEyeDx = effectiveDx;
   lastEyeDy = dy;
 
-  if (lowPowerIdleMode) noteLowPowerActivity();
+  noteLowPowerActivity();
 
   if (shouldSuppressPassiveTrackingForLowPower()) {
     _cancelLayerAnimLoop();
