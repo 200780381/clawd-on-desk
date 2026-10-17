@@ -110,22 +110,15 @@ describe("hit geometry", () => {
     approx(rect.h, 261);
   });
 
-  it("keeps Clawd sleep and thinking geometry and hit regions identical across OBJECT and IMG", () => {
+  it("keeps Clawd object-channel geometry and hit regions identical across OBJECT and IMG", () => {
     const imageTheme = structuredClone(clawd);
-    imageTheme.rendering.objectChannelFiles = imageTheme.rendering.objectChannelFiles
-      .filter((file) => ![
-        "clawd-collapse-sleep.svg",
-        "clawd-sleeping.svg",
-        "clawd-working-thinking.svg",
-      ].includes(file));
+    imageTheme.rendering.objectChannelFiles = [];
+    imageTheme.eyeTracking = { ...(imageTheme.eyeTracking || {}), enabled: false, states: [] };
 
-    for (const [state, file] of [
-      ["collapsing", "clawd-collapse-sleep.svg"],
-      ["sleeping", "clawd-sleeping.svg"],
-      ["thinking", "clawd-working-thinking.svg"],
-      ["working", "clawd-working-thinking.svg"],
-      ["juggling", "clawd-working-thinking.svg"],
-    ]) {
+    const files = clawd.rendering.objectChannelFiles;
+    assert.ok(files.length > 0, "Clawd declares object-channel files");
+    for (const file of files) {
+      const state = file.startsWith("clawd-mini-") ? "mini-idle" : null;
       assert.strictEqual(
         hitGeometry.usesObjectChannel(clawd, state, file),
         true,
@@ -139,11 +132,15 @@ describe("hit geometry", () => {
 
       const objectAsset = hitGeometry.getAssetRectScreen(clawd, bounds, state, file);
       const imageAsset = hitGeometry.getAssetRectScreen(imageTheme, bounds, state, file);
-      assert.deepStrictEqual(objectAsset, imageAsset, `${file} asset geometry changed`);
+      for (const key of ["x", "y", "w", "h"]) {
+        approx(objectAsset[key], imageAsset[key]);
+      }
 
       const objectHit = hitGeometry.getHitRectScreen(clawd, bounds, state, file, clawd.hitBoxes.default);
       const imageHit = hitGeometry.getHitRectScreen(imageTheme, bounds, state, file, imageTheme.hitBoxes.default);
-      assert.deepStrictEqual(objectHit, imageHit, `${file} hit geometry changed`);
+      for (const key of ["left", "top", "right", "bottom"]) {
+        approx(objectHit[key], imageHit[key]);
+      }
     }
   });
 

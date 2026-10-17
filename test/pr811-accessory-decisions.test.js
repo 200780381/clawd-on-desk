@@ -270,20 +270,54 @@ test("every visible animated cigarette has a measured or authored hit envelope",
   );
 });
 
-test("Clawd lists bender, both sleep poses and thinking as object-channel SVGs", () => {
+test("Clawd lists its long-lived animations as object-channel SVGs", () => {
   const theme = themeLoader.loadTheme("clawd", { strict: true });
   assert.deepStrictEqual(theme.rendering.objectChannelFiles, [
     "clawd-outlaw-bender.svg",
     "clawd-collapse-sleep.svg",
     "clawd-sleeping.svg",
     "clawd-working-thinking.svg",
+    "clawd-idle-follow.svg",
+    "clawd-idle-doze.svg",
+    "clawd-idle-look.svg",
+    "clawd-idle-reading.svg",
+    "clawd-idle-bubble.svg",
+    "clawd-idle-yawn.svg",
+    "clawd-working-debugger.svg",
+    "clawd-working-juggling.svg",
+    "clawd-working-sweeping.svg",
+    "clawd-headphones-groove.svg",
+    "clawd-designing.svg",
+    "clawd-heart-eyes.svg",
+    "clawd-mini-idle.svg",
+    "clawd-mini-sleep.svg",
+    "clawd-mini-peek.svg",
+    "clawd-mini-crabwalk.svg",
   ]);
 });
 
-test("Clawd caps its thinking object-channel animation to 24 discrete steps per second", () => {
+test("Clawd caps its long-lived object-channel animations to 24 discrete steps per second", () => {
   const theme = themeLoader.loadTheme("clawd", { strict: true });
   assert.deepStrictEqual(theme.rendering.discreteSampling, {
     "clawd-working-thinking.svg": 24,
+    "clawd-idle-follow.svg": 24,
+    "clawd-idle-doze.svg": 24,
+    "clawd-idle-look.svg": 24,
+    "clawd-idle-reading.svg": 24,
+    "clawd-idle-bubble.svg": 24,
+    "clawd-idle-yawn.svg": 24,
+    "clawd-collapse-sleep.svg": 24,
+    "clawd-sleeping.svg": 24,
+    "clawd-working-debugger.svg": 24,
+    "clawd-working-juggling.svg": 24,
+    "clawd-working-sweeping.svg": 24,
+    "clawd-headphones-groove.svg": 24,
+    "clawd-designing.svg": 24,
+    "clawd-heart-eyes.svg": 24,
+    "clawd-mini-idle.svg": 24,
+    "clawd-mini-sleep.svg": 24,
+    "clawd-mini-peek.svg": 24,
+    "clawd-mini-crabwalk.svg": 24,
   });
 });
 

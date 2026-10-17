@@ -350,6 +350,8 @@ globalThis.__rendererTest = {
   normalizeDragDirection,
   applyDirectionalDragToObject,
   applyCodexPetVisualToObject,
+  applyDiscreteSampling,
+  computeDiscreteSamplingTiming,
   pauseCurrentSvgForLowPower,
   setLowPowerSvgPaused,
   scheduleLowPowerIdlePause,
@@ -868,21 +870,52 @@ describe("renderer directional drag reactions (#620)", () => {
 });
 
 describe("renderer discrete animation sampling", () => {
-  function makeAnimation(duration) {
-    const calls = [];
-    return {
-      calls,
-      effect: {
-        getComputedTiming: () => ({ duration }),
-        updateTiming(timing) { calls.push(timing); },
-      },
-    };
+  class FakeAnimation {
+    constructor({
+      duration,
+      delay = 0,
+      iterations = Infinity,
+      playState = "running",
+      startTime = 0,
+      playbackRate = 1,
+      iterationStart = 0,
+    } = {}) {
+      this.calls = [];
+      this.playState = playState;
+      this.playbackRate = playbackRate;
+      this.iterationStart = iterationStart;
+      this.startTime = startTime;
+      this.ready = Promise.resolve();
+      this.effect = {
+        getComputedTiming: () => ({ duration, delay, iterations }),
+        updateTiming: (timing) => { this.calls.push(timing); },
+      };
+    }
+  }
+  class FakeCSSAnimation extends FakeAnimation {}
+  class FakeCSSTransition extends FakeAnimation {}
+
+  function makeAnimation(duration, options = {}) {
+    return new FakeCSSAnimation({ duration, ...options });
+  }
+
+  function approx(actual, expected, epsilon = 0.01) {
+    assert.ok(
+      Math.abs(actual - expected) <= epsilon,
+      `expected ${actual} to be within ${epsilon} of ${expected}`
+    );
+  }
+
+  function attachAnimationDocument(objectEl, animations) {
+    objectEl.contentWindow.CSSAnimation = FakeCSSAnimation;
+    objectEl.contentWindow.CSSTransition = FakeCSSTransition;
+    attachFakeSvgDocument(objectEl, { animations });
   }
 
   function commitObject(harness, file, animations) {
     harness.api.swapToFile(file, "working", true);
     const pending = harness.api.pendingNext;
-    attachFakeSvgDocument(pending, { animations });
+    attachAnimationDocument(pending, animations);
     pending.listeners.get("load")();
     return pending;
   }
@@ -892,6 +925,8 @@ describe("renderer discrete animation sampling", () => {
   function commitObjectWithoutDocument(harness, file) {
     harness.api.swapToFile(file, "working", true);
     const pending = harness.api.pendingNext;
+    pending.contentWindow.CSSAnimation = FakeCSSAnimation;
+    pending.contentWindow.CSSTransition = FakeCSSTransition;
     pending.listeners.get("load")();
     return pending;
   }
@@ -908,18 +943,104 @@ describe("renderer discrete animation sampling", () => {
     });
   }
 
-  it("maps a declared file rate onto steps() for a finite animation duration", () => {
-    const harness = createRendererHarness({
-      themeConfig: {
-        rendering: {
-          objectChannelFiles: ["sweeping.svg"],
-          discreteSampling: { "sweeping.svg": 24 },
-        },
-      },
-    });
-    const animation = makeAnimation(12000);
-    commitObject(harness, "sweeping.svg", [animation]);
-    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  it("snaps a loop onto the shared grid while leaving a finite entrance alone", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const loop = makeAnimation(12000);
+    const entrance = makeAnimation(1000, { iterations: 1 });
+    commitObject(harness, "sweeping.svg", [loop, entrance]);
+    assert.deepStrictEqual({ ...loop.calls[0] }, { duration: 12000, delay: 0, easing: "steps(288, end)" });
+    assert.deepStrictEqual(entrance.calls, [], "one-shot animations keep their arrival timing");
+  });
+
+  it("snaps period and delay onto the sampling grid", () => {
+    const { api } = samplingHarness(["sweeping.svg"]);
+    const snap = (durationMs, delayMs = 0) => api.computeDiscreteSamplingTiming({ durationMs, delayMs }, 24);
+
+    const long = snap(3200);
+    assert.strictEqual(long.steps, 77);
+    approx(long.durationMs, 3208.33);
+    approx(long.delayMs, 0);
+
+    const short = snap(150);
+    assert.strictEqual(short.steps, 4);
+    approx(short.durationMs, 166.67);
+
+    const exact = snap(12000);
+    assert.strictEqual(exact.steps, 288);
+    approx(exact.durationMs, 12000);
+
+    approx(snap(12000, -400).delayMs, -416.67);
+
+    const tiny = snap(1);
+    assert.strictEqual(tiny.steps, 1);
+    approx(tiny.durationMs, 41.67);
+  });
+
+  it("aligns animations with different periods onto one start time", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const fast = makeAnimation(500, { startTime: 120 });
+    const slow = makeAnimation(3200, { startTime: 40 });
+    commitObject(harness, "sweeping.svg", [fast, slow]);
+
+    assert.strictEqual(fast.startTime, 40);
+    assert.strictEqual(slow.startTime, 40);
+
+    const gridMs = 1000 / 24;
+    for (const animation of [fast, slow]) {
+      const { duration } = animation.calls[0];
+      approx(duration, Math.round(duration / gridMs) * gridMs);
+    }
+  });
+
+  it("skips transitions, paused, finished, finite and sped-up animations", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const transition = new FakeCSSTransition({ duration: 12000, startTime: 7 });
+    const paused = makeAnimation(12000, { playState: "paused", startTime: 7 });
+    const finished = makeAnimation(12000, { playState: "finished", startTime: 7 });
+    const finite = makeAnimation(12000, { iterations: 3, startTime: 7 });
+    const spedUp = makeAnimation(12000, { playbackRate: 2, startTime: 7 });
+    const eligible = makeAnimation(12000, { startTime: 0 });
+    commitObject(harness, "sweeping.svg", [transition, paused, finished, finite, spedUp, eligible]);
+
+    for (const animation of [transition, paused, finished, finite, spedUp]) {
+      assert.deepStrictEqual(animation.calls, []);
+      assert.strictEqual(animation.startTime, 7, "the sampler leaves ineligible timelines alone");
+    }
+    assert.strictEqual(eligible.calls.length, 1);
+  });
+
+  it("aligns a document only once", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(3200, { startTime: 50 });
+    const objectEl = commitObject(harness, "sweeping.svg", [animation]);
+    assert.strictEqual(animation.calls.length, 1);
+    const sampledTiming = { ...animation.calls[0] };
+
+    harness.api.applyDiscreteSampling(objectEl, "sweeping.svg");
+
+    assert.strictEqual(animation.calls.length, 1, "a second pass never rewrites the same document");
+    assert.deepStrictEqual({ ...animation.calls[0] }, sampledTiming);
+    assert.strictEqual(animation.startTime, 50);
+  });
+
+  it("waits for ready before aligning a pending animation", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const pending = makeAnimation(3200, { startTime: null });
+    pending.ready = ready;
+    const running = makeAnimation(3200, { startTime: 120 });
+    commitObject(harness, "sweeping.svg", [pending, running]);
+
+    assert.strictEqual(pending.calls.length, 1, "timing does not need to wait for ready");
+    assert.strictEqual(pending.startTime, null, "the start time does wait for ready");
+    assert.strictEqual(running.startTime, 120);
+
+    pending.startTime = 130;
+    resolveReady();
+    await ready;
+    await Promise.resolve();
+    assert.strictEqual(pending.startTime, 120, "both animations share the earliest start time");
   });
 
   it("skips animations that lack a finite positive duration", () => {
@@ -976,7 +1097,7 @@ describe("renderer discrete animation sampling", () => {
     const second = makeAnimation(12000);
     harness.api.swapToFile("sweeping.svg", "working", true, { forceDocumentReload: true });
     const pending = harness.api.pendingNext;
-    attachFakeSvgDocument(pending, { animations: [second] });
+    attachAnimationDocument(pending, [second]);
     pending.listeners.get("load")();
     assert.deepStrictEqual(second.calls.map((call) => call.easing), ["steps(288, end)"]);
   });
@@ -1112,7 +1233,7 @@ describe("renderer discrete animation sampling", () => {
     const freshObject = harness.api.pendingNext;
     assert.notStrictEqual(freshObject, objectEl);
     const freshAnimation = makeAnimation(12000);
-    attachFakeSvgDocument(freshObject, { animations: [freshAnimation] });
+    attachAnimationDocument(freshObject, [freshAnimation]);
     freshObject.listeners.get("load")();
 
     assert.strictEqual(harness.api.clawdEl, freshObject);
