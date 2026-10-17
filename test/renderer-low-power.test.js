@@ -352,6 +352,11 @@ globalThis.__rendererTest = {
   applyCodexPetVisualToObject,
   pauseCurrentSvgForLowPower,
   setLowPowerSvgPaused,
+  scheduleLowPowerIdlePause,
+  shouldPauseForLowPower,
+  shouldPauseAnimationsForState,
+  resolveLowPowerStaticImageOverride,
+  getLowPowerAnimationBoundaryDelayMs,
   recoverFromSystemWake,
   attachEyeTracking,
   isEyeTrackingReady,
@@ -1414,12 +1419,15 @@ describe("renderer test-result reactions", () => {
 });
 
 describe("renderer low-power idle mode", () => {
-  it("includes collapsing and sleeping in the renderer and tick pause sets", () => {
+  it("keeps collapsing and sleeping in the renderer pause policy and tick pause set", () => {
     const rendererSource = readNormalized(RENDERER);
     const tickSource = readNormalized(path.join(__dirname, "..", "src", "tick.js"));
     const expected = '["idle", "mini-idle", "dozing", "collapsing", "sleeping"]';
 
-    assert.ok(rendererSource.includes(`LOW_POWER_PAUSE_STATES = new Set(${expected})`));
+    assert.ok(rendererSource.includes('DEEP_SLEEP_PAUSE_STATES = new Set(["collapsing", "sleeping"])'));
+    assert.ok(rendererSource.includes('LOW_POWER_OPTIONAL_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing"])'));
+    assert.ok(rendererSource.includes("...LOW_POWER_OPTIONAL_PAUSE_STATES"));
+    assert.ok(rendererSource.includes("...DEEP_SLEEP_PAUSE_STATES"));
     assert.ok(tickSource.includes(`LOW_POWER_PAUSE_STATES = new Set(${expected})`));
   });
 
@@ -1454,6 +1462,178 @@ describe("renderer low-power idle mode", () => {
     }
   });
 
+  it("pauses collapsing and sleeping even when low-power idle mode is off", () => {
+    for (const state of ["collapsing", "sleeping"]) {
+      const harness = createRendererHarness();
+      const svg = attachFakeSvgDocument(harness.clawd);
+      harness.api.setCurrentState(state);
+      harness.api.scheduleLowPowerIdlePause();
+
+      const timer = harness.activeTimers().find((candidate) => candidate.ms === 5000);
+      assert.ok(timer, `${state} should schedule a pause`);
+      timer.cleared = true;
+      timer.callback();
+
+      assert.equal(harness.api.lowPowerSvgPaused, true, `${state} should pause`);
+      assert.ok(svg.svgDoc.getElementById("clawd-low-power-pause-svg"));
+    }
+  });
+
+  it("keeps optional idle states playing when low-power idle mode is off", () => {
+    for (const state of ["idle", "mini-idle", "dozing"]) {
+      const harness = createRendererHarness();
+      const svg = attachFakeSvgDocument(harness.clawd);
+      harness.api.setCurrentState(state);
+      harness.api.scheduleLowPowerIdlePause();
+
+      assert.equal(
+        harness.activeTimers().some((candidate) => candidate.ms === 5000),
+        false,
+        `${state} should not schedule a pause`
+      );
+      assert.equal(harness.api.lowPowerSvgPaused, false);
+      assert.equal(svg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
+    }
+  });
+
+  it("keeps deep sleep paused and resumes idle when low-power mode is turned off", () => {
+    const sleepingHarness = createRendererHarness();
+    const sleepingSvg = attachFakeSvgDocument(sleepingHarness.clawd);
+    sleepingHarness.api.setCurrentState("sleeping");
+    sleepingHarness.api.setLowPowerIdleMode(true);
+    const sleepingTimer = sleepingHarness.activeTimers().find((timer) => timer.ms === 5000);
+    sleepingTimer.cleared = true;
+    sleepingTimer.callback();
+    assert.equal(sleepingHarness.api.lowPowerSvgPaused, true);
+
+    sleepingHarness.api.setLowPowerIdleMode(false);
+    assert.equal(sleepingHarness.api.lowPowerSvgPaused, true, "deep sleep stays paused");
+    const rescheduled = sleepingHarness.activeTimers().find((timer) => timer.ms === 5000);
+    assert.ok(rescheduled, "deep sleep should stay on the pause schedule");
+    rescheduled.cleared = true;
+    rescheduled.callback();
+    assert.equal(sleepingHarness.api.lowPowerSvgPaused, true);
+    assert.ok(sleepingSvg.svgDoc.getElementById("clawd-low-power-pause-svg"));
+
+    const idleHarness = createRendererHarness();
+    const idleSvg = attachFakeSvgDocument(idleHarness.clawd);
+    idleHarness.api.setCurrentState("idle");
+    idleHarness.api.setLowPowerIdleMode(true);
+    const idleTimer = idleHarness.activeTimers().find((timer) => timer.ms === 5000);
+    idleTimer.cleared = true;
+    idleTimer.callback();
+    assert.equal(idleHarness.api.lowPowerSvgPaused, true);
+
+    idleHarness.api.setLowPowerIdleMode(false);
+    assert.equal(idleHarness.api.lowPowerSvgPaused, false);
+    assert.equal(idleSvg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
+  });
+
+  it("re-pauses deep sleep after a system wake even when low-power mode is off", () => {
+    const harness = createRendererHarness();
+    const svg = attachFakeSvgDocument(harness.clawd);
+    harness.api.setCurrentState("sleeping");
+    harness.api.scheduleLowPowerIdlePause();
+    const timer = harness.activeTimers().find((candidate) => candidate.ms === 5000);
+    timer.cleared = true;
+    timer.callback();
+    assert.equal(harness.api.lowPowerSvgPaused, true);
+
+    harness.electronHandlers.onSystemWake({ id: "wake-deep-off", trigger: "resume", attempt: 0 });
+    assert.equal(harness.api.lowPowerSvgPaused, false);
+    assert.equal(svg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
+
+    const rescheduled = harness.activeTimers().find((candidate) => candidate.ms === 5000);
+    assert.ok(rescheduled, "wake should restart the grace period");
+    rescheduled.cleared = true;
+    rescheduled.callback();
+    assert.equal(harness.api.lowPowerSvgPaused, true);
+  });
+
+  it("does not pause during a reaction and re-pauses when the state is re-sent", () => {
+    const harness = createRendererHarness();
+    attachFakeSvgDocument(harness.clawd);
+    harness.api.setCurrentState("sleeping");
+
+    harness.electronHandlers.onPlayClickReaction("wave.svg", 1000);
+    assert.equal(harness.api.isReacting, true);
+    assert.equal(harness.api.shouldPauseForLowPower(), false);
+    harness.api.scheduleLowPowerIdlePause();
+    assert.equal(harness.activeTimers().some((timer) => timer.ms === 5000), false);
+    assert.equal(harness.api.lowPowerSvgPaused, false);
+
+    const reactionTimer = harness.activeTimers().find((timer) => timer.ms === 1000);
+    assert.ok(reactionTimer);
+    reactionTimer.cleared = true;
+    reactionTimer.callback();
+    assert.equal(harness.api.isReacting, false);
+
+    // main's resume-from-reaction handler re-sends the current state, which is
+    // what puts deep sleep back on the pause schedule.
+    harness.electronHandlers.onStateChange("sleeping", "sleep.svg");
+    const pauseTimer = harness.activeTimers().find((timer) => timer.ms === 5000);
+    assert.ok(pauseTimer);
+    pauseTimer.cleared = true;
+    pauseTimer.callback();
+    assert.equal(harness.api.lowPowerSvgPaused, true);
+  });
+
+  it("uses the deep-sleep static image override regardless of the low-power switch", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          lowPowerStaticImageOverrides: {
+            sleeping: { from: "sleep.svg", to: "sleep-static.png" },
+            idle: { from: "idle.svg", to: "idle-static.png" },
+          },
+        },
+      },
+    });
+
+    assert.equal(harness.api.resolveLowPowerStaticImageOverride("sleeping", "sleep.svg"), "sleep-static.png");
+    assert.equal(harness.api.resolveLowPowerStaticImageOverride("idle", "idle.svg"), null);
+
+    harness.api.setLowPowerIdleMode(true);
+    assert.equal(harness.api.resolveLowPowerStaticImageOverride("idle", "idle.svg"), "idle-static.png");
+  });
+
+  it("counts animation delay when waiting for a low-power boundary", () => {
+    const harness = createRendererHarness();
+    const animation = (timing) => ({
+      playState: "running",
+      effect: {
+        getComputedTiming: () => timing,
+        getTiming: () => ({ direction: timing.direction }),
+      },
+    });
+
+    const delayedFinite = animation({
+      localTime: 5000,
+      endTime: 13000,
+      activeDuration: 7000,
+      delay: 6000,
+      duration: 7000,
+      direction: "normal",
+    });
+    assert.equal(
+      harness.api.getLowPowerAnimationBoundaryDelayMs({ getAnimations: () => [delayedFinite] }),
+      8000
+    );
+
+    const delayedLoop = animation({
+      localTime: 1000,
+      endTime: Infinity,
+      activeDuration: Infinity,
+      delay: 3000,
+      duration: 2000,
+      direction: "normal",
+    });
+    assert.equal(
+      harness.api.getLowPowerAnimationBoundaryDelayMs({ getAnimations: () => [delayedLoop] }),
+      2000
+    );
+  });
+
   it("waits for an animation boundary before pausing the current SVG", () => {
     const source = readNormalized(RENDERER);
 
@@ -1466,7 +1646,8 @@ describe("renderer low-power idle mode", () => {
   it("keeps the disabled-mode eye-move path cheap", () => {
     const source = fs.readFileSync(RENDERER, "utf8");
 
-    assert.ok(source.includes("if (!lowPowerIdleMode && !lowPowerSvgPaused) return;"));
+    assert.ok(source.includes("if (!shouldPauseForLowPower() && !lowPowerSvgPaused) return;"));
+    assert.ok(!source.includes("if (lowPowerIdleMode) noteLowPowerActivity();"));
   });
 
   it("resumes a low-power-paused eye target when the mouse moves", () => {
@@ -1495,7 +1676,7 @@ describe("renderer low-power idle mode", () => {
     const source = readNormalized(RENDERER);
 
     assert.ok(source.includes("function shouldSuppressPassiveTrackingForLowPower()"));
-    assert.ok(source.includes("return lowPowerIdleMode && lowPowerSvgPaused && shouldPauseForLowPower();"));
+    assert.ok(source.includes("return lowPowerSvgPaused && shouldPauseForLowPower();"));
     assert.ok(source.includes("function _cancelLayerAnimLoop()"));
     assert.ok(source.includes("for (const slotName of ACCESSORY_SLOT_NAMES) cancelAccessoryFollow(slotName);"));
     assert.ok(source.includes("else {\n    refreshAccessoryLayout();\n  }"));
@@ -1613,7 +1794,9 @@ describe("renderer low-power idle mode", () => {
     harness.electronHandlers.onSystemWake({ id: "wake-test-2", trigger: "resume", attempt: 0 });
 
     assert.equal(svg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
-    assert.equal(svg.root.unpauseCalls, 1);
+    // Recovery resumes explicitly and then re-runs the policy, which resumes
+    // again when the current state has no mandatory pause.
+    assert.ok(svg.root.unpauseCalls >= 1);
     const report = harness.electronCalls.find((call) => call.name === "reportSystemWakeStatus");
     assert.equal(report.args[0].lowPowerWasPaused, true);
     assert.equal(report.args[0].pauseStyleRemoved, true);
@@ -1877,24 +2060,23 @@ describe("renderer object-channel selection", () => {
     assert.ok(source.includes("|| needsAccessoryFollow;"));
   });
 
-  it("uses state-specific static image overrides only while low-power mode is enabled", () => {
+  it("uses state-specific static image overrides whenever the pause policy applies", () => {
     const source = readNormalized(RENDERER);
 
     assert.ok(source.includes("function resolveLowPowerStaticImageOverride(state, file)"));
-    assert.ok(source.includes("if (!lowPowerIdleMode) return null;"));
+    assert.ok(source.includes("if (!shouldPauseAnimationsForState(state)) return null;"));
     assert.ok(source.includes("const lowPowerStaticImageOverride = resolveLowPowerStaticImageOverride(state, requestedSvg);"));
     assert.ok(source.includes("const effectiveSvg = lowPowerStaticImageOverride || requestedSvg;"));
     assert.ok(source.includes("const desiredObjectChannel = lowPowerStaticImageOverride ? false : needsObjectChannel(state, effectiveSvg);"));
     assert.ok(source.includes("swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined, {"));
   });
 
-  it("waits for main's generated visual request before changing low-power sleeping media", () => {
+  it("waits for main's generated visual request before changing low-power media", () => {
     const harness = createRendererHarness({
       themeConfig: {
-        trustedScriptedSvgFiles: ["sleep.svg"],
         rendering: {
           lowPowerStaticImageOverrides: {
-            sleeping: { from: "sleep.svg", to: "sleep-static.png" },
+            idle: { from: "idle.svg", to: "idle-static.png" },
           },
         },
       },
@@ -1904,32 +2086,32 @@ describe("renderer object-channel selection", () => {
 
     const request = (generation) => ({
       themeId: "clawd",
-      logicalState: "sleeping",
-      displayState: "sleeping",
-      file: "sleep.svg",
+      logicalState: "idle",
+      displayState: "idle",
+      file: "idle.svg",
       source: "state",
       visualGeneration: generation,
     });
 
     harness.electronHandlers.onStateChange(request(1));
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
-    assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
+    assert.strictEqual(harness.api.pendingSvgFile, "idle.svg");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
 
     harness.electronHandlers.onLowPowerIdleModeChange(true);
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
-    assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
+    assert.strictEqual(harness.api.pendingSvgFile, "idle.svg");
     harness.electronHandlers.onStateChange(request(2));
     assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
-    assert.strictEqual(harness.api.pendingSvgFile, "sleep-static.png");
+    assert.strictEqual(harness.api.pendingSvgFile, "idle-static.png");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
 
     harness.electronHandlers.onLowPowerIdleModeChange(false);
     assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
-    assert.strictEqual(harness.api.pendingSvgFile, "sleep-static.png");
+    assert.strictEqual(harness.api.pendingSvgFile, "idle-static.png");
     harness.electronHandlers.onStateChange(request(3));
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
-    assert.strictEqual(harness.api.pendingSvgFile, "sleep.svg");
+    assert.strictEqual(harness.api.pendingSvgFile, "idle.svg");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
   });
 
@@ -2991,7 +3173,7 @@ describe("renderer pet accessory wardrobe", () => {
       "leaving global low-power must not resume a still-hidden mouth document"
     );
 
-    harness.api.swapToFile("reaction.svg", null, false);
+    harness.electronHandlers.onPlayClickReaction("reaction.svg", 1000);
     harness.api.pendingNext.listeners.get("load")();
     assert.strictEqual(harness.mouthAccessory.style.display, "block");
     assert.strictEqual(mouthSvg.root.unpauseCalls, unpauseBefore + 1);
