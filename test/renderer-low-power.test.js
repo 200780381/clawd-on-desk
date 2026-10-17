@@ -1634,6 +1634,45 @@ describe("renderer low-power idle mode", () => {
     );
   });
 
+  it("waits for the animation boundary after the low-power grace period", () => {
+    const harness = createRendererHarness();
+    const svg = attachFakeSvgDocument(harness.clawd);
+    const animation = {
+      playState: "running",
+      effect: {
+        getComputedTiming: () => ({
+          localTime: 1000,
+          endTime: Infinity,
+          activeDuration: Infinity,
+          delay: 0,
+          duration: 4500,
+          direction: "normal",
+        }),
+        getTiming: () => ({ direction: "normal" }),
+      },
+    };
+    svg.root.getAnimations = () => [animation];
+
+    harness.api.setCurrentState("sleeping");
+    harness.api.scheduleLowPowerIdlePause();
+
+    const graceTimer = harness.activeTimers().find((timer) => timer.ms === 5000);
+    assert.ok(graceTimer, "the 5s grace period should be scheduled");
+    graceTimer.cleared = true;
+    graceTimer.callback();
+
+    assert.equal(harness.api.lowPowerSvgPaused, false);
+    assert.equal(svg.svgDoc.getElementById("clawd-low-power-pause-svg"), null);
+
+    const boundaryTimer = harness.activeTimers().find((timer) => timer.ms === 3500);
+    assert.ok(boundaryTimer, "the loop boundary should be awaited");
+    boundaryTimer.cleared = true;
+    boundaryTimer.callback();
+
+    assert.equal(harness.api.lowPowerSvgPaused, true);
+    assert.ok(svg.svgDoc.getElementById("clawd-low-power-pause-svg"));
+  });
+
   it("waits for an animation boundary before pausing the current SVG", () => {
     const source = readNormalized(RENDERER);
 
@@ -2113,6 +2152,51 @@ describe("renderer object-channel selection", () => {
     assert.strictEqual(harness.api.pendingNext.tagName, "OBJECT");
     assert.strictEqual(harness.api.pendingSvgFile, "idle.svg");
     assert.strictEqual(harness.api.pendingNext.style.filter, filter);
+  });
+
+  it("keeps the deep-sleep static substitute through low-power toggles", () => {
+    const harness = createRendererHarness({
+      themeConfig: {
+        rendering: {
+          lowPowerStaticImageOverrides: {
+            sleeping: { from: "sleep.svg", to: "sleep-static.png" },
+          },
+        },
+      },
+    });
+    const request = (generation) => ({
+      themeId: "clawd",
+      logicalState: "sleeping",
+      displayState: "sleeping",
+      file: "sleep.svg",
+      source: "state",
+      visualGeneration: generation,
+    });
+    const assertStaticImage = (label, expectedElement = null) => {
+      assert.strictEqual(harness.api.clawdEl.tagName, "IMG", label);
+      assert.strictEqual(harness.api.currentDisplayedSvg, "sleep-static.png", label);
+      assert.strictEqual(harness.api.pendingNext, null, label);
+      if (expectedElement) assert.strictEqual(harness.api.clawdEl, expectedElement, label);
+    };
+
+    harness.electronHandlers.onStateChange(request(1));
+    assert.strictEqual(harness.api.pendingNext.tagName, "IMG");
+    assert.strictEqual(harness.api.pendingSvgFile, "sleep-static.png");
+    harness.api.pendingNext.listeners.get("load")();
+    const staticImage = harness.api.clawdEl;
+    assertStaticImage("off first entry should use the static substitute");
+
+    harness.electronHandlers.onLowPowerIdleModeChange(true);
+    assertStaticImage("enabling low-power must not change the media", staticImage);
+
+    harness.electronHandlers.onStateChange(request(2));
+    assertStaticImage("re-request while enabled stays on the static substitute", staticImage);
+
+    harness.electronHandlers.onLowPowerIdleModeChange(false);
+    assertStaticImage("disabling low-power must not change the media", staticImage);
+
+    harness.electronHandlers.onStateChange(request(3));
+    assertStaticImage("re-request while disabled stays on the static substitute", staticImage);
   });
 
   it("gates idle eye-tracking attachment on the follow-idle file", () => {
@@ -3163,10 +3247,15 @@ describe("renderer pet accessory wardrobe", () => {
     assert.strictEqual(harness.mouthAccessory.style.display, "none");
     assert.strictEqual(mouthSvg.root.pauseCalls, pauseBefore + 1);
 
-    harness.api.setCurrentState("sleeping");
+    // idle is an optional low-power state, so the global mirror can actually
+    // be released while the hidden mouth document keeps its own pause.
+    harness.api.setCurrentState("idle");
     harness.api.setLowPowerIdleMode(true);
     harness.api.pauseCurrentSvgForLowPower();
+    assert.strictEqual(harness.api.lowPowerSvgPaused, true);
+
     harness.api.setLowPowerIdleMode(false);
+    assert.strictEqual(harness.api.lowPowerSvgPaused, false, "global idle pause should be released");
     assert.strictEqual(
       mouthSvg.root.unpauseCalls,
       unpauseBefore,
