@@ -190,6 +190,7 @@ const createThemeRuntime = require("./theme-runtime");
 const createAgentRuntimeMain = require("./agent-runtime-main");
 const createFloatingWindowRuntime = require("./floating-window-runtime");
 const createPetWindowRuntime = require("./pet-window-runtime");
+const { createRendererConfigChannel } = require("./renderer-config-channel");
 const { collectRequiredAssetFiles } = require("./theme-schema");
 const { describeGeometrySync } = require("./pet-accessory-state");
 const { createDisplayedVisualProjection } = require("./displayed-visual-projection");
@@ -246,6 +247,10 @@ const _hitWindowActivationRuntime = createHitWindowActivationRuntime({
   getHitWindow: () => hitWin,
   onError: (err) => console.warn("Clawd: win-hit-window-activation failed:", err && err.message),
 });
+// Registered before any window exists so the sandboxed preloads can read the
+// config synchronously on their first load. Keeping it out of argv avoids the
+// Windows 32,767-character command-line limit.
+const rendererConfigChannel = createRendererConfigChannel({ ipcMain });
 
 // ── Linux/X11: keep the output-only pet render window out of WM focus ──
 // Best-effort; a no-op off the X11 backend or without koffi/libxcb. Chromium
@@ -2330,10 +2335,11 @@ function buildRendererThemeConfig(accessorySnapshot = null) {
 
 function deliverRendererThemeConfig() {
   const delivery = prepareCurrentAccessorySlotsDelivery();
-  const delivered = sendToRenderer(
-    "theme-config",
-    buildRendererThemeConfig(delivery.snapshot)
-  );
+  const cfg = buildRendererThemeConfig(delivery.snapshot);
+  // Keep the sync-IPC source current so a window reload picks up the same
+  // config as this push.
+  rendererConfigChannel.setPetConfig(cfg);
+  const delivered = sendToRenderer("theme-config", cfg);
   return !!finalizePetAccessorySlotsDelivery(delivery, delivered);
 }
 
@@ -5281,6 +5287,7 @@ function createWindow() {
     preloadPath: path.join(__dirname, "preload.js"),
     loadFilePath: path.join(__dirname, "index.html"),
     themeConfig: buildRendererThemeConfig(initialAccessoryDelivery.snapshot),
+    rendererConfigChannel,
     setRenderWindow: (createdWindow) => { win = createdWindow; },
     isQuitting: () => isQuitting,
     applyDockVisibility,
@@ -5298,12 +5305,15 @@ function createWindow() {
     preloadPath: path.join(__dirname, "preload-hit.js"),
     loadFilePath: path.join(__dirname, "hit.html"),
     hitThemeConfig: themeRuntime.getHitRendererConfig(),
+    rendererConfigChannel,
     guardAlwaysOnTop,
     prepareActivation: (createdHitWin) => (
       _hitWindowActivationRuntime.controller.prepare(createdHitWin)
     ),
     onDidFinishLoad: () => {
-      sendToHitWin("theme-config", themeRuntime.getHitRendererConfig());
+      const hitConfig = themeRuntime.getHitRendererConfig();
+      rendererConfigChannel.setHitConfig(hitConfig);
+      sendToHitWin("theme-config", hitConfig);
       if (themeRuntime.isReloadInProgress()) return;
       syncHitStateAfterLoad();
     },

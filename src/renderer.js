@@ -30,6 +30,10 @@ const DISCRETE_SAMPLING_RETRY_MS = 16;
 // retries, so this many retries means at most DISCRETE_SAMPLING_MAX_RETRIES + 1
 // document-ready checks per committed OBJECT.
 const DISCRETE_SAMPLING_MAX_RETRIES = 60;
+// A document's animation timeline is rewritten at most once. Re-running the
+// sampler on the same document (a retry that raced the first pass, a duplicate
+// commit callback) would otherwise snap an already-snapped duration again.
+const discreteSampledDocuments = new WeakSet();
 const WAKE_OBJECT_RELOAD_RETRIES = 1;
 const LOW_POWER_PAUSE_STYLE_ID = "clawd-low-power-pause-svg";
 // Deep sleep can sit on screen all night, so those states always pause: the
@@ -1871,12 +1875,147 @@ function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
 }
 
 /**
- * Give each CSS animation in a document-backed SVG about `rate` sample steps per
- * second — a full cycle lasting D seconds becomes round(D * rate) steps — by
- * rewriting its easing to steps() over one duration. Only files
- * the theme opts into via rendering.discreteSampling are touched, and only on
- * the <object> channel (an <img> playback exposes no contentDocument). SMIL
- * animations are not CSS animations and are deliberately out of scope.
+ * Snap one animation's period and delay to the shared sampling grid.
+ *
+ * A per-animation `steps(round(D * rate))` does not cap the document: two loops
+ * with different periods tick at different moments and the whole picture can
+ * change on almost every compositor frame. Snapping both the duration and the
+ * delay to 1/rate-second multiples puts every loop's jumps on the same clock,
+ * so the document as a whole moves at most `rate` times per second.
+ *
+ * The period moves by at most half a grid step (20.8 ms at 24 Hz) once the
+ * loop is at least half a grid step long; anything shorter, such as a 1 ms
+ * loop at 24 Hz, is promoted to one full grid step (41.67 ms). That is why a
+ * fast loop can sound different after it is declared for sampling.
+ */
+function computeDiscreteSamplingTiming({ durationMs, delayMs }, rate) {
+  const gridMs = 1000 / rate;
+  const steps = Math.max(1, Math.round(durationMs / gridMs));
+  const delay = Number.isFinite(delayMs) ? delayMs : 0;
+  return {
+    durationMs: steps * gridMs,
+    delayMs: Math.round(delay / gridMs) * gridMs,
+    steps,
+  };
+}
+
+/**
+ * A CSSAnimation that loops forever is the only thing worth sampling. One-shot
+ * animations (sleep-collapse, transitions) finish long before the cap pays off,
+ * and changing their duration would move the moment they land. Cursor-follow
+ * transitions are returned by getAnimations() too, which is why the constructor
+ * check matters more than the shape of the effect.
+ */
+function readSampleableAnimation(animation, contentWindow) {
+  if (!animation || !animation.effect) return null;
+  const effect = animation.effect;
+  if (
+    typeof effect.getComputedTiming !== "function"
+    || typeof effect.updateTiming !== "function"
+  ) {
+    return null;
+  }
+  const CSSAnimationCtor = contentWindow && contentWindow.CSSAnimation;
+  if (typeof CSSAnimationCtor !== "function" || !(animation instanceof CSSAnimationCtor)) {
+    return null;
+  }
+  if (animation.playState !== "running") return null;
+  if (animation.playbackRate !== 1) return null;
+
+  let timing = null;
+  try {
+    timing = effect.getComputedTiming();
+  } catch {
+    return null;
+  }
+  // iterationStart belongs to EffectTiming, not Animation; a non-zero start
+  // offset breaks the phase assumption behind the shared grid.
+  if (!timing) return null;
+  if (timing.iterationStart !== 0 && timing.iterationStart !== undefined) return null;
+  // Only infinite loops share a document-wide cadence. Scheduled animations
+  // still have iterations set from their CSS, even while pending.
+  if (timing.iterations !== Infinity) return null;
+  if (!Number.isFinite(timing.duration) || timing.duration <= 0) return null;
+  return {
+    animation,
+    durationMs: timing.duration,
+    delayMs: Number.isFinite(timing.delay) ? timing.delay : 0,
+  };
+}
+
+/**
+ * Rewrite every sampleable animation onto one grid and one start time.
+ * Pending animations have no startTime yet; their ready promise is awaited and
+ * the identity check runs again before touching them, because the document may
+ * have been replaced while they were coming up.
+ */
+function alignDiscreteSamplingAnimations(animations, contentWindow, rate, isStillCurrent) {
+  const sampleable = [];
+  for (const animation of animations) {
+    const entry = readSampleableAnimation(animation, contentWindow);
+    if (entry) sampleable.push(entry);
+  }
+  if (!sampleable.length) return;
+
+  const currentStarts = sampleable
+    .map(({ animation }) => animation.startTime)
+    .filter((value) => Number.isFinite(value));
+  let commonStartTime = currentStarts.length ? Math.min(...currentStarts) : null;
+
+  for (const { animation, durationMs, delayMs } of sampleable) {
+    const next = computeDiscreteSamplingTiming({ durationMs, delayMs }, rate);
+    try {
+      animation.effect.updateTiming({
+        duration: next.durationMs,
+        delay: next.delayMs,
+        easing: `steps(${next.steps}, end)`,
+      });
+    } catch {}
+  }
+
+  for (const { animation } of sampleable) {
+    const applyStartTime = () => {
+      if (!isStillCurrent()) return;
+      // Writing a start time to a paused animation clears its hold time and
+      // restarts it, so a pause that happened while ready was pending wins.
+      if (animation.playState !== "running") return;
+      if (commonStartTime === null && Number.isFinite(animation.startTime)) {
+        // No animation had a usable start time when the pass began; the first
+        // one to come up defines the shared origin for the rest.
+        commonStartTime = animation.startTime;
+      }
+      if (commonStartTime === null) return;
+      try {
+        animation.startTime = commonStartTime;
+      } catch {}
+    };
+
+    if (Number.isFinite(animation.startTime)) {
+      applyStartTime();
+      continue;
+    }
+    let ready = null;
+    try {
+      ready = animation.ready;
+    } catch {
+      ready = null;
+    }
+    if (ready && typeof ready.then === "function") {
+      ready.then(applyStartTime, () => {});
+    }
+  }
+}
+
+/**
+ * Give a document-backed SVG at most `rate` visual changes per second by
+ * snapping each of its infinite CSS animations onto a shared 1/rate-second grid
+ * (see computeDiscreteSamplingTiming). This ceiling holds only while every
+ * continuous visual change comes from aligned animations: finite entrances,
+ * cursor-follow transitions, scripted and SMIL animation are not covered.
+ * Only files the theme opts into via
+ * rendering.discreteSampling are touched, and only on the <object> channel (an
+ * <img> playback exposes no contentDocument). SMIL animations are not CSS
+ * animations and are deliberately out of scope.
  *
  * The contentDocument can still be transiently null at the commit point, so the
  * synchronous first attempt plus at most DISCRETE_SAMPLING_MAX_RETRIES retries
@@ -1884,7 +2023,8 @@ function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
  * element is still the displayed, connected object for the file: a successful
  * swap changes clawdEl, releasing the element disconnects it, and a failed or
  * cancelled swap simply leaves the old object in place with its retry intact.
- * Sampling stays best-effort: if the document never arrives we stop quietly.
+ * Each document is aligned at most once. Sampling stays best-effort: if the
+ * document never arrives we stop quietly.
  */
 function applyDiscreteSampling(objectEl, file) {
   const rate = _discreteSampling.get(file);
@@ -1912,35 +2052,38 @@ function applyDiscreteSampling(objectEl, file) {
       return;
     }
 
+    if (discreteSampledDocuments.has(contentDocument)) return;
+
+    let contentWindow = null;
+    try {
+      contentWindow = objectEl.contentWindow;
+    } catch {
+      contentWindow = null;
+    }
+    // Without a window we cannot prove which realm the animations belong to,
+    // so leave the document unmarked and let a later commit try again.
+    if (!contentWindow) return;
+
     let animations = [];
     try {
       animations = contentDocument.getAnimations();
     } catch {
       return;
     }
-    for (const animation of animations) {
-      const effect = animation && animation.effect;
-      if (
-        !effect
-        || typeof effect.getComputedTiming !== "function"
-        || typeof effect.updateTiming !== "function"
-      ) {
-        continue;
+    discreteSampledDocuments.add(contentDocument);
+
+    const isSameDocument = () => {
+      if (clawdEl !== objectEl || currentDisplayedSvg !== file || !objectEl.isConnected) {
+        return false;
       }
-      let timing = null;
       try {
-        timing = effect.getComputedTiming();
+        return objectEl.contentDocument === contentDocument;
       } catch {
-        continue;
+        return false;
       }
-      const durationMs = timing && Number.isFinite(timing.duration) ? timing.duration : NaN;
-      if (!Number.isFinite(durationMs) || durationMs <= 0) continue;
-      try {
-        effect.updateTiming({
-          easing: `steps(${Math.max(1, Math.round((durationMs / 1000) * rate))}, end)`,
-        });
-      } catch {}
-    }
+    };
+
+    alignDiscreteSamplingAnimations(animations, contentWindow, rate, isSameDocument);
   };
 
   trySample(0);

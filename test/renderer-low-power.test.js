@@ -31,9 +31,13 @@ function matchSource(source, pattern, message) {
 // hand-written Proxy that stores the renderer's callback straight into
 // electronHandlers, never touching preload.js's real ipcRenderer.on(...)
 // wrapping at all, so it cannot prove anything about THIS boundary.
-function loadPreloadWithElectron() {
+function loadPreloadWithElectron({
+  preloadPath: preloadRequirePath = "../src/preload",
+  syncResponses = {},
+  withSendSync = true,
+} = {}) {
   const electronPath = require.resolve("electron");
-  const preloadPath = require.resolve("../src/preload");
+  const preloadPath = require.resolve(preloadRequirePath);
   const previousElectron = Object.prototype.hasOwnProperty.call(require.cache, electronPath)
     ? require.cache[electronPath]
     : null;
@@ -43,7 +47,20 @@ function loadPreloadWithElectron() {
 
   const ipcListeners = new Map();
   const sentToMain = [];
+  const sendSyncCalls = [];
   const exposed = {};
+  const ipcRenderer = {
+    on: (event, handler) => { ipcListeners.set(event, handler); },
+    send: (channel, ...args) => { sentToMain.push({ channel, args }); },
+  };
+  if (withSendSync) {
+    ipcRenderer.sendSync = (channel) => {
+      sendSyncCalls.push(channel);
+      return Object.prototype.hasOwnProperty.call(syncResponses, channel)
+        ? syncResponses[channel]
+        : null;
+    };
+  }
 
   require.cache[electronPath] = {
     id: electronPath,
@@ -53,18 +70,21 @@ function loadPreloadWithElectron() {
       contextBridge: {
         exposeInMainWorld: (name, api) => { exposed[name] = api; },
       },
-      ipcRenderer: {
-        on: (event, handler) => { ipcListeners.set(event, handler); },
-        send: (channel, ...args) => { sentToMain.push({ channel, args }); },
-      },
+      ipcRenderer,
+      webUtils: { getPathForFile: () => "" },
     },
   };
   delete require.cache[preloadPath];
-  require("../src/preload"); // runs preload.js's top-level contextBridge.exposeInMainWorld call
+  require(preloadRequirePath); // runs the preload's top-level exposeInMainWorld call
 
   return {
+    exposed,
     electronAPI: exposed.electronAPI,
+    themeConfig: exposed.themeConfig,
+    hitThemeConfig: exposed.hitThemeConfig,
+    hitPlatform: exposed.hitPlatform,
     sentToMain,
+    sendSyncCalls,
     // Simulates main.js's ipcRenderer send arriving at whatever handler
     // preload.js registered for `event` via ipcRenderer.on(event, ...).
     emitFromMain: (event, ...args) => {
@@ -350,6 +370,8 @@ globalThis.__rendererTest = {
   normalizeDragDirection,
   applyDirectionalDragToObject,
   applyCodexPetVisualToObject,
+  applyDiscreteSampling,
+  computeDiscreteSamplingTiming,
   pauseCurrentSvgForLowPower,
   setLowPowerSvgPaused,
   scheduleLowPowerIdlePause,
@@ -868,21 +890,52 @@ describe("renderer directional drag reactions (#620)", () => {
 });
 
 describe("renderer discrete animation sampling", () => {
-  function makeAnimation(duration) {
-    const calls = [];
-    return {
-      calls,
-      effect: {
-        getComputedTiming: () => ({ duration }),
-        updateTiming(timing) { calls.push(timing); },
-      },
-    };
+  class FakeAnimation {
+    constructor({
+      duration,
+      delay = 0,
+      iterations = Infinity,
+      playState = "running",
+      startTime = 0,
+      playbackRate = 1,
+      iterationStart = 0,
+    } = {}) {
+      this.calls = [];
+      this.playState = playState;
+      this.playbackRate = playbackRate;
+      this.startTime = startTime;
+      this.ready = Promise.resolve();
+      this.effect = {
+        // iterationStart belongs to EffectTiming, not to Animation.
+        getComputedTiming: () => ({ duration, delay, iterations, iterationStart }),
+        updateTiming: (timing) => { this.calls.push(timing); },
+      };
+    }
+  }
+  class FakeCSSAnimation extends FakeAnimation {}
+  class FakeCSSTransition extends FakeAnimation {}
+
+  function makeAnimation(duration, options = {}) {
+    return new FakeCSSAnimation({ duration, ...options });
+  }
+
+  function approx(actual, expected, epsilon = 0.01) {
+    assert.ok(
+      Math.abs(actual - expected) <= epsilon,
+      `expected ${actual} to be within ${epsilon} of ${expected}`
+    );
+  }
+
+  function attachAnimationDocument(objectEl, animations) {
+    objectEl.contentWindow.CSSAnimation = FakeCSSAnimation;
+    objectEl.contentWindow.CSSTransition = FakeCSSTransition;
+    attachFakeSvgDocument(objectEl, { animations });
   }
 
   function commitObject(harness, file, animations) {
     harness.api.swapToFile(file, "working", true);
     const pending = harness.api.pendingNext;
-    attachFakeSvgDocument(pending, { animations });
+    attachAnimationDocument(pending, animations);
     pending.listeners.get("load")();
     return pending;
   }
@@ -892,6 +945,8 @@ describe("renderer discrete animation sampling", () => {
   function commitObjectWithoutDocument(harness, file) {
     harness.api.swapToFile(file, "working", true);
     const pending = harness.api.pendingNext;
+    pending.contentWindow.CSSAnimation = FakeCSSAnimation;
+    pending.contentWindow.CSSTransition = FakeCSSTransition;
     pending.listeners.get("load")();
     return pending;
   }
@@ -908,18 +963,179 @@ describe("renderer discrete animation sampling", () => {
     });
   }
 
-  it("maps a declared file rate onto steps() for a finite animation duration", () => {
-    const harness = createRendererHarness({
-      themeConfig: {
-        rendering: {
-          objectChannelFiles: ["sweeping.svg"],
-          discreteSampling: { "sweeping.svg": 24 },
-        },
-      },
-    });
-    const animation = makeAnimation(12000);
-    commitObject(harness, "sweeping.svg", [animation]);
-    assert.deepStrictEqual(animation.calls.map((call) => call.easing), ["steps(288, end)"]);
+  it("snaps a loop onto the shared grid while leaving a finite entrance alone", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const loop = makeAnimation(12000);
+    const entrance = makeAnimation(1000, { iterations: 1 });
+    commitObject(harness, "sweeping.svg", [loop, entrance]);
+    assert.deepStrictEqual({ ...loop.calls[0] }, { duration: 12000, delay: 0, easing: "steps(288, end)" });
+    assert.deepStrictEqual(entrance.calls, [], "one-shot animations keep their arrival timing");
+  });
+
+  it("snaps period and delay onto the sampling grid", () => {
+    const { api } = samplingHarness(["sweeping.svg"]);
+    const snap = (durationMs, delayMs = 0) => api.computeDiscreteSamplingTiming({ durationMs, delayMs }, 24);
+
+    const long = snap(3200);
+    assert.strictEqual(long.steps, 77);
+    approx(long.durationMs, 3208.33);
+    approx(long.delayMs, 0);
+
+    const short = snap(150);
+    assert.strictEqual(short.steps, 4);
+    approx(short.durationMs, 166.67);
+
+    const exact = snap(12000);
+    assert.strictEqual(exact.steps, 288);
+    approx(exact.durationMs, 12000);
+
+    approx(snap(12000, -400).delayMs, -416.67);
+
+    const tiny = snap(1);
+    assert.strictEqual(tiny.steps, 1);
+    approx(tiny.durationMs, 41.67);
+  });
+
+  it("aligns animations with different periods onto one start time", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const fast = makeAnimation(500, { startTime: 120 });
+    const slow = makeAnimation(3200, { startTime: 40 });
+    commitObject(harness, "sweeping.svg", [fast, slow]);
+
+    assert.strictEqual(fast.startTime, 40);
+    assert.strictEqual(slow.startTime, 40);
+
+    const gridMs = 1000 / 24;
+    for (const animation of [fast, slow]) {
+      const { duration } = animation.calls[0];
+      approx(duration, Math.round(duration / gridMs) * gridMs);
+    }
+  });
+
+  it("skips transitions, paused, finished, finite and sped-up animations", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const transition = new FakeCSSTransition({ duration: 12000, startTime: 7 });
+    const paused = makeAnimation(12000, { playState: "paused", startTime: 7 });
+    const finished = makeAnimation(12000, { playState: "finished", startTime: 7 });
+    const finite = makeAnimation(12000, { iterations: 3, startTime: 7 });
+    const spedUp = makeAnimation(12000, { playbackRate: 2, startTime: 7 });
+    const eligible = makeAnimation(12000, { startTime: 0 });
+    commitObject(harness, "sweeping.svg", [transition, paused, finished, finite, spedUp, eligible]);
+
+    for (const animation of [transition, paused, finished, finite, spedUp]) {
+      assert.deepStrictEqual(animation.calls, []);
+      assert.strictEqual(animation.startTime, 7, "the sampler leaves ineligible timelines alone");
+    }
+    assert.strictEqual(eligible.calls.length, 1);
+  });
+
+  it("skips an animation whose non-zero iterationStart only exists in computed timing", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const offset = makeAnimation(12000, { iterationStart: 0.5 });
+    assert.strictEqual(offset.iterationStart, undefined, "Animation itself has no iterationStart");
+    assert.strictEqual(offset.effect.getComputedTiming().iterationStart, 0.5);
+
+    commitObject(harness, "sweeping.svg", [offset]);
+
+    assert.deepStrictEqual(offset.calls, []);
+    assert.strictEqual(offset.startTime, 0);
+  });
+
+  it("aligns a document only once", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const animation = makeAnimation(3200, { startTime: 50 });
+    const objectEl = commitObject(harness, "sweeping.svg", [animation]);
+    assert.strictEqual(animation.calls.length, 1);
+    const sampledTiming = { ...animation.calls[0] };
+
+    harness.api.applyDiscreteSampling(objectEl, "sweeping.svg");
+
+    assert.strictEqual(animation.calls.length, 1, "a second pass never rewrites the same document");
+    assert.deepStrictEqual({ ...animation.calls[0] }, sampledTiming);
+    assert.strictEqual(animation.startTime, 50);
+  });
+
+  it("waits for ready before aligning a pending animation", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const pending = makeAnimation(3200, { startTime: null });
+    pending.ready = ready;
+    const running = makeAnimation(3200, { startTime: 120 });
+    commitObject(harness, "sweeping.svg", [pending, running]);
+
+    assert.strictEqual(pending.calls.length, 1, "timing does not need to wait for ready");
+    assert.strictEqual(pending.startTime, null, "the start time does wait for ready");
+    assert.strictEqual(running.startTime, 120);
+
+    pending.startTime = 130;
+    resolveReady();
+    await ready;
+    await Promise.resolve();
+    assert.strictEqual(pending.startTime, 120, "both animations share the earliest start time");
+  });
+
+  it("does not resume a paused animation when its ready resolves", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const pending = makeAnimation(3200, { startTime: null });
+    pending.ready = ready;
+    const running = makeAnimation(3200, { startTime: 120 });
+    commitObject(harness, "sweeping.svg", [pending, running]);
+
+    pending.playState = "paused";
+    resolveReady();
+    await ready;
+    await Promise.resolve();
+
+    assert.strictEqual(pending.startTime, null, "a paused animation keeps its hold time");
+    assert.strictEqual(running.startTime, 120);
+  });
+
+  it("ignores a pending animation whose document was replaced", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const pending = makeAnimation(3200, { startTime: null });
+    pending.ready = ready;
+    const running = makeAnimation(3200, { startTime: 120 });
+    const objectEl = commitObject(harness, "sweeping.svg", [pending, running]);
+
+    // Same OBJECT element, but a new document (system-wake reload shape).
+    attachFakeSvgDocument(objectEl, { animations: [] });
+
+    resolveReady();
+    await ready;
+    await Promise.resolve();
+
+    assert.strictEqual(pending.startTime, null, "the retired document's animation is not touched");
+    assert.strictEqual(running.startTime, 120);
+  });
+
+  it("lets the first resolved animation establish the shared start time", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveFirst;
+    let resolveSecond;
+    const first = makeAnimation(3200, { startTime: null });
+    const second = makeAnimation(3200, { startTime: null });
+    first.ready = new Promise((resolve) => { resolveFirst = resolve; });
+    second.ready = new Promise((resolve) => { resolveSecond = resolve; });
+    commitObject(harness, "sweeping.svg", [first, second]);
+
+    first.startTime = 40;
+    resolveFirst();
+    await first.ready;
+    await Promise.resolve();
+    assert.strictEqual(first.startTime, 40);
+
+    second.startTime = 60;
+    resolveSecond();
+    await second.ready;
+    await Promise.resolve();
+
+    assert.strictEqual(first.startTime, 40);
+    assert.strictEqual(second.startTime, 40, "the later animation adopts the first shared origin");
   });
 
   it("skips animations that lack a finite positive duration", () => {
@@ -976,7 +1192,7 @@ describe("renderer discrete animation sampling", () => {
     const second = makeAnimation(12000);
     harness.api.swapToFile("sweeping.svg", "working", true, { forceDocumentReload: true });
     const pending = harness.api.pendingNext;
-    attachFakeSvgDocument(pending, { animations: [second] });
+    attachAnimationDocument(pending, [second]);
     pending.listeners.get("load")();
     assert.deepStrictEqual(second.calls.map((call) => call.easing), ["steps(288, end)"]);
   });
@@ -1112,7 +1328,7 @@ describe("renderer discrete animation sampling", () => {
     const freshObject = harness.api.pendingNext;
     assert.notStrictEqual(freshObject, objectEl);
     const freshAnimation = makeAnimation(12000);
-    attachFakeSvgDocument(freshObject, { animations: [freshAnimation] });
+    attachAnimationDocument(freshObject, [freshAnimation]);
     freshObject.listeners.get("load")();
 
     assert.strictEqual(harness.api.clawdEl, freshObject);
@@ -4038,5 +4254,88 @@ describe("renderer reaction preview scope", () => {
 
     harness.timers.find((entry) => entry.ms === 4600).callback();
     assert.strictEqual(resumes(harness), 1);
+  });
+});
+
+describe("preload theme config transport", () => {
+  function withProcessArgs(args, fn) {
+    const original = process.argv;
+    process.argv = [...original.slice(0, 2), ...args];
+    try {
+      return fn();
+    } finally {
+      process.argv = original;
+    }
+  }
+
+  it("prefers the synchronous IPC config over a command-line argument", () => {
+    let loader = null;
+    try {
+      withProcessArgs(['--theme-config={"source":"argv"}'], () => {
+        loader = loadPreloadWithElectron({
+          syncResponses: { "renderer-config:get-pet": { source: "ipc" } },
+        });
+      });
+      assert.deepStrictEqual(loader.themeConfig, { source: "ipc" });
+      assert.deepStrictEqual(loader.sendSyncCalls, ["renderer-config:get-pet"]);
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("falls back to the command-line argument when IPC returns null", () => {
+    let loader = null;
+    try {
+      withProcessArgs(['--theme-config={"source":"argv"}'], () => {
+        loader = loadPreloadWithElectron();
+      });
+      assert.deepStrictEqual(loader.themeConfig, { source: "argv" });
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("falls back to the command-line argument when sendSync is unavailable", () => {
+    let loader = null;
+    try {
+      withProcessArgs(['--theme-config={"source":"argv"}'], () => {
+        loader = loadPreloadWithElectron({ withSendSync: false });
+      });
+      assert.deepStrictEqual(loader.themeConfig, { source: "argv" });
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("returns null when neither IPC nor a command-line argument provides config", () => {
+    let loader = null;
+    try {
+      loader = loadPreloadWithElectron();
+      assert.strictEqual(loader.themeConfig, null);
+      assert.deepStrictEqual(loader.sendSyncCalls, ["renderer-config:get-pet"]);
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("hands the hit preload its config over IPC and falls back to argv", () => {
+    let loader = null;
+    let fallback = null;
+    try {
+      withProcessArgs(['--hit-theme-config={"source":"argv"}', "--hit-platform=win32"], () => {
+        loader = loadPreloadWithElectron({
+          preloadPath: "../src/preload-hit",
+          syncResponses: { "renderer-config:get-hit": { source: "ipc" } },
+        });
+        fallback = loadPreloadWithElectron({ preloadPath: "../src/preload-hit" });
+      });
+      assert.deepStrictEqual(loader.hitThemeConfig, { source: "ipc" });
+      assert.strictEqual(loader.hitPlatform.platform, "win32");
+      assert.deepStrictEqual(loader.sendSyncCalls, ["renderer-config:get-hit"]);
+      assert.deepStrictEqual(fallback.hitThemeConfig, { source: "argv" });
+    } finally {
+      if (fallback) fallback.restore();
+      if (loader) loader.restore();
+    }
   });
 });
