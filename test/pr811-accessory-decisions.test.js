@@ -293,6 +293,9 @@ test("Clawd lists its long-lived animations as object-channel SVGs", () => {
     "clawd-mini-sleep.svg",
     "clawd-mini-peek.svg",
     "clawd-mini-crabwalk.svg",
+    "clawd-working-typing.svg",
+    "clawd-mini-typing.svg",
+    "clawd-working-building.svg",
   ]);
 });
 
@@ -318,6 +321,10 @@ test("Clawd caps its long-lived object-channel animations to 24 discrete steps p
     "clawd-mini-sleep.svg": 24,
     "clawd-mini-peek.svg": 24,
     "clawd-mini-crabwalk.svg": 24,
+    "clawd-outlaw-bender.svg": 24,
+    "clawd-working-typing.svg": 24,
+    "clawd-mini-typing.svg": 24,
+    "clawd-working-building.svg": 24,
   });
 });
 
