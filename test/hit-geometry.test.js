@@ -9,10 +9,10 @@ themeLoader.init(path.join(__dirname, "..", "src"));
 const calico = themeLoader.loadTheme("calico");
 const clawd = themeLoader.loadTheme("clawd");
 
-function approx(actual, expected, epsilon = 0.01) {
+function approx(actual, expected, epsilon = 0.01, label = "") {
   assert.ok(
     Math.abs(actual - expected) <= epsilon,
-    `expected ${actual} to be within ${epsilon} of ${expected}`
+    `${label ? `${label}: ` : ""}expected ${actual} to be within ${epsilon} of ${expected}`
   );
 }
 
@@ -133,13 +133,13 @@ describe("hit geometry", () => {
       const objectAsset = hitGeometry.getAssetRectScreen(clawd, bounds, state, file);
       const imageAsset = hitGeometry.getAssetRectScreen(imageTheme, bounds, state, file);
       for (const key of ["x", "y", "w", "h"]) {
-        approx(objectAsset[key], imageAsset[key]);
+        approx(objectAsset[key], imageAsset[key], 1e-9, `${file} asset.${key}`);
       }
 
       const objectHit = hitGeometry.getHitRectScreen(clawd, bounds, state, file, clawd.hitBoxes.default);
       const imageHit = hitGeometry.getHitRectScreen(imageTheme, bounds, state, file, imageTheme.hitBoxes.default);
       for (const key of ["left", "top", "right", "bottom"]) {
-        approx(objectHit[key], imageHit[key]);
+        approx(objectHit[key], imageHit[key], 1e-9, `${file} hit.${key}`);
       }
     }
   });

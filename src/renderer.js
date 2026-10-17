@@ -1883,8 +1883,10 @@ function settleSuccessfulVisual(request, actualFile, channel, options = {}) {
  * delay to 1/rate-second multiples puts every loop's jumps on the same clock,
  * so the document as a whole moves at most `rate` times per second.
  *
- * The period moves by at most half a grid step (20.8 ms at 24 Hz), which is why
- * a fast loop can sound slightly different after it is declared for sampling.
+ * The period moves by at most half a grid step (20.8 ms at 24 Hz) once the
+ * loop is at least half a grid step long; anything shorter, such as a 1 ms
+ * loop at 24 Hz, is promoted to one full grid step (41.67 ms). That is why a
+ * fast loop can sound different after it is declared for sampling.
  */
 function computeDiscreteSamplingTiming({ durationMs, delayMs }, rate) {
   const gridMs = 1000 / rate;
@@ -1919,7 +1921,6 @@ function readSampleableAnimation(animation, contentWindow) {
   }
   if (animation.playState !== "running") return null;
   if (animation.playbackRate !== 1) return null;
-  if (animation.iterationStart !== 0 && animation.iterationStart !== undefined) return null;
 
   let timing = null;
   try {
@@ -1927,9 +1928,13 @@ function readSampleableAnimation(animation, contentWindow) {
   } catch {
     return null;
   }
+  // iterationStart belongs to EffectTiming, not Animation; a non-zero start
+  // offset breaks the phase assumption behind the shared grid.
+  if (!timing) return null;
+  if (timing.iterationStart !== 0 && timing.iterationStart !== undefined) return null;
   // Only infinite loops share a document-wide cadence. Scheduled animations
   // still have iterations set from their CSS, even while pending.
-  if (!timing || timing.iterations !== Infinity) return null;
+  if (timing.iterations !== Infinity) return null;
   if (!Number.isFinite(timing.duration) || timing.duration <= 0) return null;
   return {
     animation,
@@ -1971,6 +1976,9 @@ function alignDiscreteSamplingAnimations(animations, contentWindow, rate, isStil
   for (const { animation } of sampleable) {
     const applyStartTime = () => {
       if (!isStillCurrent()) return;
+      // Writing a start time to a paused animation clears its hold time and
+      // restarts it, so a pause that happened while ready was pending wins.
+      if (animation.playState !== "running") return;
       if (commonStartTime === null && Number.isFinite(animation.startTime)) {
         // No animation had a usable start time when the pass began; the first
         // one to come up defines the shared origin for the rest.
@@ -2001,7 +2009,10 @@ function alignDiscreteSamplingAnimations(animations, contentWindow, rate, isStil
 /**
  * Give a document-backed SVG at most `rate` visual changes per second by
  * snapping each of its infinite CSS animations onto a shared 1/rate-second grid
- * (see computeDiscreteSamplingTiming). Only files the theme opts into via
+ * (see computeDiscreteSamplingTiming). This ceiling holds only while every
+ * continuous visual change comes from aligned animations: finite entrances,
+ * cursor-follow transitions, scripted and SMIL animation are not covered.
+ * Only files the theme opts into via
  * rendering.discreteSampling are touched, and only on the <object> channel (an
  * <img> playback exposes no contentDocument). SMIL animations are not CSS
  * animations and are deliberately out of scope.
@@ -2042,6 +2053,17 @@ function applyDiscreteSampling(objectEl, file) {
     }
 
     if (discreteSampledDocuments.has(contentDocument)) return;
+
+    let contentWindow = null;
+    try {
+      contentWindow = objectEl.contentWindow;
+    } catch {
+      contentWindow = null;
+    }
+    // Without a window we cannot prove which realm the animations belong to,
+    // so leave the document unmarked and let a later commit try again.
+    if (!contentWindow) return;
+
     let animations = [];
     try {
       animations = contentDocument.getAnimations();
@@ -2050,12 +2072,6 @@ function applyDiscreteSampling(objectEl, file) {
     }
     discreteSampledDocuments.add(contentDocument);
 
-    let contentWindow = null;
-    try {
-      contentWindow = objectEl.contentWindow;
-    } catch {
-      contentWindow = null;
-    }
     const isSameDocument = () => {
       if (clawdEl !== objectEl || currentDisplayedSvg !== file || !objectEl.isConnected) {
         return false;

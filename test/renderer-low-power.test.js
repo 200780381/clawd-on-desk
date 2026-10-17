@@ -883,11 +883,11 @@ describe("renderer discrete animation sampling", () => {
       this.calls = [];
       this.playState = playState;
       this.playbackRate = playbackRate;
-      this.iterationStart = iterationStart;
       this.startTime = startTime;
       this.ready = Promise.resolve();
       this.effect = {
-        getComputedTiming: () => ({ duration, delay, iterations }),
+        // iterationStart belongs to EffectTiming, not to Animation.
+        getComputedTiming: () => ({ duration, delay, iterations, iterationStart }),
         updateTiming: (timing) => { this.calls.push(timing); },
       };
     }
@@ -1009,6 +1009,18 @@ describe("renderer discrete animation sampling", () => {
     assert.strictEqual(eligible.calls.length, 1);
   });
 
+  it("skips an animation whose non-zero iterationStart only exists in computed timing", () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    const offset = makeAnimation(12000, { iterationStart: 0.5 });
+    assert.strictEqual(offset.iterationStart, undefined, "Animation itself has no iterationStart");
+    assert.strictEqual(offset.effect.getComputedTiming().iterationStart, 0.5);
+
+    commitObject(harness, "sweeping.svg", [offset]);
+
+    assert.deepStrictEqual(offset.calls, []);
+    assert.strictEqual(offset.startTime, 0);
+  });
+
   it("aligns a document only once", () => {
     const harness = samplingHarness(["sweeping.svg"]);
     const animation = makeAnimation(3200, { startTime: 50 });
@@ -1041,6 +1053,69 @@ describe("renderer discrete animation sampling", () => {
     await ready;
     await Promise.resolve();
     assert.strictEqual(pending.startTime, 120, "both animations share the earliest start time");
+  });
+
+  it("does not resume a paused animation when its ready resolves", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const pending = makeAnimation(3200, { startTime: null });
+    pending.ready = ready;
+    const running = makeAnimation(3200, { startTime: 120 });
+    commitObject(harness, "sweeping.svg", [pending, running]);
+
+    pending.playState = "paused";
+    resolveReady();
+    await ready;
+    await Promise.resolve();
+
+    assert.strictEqual(pending.startTime, null, "a paused animation keeps its hold time");
+    assert.strictEqual(running.startTime, 120);
+  });
+
+  it("ignores a pending animation whose document was replaced", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    const pending = makeAnimation(3200, { startTime: null });
+    pending.ready = ready;
+    const running = makeAnimation(3200, { startTime: 120 });
+    const objectEl = commitObject(harness, "sweeping.svg", [pending, running]);
+
+    // Same OBJECT element, but a new document (system-wake reload shape).
+    attachFakeSvgDocument(objectEl, { animations: [] });
+
+    resolveReady();
+    await ready;
+    await Promise.resolve();
+
+    assert.strictEqual(pending.startTime, null, "the retired document's animation is not touched");
+    assert.strictEqual(running.startTime, 120);
+  });
+
+  it("lets the first resolved animation establish the shared start time", async () => {
+    const harness = samplingHarness(["sweeping.svg"]);
+    let resolveFirst;
+    let resolveSecond;
+    const first = makeAnimation(3200, { startTime: null });
+    const second = makeAnimation(3200, { startTime: null });
+    first.ready = new Promise((resolve) => { resolveFirst = resolve; });
+    second.ready = new Promise((resolve) => { resolveSecond = resolve; });
+    commitObject(harness, "sweeping.svg", [first, second]);
+
+    first.startTime = 40;
+    resolveFirst();
+    await first.ready;
+    await Promise.resolve();
+    assert.strictEqual(first.startTime, 40);
+
+    second.startTime = 60;
+    resolveSecond();
+    await second.ready;
+    await Promise.resolve();
+
+    assert.strictEqual(first.startTime, 40);
+    assert.strictEqual(second.startTime, 40, "the later animation adopts the first shared origin");
   });
 
   it("skips animations that lack a finite positive duration", () => {
