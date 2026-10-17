@@ -31,9 +31,13 @@ function matchSource(source, pattern, message) {
 // hand-written Proxy that stores the renderer's callback straight into
 // electronHandlers, never touching preload.js's real ipcRenderer.on(...)
 // wrapping at all, so it cannot prove anything about THIS boundary.
-function loadPreloadWithElectron() {
+function loadPreloadWithElectron({
+  preloadPath: preloadRequirePath = "../src/preload",
+  syncResponses = {},
+  withSendSync = true,
+} = {}) {
   const electronPath = require.resolve("electron");
-  const preloadPath = require.resolve("../src/preload");
+  const preloadPath = require.resolve(preloadRequirePath);
   const previousElectron = Object.prototype.hasOwnProperty.call(require.cache, electronPath)
     ? require.cache[electronPath]
     : null;
@@ -43,7 +47,20 @@ function loadPreloadWithElectron() {
 
   const ipcListeners = new Map();
   const sentToMain = [];
+  const sendSyncCalls = [];
   const exposed = {};
+  const ipcRenderer = {
+    on: (event, handler) => { ipcListeners.set(event, handler); },
+    send: (channel, ...args) => { sentToMain.push({ channel, args }); },
+  };
+  if (withSendSync) {
+    ipcRenderer.sendSync = (channel) => {
+      sendSyncCalls.push(channel);
+      return Object.prototype.hasOwnProperty.call(syncResponses, channel)
+        ? syncResponses[channel]
+        : null;
+    };
+  }
 
   require.cache[electronPath] = {
     id: electronPath,
@@ -53,18 +70,21 @@ function loadPreloadWithElectron() {
       contextBridge: {
         exposeInMainWorld: (name, api) => { exposed[name] = api; },
       },
-      ipcRenderer: {
-        on: (event, handler) => { ipcListeners.set(event, handler); },
-        send: (channel, ...args) => { sentToMain.push({ channel, args }); },
-      },
+      ipcRenderer,
+      webUtils: { getPathForFile: () => "" },
     },
   };
   delete require.cache[preloadPath];
-  require("../src/preload"); // runs preload.js's top-level contextBridge.exposeInMainWorld call
+  require(preloadRequirePath); // runs the preload's top-level exposeInMainWorld call
 
   return {
+    exposed,
     electronAPI: exposed.electronAPI,
+    themeConfig: exposed.themeConfig,
+    hitThemeConfig: exposed.hitThemeConfig,
+    hitPlatform: exposed.hitPlatform,
     sentToMain,
+    sendSyncCalls,
     // Simulates main.js's ipcRenderer send arriving at whatever handler
     // preload.js registered for `event` via ipcRenderer.on(event, ...).
     emitFromMain: (event, ...args) => {
@@ -4234,5 +4254,88 @@ describe("renderer reaction preview scope", () => {
 
     harness.timers.find((entry) => entry.ms === 4600).callback();
     assert.strictEqual(resumes(harness), 1);
+  });
+});
+
+describe("preload theme config transport", () => {
+  function withProcessArgs(args, fn) {
+    const original = process.argv;
+    process.argv = [...original.slice(0, 2), ...args];
+    try {
+      return fn();
+    } finally {
+      process.argv = original;
+    }
+  }
+
+  it("prefers the synchronous IPC config over a command-line argument", () => {
+    let loader = null;
+    try {
+      withProcessArgs(['--theme-config={"source":"argv"}'], () => {
+        loader = loadPreloadWithElectron({
+          syncResponses: { "renderer-config:get-pet": { source: "ipc" } },
+        });
+      });
+      assert.deepStrictEqual(loader.themeConfig, { source: "ipc" });
+      assert.deepStrictEqual(loader.sendSyncCalls, ["renderer-config:get-pet"]);
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("falls back to the command-line argument when IPC returns null", () => {
+    let loader = null;
+    try {
+      withProcessArgs(['--theme-config={"source":"argv"}'], () => {
+        loader = loadPreloadWithElectron();
+      });
+      assert.deepStrictEqual(loader.themeConfig, { source: "argv" });
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("falls back to the command-line argument when sendSync is unavailable", () => {
+    let loader = null;
+    try {
+      withProcessArgs(['--theme-config={"source":"argv"}'], () => {
+        loader = loadPreloadWithElectron({ withSendSync: false });
+      });
+      assert.deepStrictEqual(loader.themeConfig, { source: "argv" });
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("returns null when neither IPC nor a command-line argument provides config", () => {
+    let loader = null;
+    try {
+      loader = loadPreloadWithElectron();
+      assert.strictEqual(loader.themeConfig, null);
+      assert.deepStrictEqual(loader.sendSyncCalls, ["renderer-config:get-pet"]);
+    } finally {
+      if (loader) loader.restore();
+    }
+  });
+
+  it("hands the hit preload its config over IPC and falls back to argv", () => {
+    let loader = null;
+    let fallback = null;
+    try {
+      withProcessArgs(['--hit-theme-config={"source":"argv"}', "--hit-platform=win32"], () => {
+        loader = loadPreloadWithElectron({
+          preloadPath: "../src/preload-hit",
+          syncResponses: { "renderer-config:get-hit": { source: "ipc" } },
+        });
+        fallback = loadPreloadWithElectron({ preloadPath: "../src/preload-hit" });
+      });
+      assert.deepStrictEqual(loader.hitThemeConfig, { source: "ipc" });
+      assert.strictEqual(loader.hitPlatform.platform, "win32");
+      assert.deepStrictEqual(loader.sendSyncCalls, ["renderer-config:get-hit"]);
+      assert.deepStrictEqual(fallback.hitThemeConfig, { source: "argv" });
+    } finally {
+      if (fallback) fallback.restore();
+      if (loader) loader.restore();
+    }
   });
 });
