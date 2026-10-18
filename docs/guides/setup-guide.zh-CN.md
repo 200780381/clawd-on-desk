@@ -118,7 +118,7 @@ Clawd 可以在 Node 的 SQLite 模块可用时读取 Cursor 标准桌面配置�
 - **所有权**：合并与卸载只处理 command 中带 `qwenwork-hook.js` marker 的条目。仅仅名为 `clawd` 的 hook 不会被动；Clawd hook 与第三方 hook 混在同一 entry 时，第三方 hook 原样保留。
 - **可选调试日志**：`CLAWD_QWENWORK_HOOK_DEBUG=1` 会往 `~/.clawd/qwenwork-hook-debug.jsonl` 追加事件与字段结构摘要（不含 prompt、tool input、路径）。再加 `CLAWD_QWENWORK_HOOK_DEBUG_RAW=1` 才会记录完整原始 payload——**此时该文件含敏感数据**，用完请删除。macOS/Linux 上文件按 `0600` 创建；若 hook 新建调试目录则使用 `0700`，已有的共享 `~/.clawd` 目录保持原权限不变。
 
-**Qoder** — hooks 写入 `~/.qoder/settings.json`。需要本机 Qoder 追踪时，先到 **Settings → AI 编程工具** 安装；安装且启用后，Clawd 才会在启动时继续同步 hooks。也可以手动执行 `npm run install:qoder-hooks`。Phase 1 是 state-only：hook 恒返回 `{}`，`PermissionRequest` / `PermissionDenied` 只作为通知观察——Clawd 不弹权限气泡、不代答权限决策，权限流程由 Qoder 原生接管。启动恢复只识别 Qoder CLI 进程（`qodercli` / `qoder-cli`），闲置打开的 Qoder IDE 不会被当成进行中的 agent 工作。
+**Qoder / Qoder CN** — hooks 分别写入 `~/.qoder/settings.json` 和 `~/.qoder-cn/settings.json`；`QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` 可覆盖各自的用户配置目录。两版共用 **Settings → AI 编程工具 → Qoder** 入口。安装且启用后，Clawd 会在启动时同步所有已初始化版本的 hooks，不创建未安装版本的目录；也可以手动执行 `npm run install:qoder-hooks`。卸载只移除两版中的 Clawd hooks；两版共存时 Doctor 会分别检查。接入仍为 state-only：hook 恒返回 `{}`，`PermissionRequest` / `PermissionDenied` 只作为通知观察，权限流程由 Qoder 原生接管。启动恢复只识别 CLI 进程（`qodercli` / `qoder-cli` / `qoderclicn`），闲置打开的 Qoder 或 Qoder CN 桌面应用不会被当成进行中的 agent 工作。
 
 ## 权限处理自动化
 
