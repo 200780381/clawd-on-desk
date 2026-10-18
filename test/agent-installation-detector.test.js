@@ -626,6 +626,49 @@ describe("agent installation detector", () => {
     }
   });
 
+  for (const fixture of [
+    ["qoder", ".qoder", ".auth", "dir"],
+    ["qoder", ".qoder", "state.json", "file"],
+    ["zcode", ".zcode", path.join("v2", "credentials.json"), "file"],
+    ["zcode", ".zcode", path.join("cli", "exec"), "dir"],
+    ["codebuddy", ".codebuddy", "logs", "dir"],
+    ["codebuddy", ".codebuddy", "history.jsonl", "file"],
+  ]) {
+    const [agentId, relativeDir, artifact, kind] = fixture;
+    it(`detects ${agentId} from a product-owned artifact (${artifact})`, () => {
+      const homeDir = makeHome();
+      const artifactPath = path.join(homeDir, relativeDir, artifact);
+      mkdirp(path.dirname(artifactPath));
+      if (kind === "dir") {
+        mkdirp(artifactPath);
+      } else {
+        writeText(artifactPath, "{}");
+      }
+
+      const entry = byId(detectAgentInstallations({ homeDir, now: 1, env: {} }), agentId);
+
+      assert.strictEqual(entry.detectedInstalled, true, `${agentId} ${artifact}`);
+      assert.strictEqual(entry.confidence, "high");
+      assert.strictEqual(entry.reason, "product-artifact");
+    });
+  }
+
+  it("still reports insufficient when a hook-config folder holds neither product config nor product artifacts", () => {
+    for (const [agentId, relativeDir] of [
+      ["qoder", ".qoder"],
+      ["zcode", ".zcode"],
+      ["codebuddy", ".codebuddy"],
+    ]) {
+      const homeDir = makeHome();
+      mkdirp(path.join(homeDir, relativeDir));
+      writeJson(path.join(homeDir, relativeDir, agentId === "zcode" ? path.join("cli", "config.json") : "settings.json"), {});
+
+      const entry = byId(detectAgentInstallations({ homeDir, now: 1, env: {} }), agentId);
+      assert.strictEqual(entry.detectedInstalled, null, `${agentId} empty folder with no artifacts`);
+      assert.strictEqual(entry.reason, "insufficient-evidence", `${agentId} empty folder reason`);
+    }
+  });
+
   it("fails an unreadable reporter config closed to insufficient evidence", () => {
     const homeDir = makeHome();
     const configPath = path.join(homeDir, ".qoder", "settings.json");
