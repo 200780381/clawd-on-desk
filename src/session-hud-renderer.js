@@ -1,6 +1,7 @@
 "use strict";
 
 const { canOfferLocalFolder, focusUnavailableReasonKey } = globalThis.ClawdSessionFocusUnavailable;
+const { taggedFallbackTag } = globalThis.ClawdSessionHudTaggedFallback;
 
 const HUD_MAX_EXPANDED_ROWS = 3;
 const HUD_MAX_EXPANDED_ROWS_LABELS = 5;
@@ -60,15 +61,6 @@ function formatTokenCount(value) {
 
 function titleFor(session) {
   return session.displayTitle || session.sessionTitle || session.id || "";
-}
-
-function untitledCodexTag(session) {
-  const tag = session.displaySessionTag;
-  if (session.agentId !== "codex" || session.hasAlias || session.sessionTitle || typeof tag !== "string"
-    || !/^[0-9a-f]{10}$/.test(tag)) return "";
-  return typeof session.displayTitle === "string"
-    && session.displayTitle !== session.displayFolder
-    && session.displayTitle.endsWith(` · ${tag}`) ? tag : "";
 }
 
 function titleUnits(value) {
@@ -298,7 +290,7 @@ function createRowForSession(session, now) {
   const fullTitle = titleFor(session);
   const shortTitle = shortenHudTitle(fullTitle);
   title.className = feedbackText ? "title session-inline-feedback" : "title";
-  const fallbackTag = !feedbackText && untitledCodexTag(session);
+  const fallbackTag = !feedbackText && taggedFallbackTag(session);
   if (fallbackTag) {
     // Reserve the entire separator/tag, yielding project text and elapsed time
     // first when the compact HUD cannot fit every secondary field.

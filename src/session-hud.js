@@ -3,6 +3,7 @@
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
+const { hasTaggedFallbackRow } = require("./session-hud-tagged-fallback");
 const { clampTextScale, scaleHeight, applyZoomToWindow } = require("./text-scale");
 const ringGeom = require("./quota-ring-geometry");
 
@@ -182,12 +183,13 @@ function computeHudLayout(snapshot, options = {}) {
 }
 
 // A tagged fallback row renders "<label> · <tag>"; the HUD window needs extra
-// width for those rows or the tag/status label collides with the pin.
+// width for those rows or the tag/status label collides with the pin. The
+// predicate is the SHARED one the renderer renders the row with — every
+// session carries a displaySessionTag, so checking that field alone would
+// widen every HUD for every user.
 function layoutHasTaggedFallback(layout) {
   if (!layout) return false;
-  return [...(layout.expanded || []), ...(layout.folded || [])]
-    .some((session) => session && typeof session.displaySessionTag === "string"
-      && session.displaySessionTag.length > 0);
+  return hasTaggedFallbackRow([...(layout.expanded || []), ...(layout.folded || [])]);
 }
 
 // One coin per (source, provider) with drawable quota. The pet-attached quota
@@ -1049,6 +1051,7 @@ module.exports.__test = {
   countQuotaCoins,
   computeHudReservedOffset,
   isHudSession,
+  layoutHasTaggedFallback,
   getHudWidth,
   getHudWidthScale,
   computeHudOuterWidth,

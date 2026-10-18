@@ -18,6 +18,7 @@ const {
   computeAutoHideHotZone,
   pointInHotZone,
   constants,
+  layoutHasTaggedFallback,
 } = sessionHud.__test;
 
 function mkSession(id, overrides = {}) {
@@ -94,6 +95,57 @@ describe("session HUD geometry", () => {
   it("leaves untagged HUD widths unchanged", () => {
     assert.strictEqual(getHudWidth(true, true, false, false), getHudWidth(true, true, false));
     assert.strictEqual(getHudWidth(false, true, false, false), getHudWidth(false, true, false));
+  });
+
+  // Every session carries a displaySessionTag (the Telegram/Slack-style #tag),
+  // so the width predicate must use the same untitled-local-Codex rule the
+  // renderer renders the fallback row with — not bare tag presence. Otherwise
+  // every HUD of every user is 56 px wider as soon as any session is visible.
+  it("does not widen the HUD for titled or non-Codex sessions even though they all carry a tag", () => {
+    const taggedTitledCodex = {
+      agentId: "codex",
+      sessionTitle: "Fix login bug",
+      displayTitle: "Fix login bug",
+      displayFolder: "repo",
+      displaySessionTag: "2ce06946ef",
+    };
+    const taggedNonCodex = {
+      agentId: "claude-code",
+      displayTitle: "Refactor auth",
+      displayFolder: "repo",
+      displaySessionTag: "2ce06946ef",
+    };
+    const noTagAtAll = {
+      agentId: "codex",
+      displayTitle: "repo",
+      displayFolder: "repo",
+      displaySessionTag: "",
+    };
+    const layout = { expanded: [taggedTitledCodex, taggedNonCodex, noTagAtAll], folded: [] };
+    assert.strictEqual(layoutHasTaggedFallback(layout), false);
+  });
+
+  it("widens the HUD only for an untitled local Codex Desktop chat", () => {
+    const untitledDesktopChat = {
+      agentId: "codex",
+      hasAlias: false,
+      sessionTitle: "",
+      displayTitle: "repo · 2ce06946ef",
+      displayFolder: "repo",
+      displaySessionTag: "2ce06946ef",
+    };
+    const layout = { expanded: [untitledDesktopChat], folded: [] };
+    assert.strictEqual(layoutHasTaggedFallback(layout), true);
+
+    // An alias or a formal title on the same Codex session disables the
+    // fallback row, so it must disable the width bump too.
+    const aliased = { ...untitledDesktopChat, hasAlias: true, displayTitle: "My alias" };
+    const titled = { ...untitledDesktopChat, sessionTitle: "Real title", displayTitle: "Real title · 2ce06946ef" };
+    assert.strictEqual(layoutHasTaggedFallback({ expanded: [aliased], folded: [] }), false);
+    assert.strictEqual(layoutHasTaggedFallback({ expanded: [titled], folded: [] }), false);
+
+    // Folded rows count the same as expanded ones.
+    assert.strictEqual(layoutHasTaggedFallback({ expanded: [], folded: [untitledDesktopChat] }), true);
   });
 
   it("positions the visible HUD card below the pet hitbox with a fixed gap", () => {
