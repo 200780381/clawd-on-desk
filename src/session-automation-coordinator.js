@@ -123,11 +123,26 @@ function createSessionAutomationCoordinator(options = {}) {
     return canAutoResolve(entry, {
       sessionOnly: config.sessionOnly === true,
       mode,
+      ignoreReviewHold: config.ignoreReviewHold === true,
     }) === true;
   }
 
+  // Offering session trust is a HUMAN action, so it must not depend on an
+  // external review that never ran: a request accepted while automation was
+  // off carries no verdict, and hiding the offer there would silently remove
+  // the feature whenever a review command is configured (#995 review).
+  //
+  // The offer is the only place the review hold is ignored. `resolveIfAllowed`
+  // and `sweep` stay strict, so granting trust never releases a pending
+  // request whose gate did not clear it -- that request keeps its card and is
+  // decided by a human. The grant applies to subsequent requests, which are
+  // reviewed normally.
   function canOfferSessionTrust(entry) {
-    return canResolve(entry, { sessionOnly: true, mode: MODE_AUTO_TOOLS });
+    return canResolve(entry, {
+      sessionOnly: true,
+      mode: MODE_AUTO_TOOLS,
+      ignoreReviewHold: true,
+    });
   }
 
   function resolveIfAllowed(entry, config = {}) {

@@ -2007,12 +2007,12 @@ describe("destructive reminder — runtime behavior", () => {
     );
   });
 
-  it("the session-trust offer is the same predicate, so a held card does not offer it", () => {
+  it("the session-trust offer ignores only the external review hold (#995)", () => {
     const coordinator = fs.readFileSync(path.join(SRC, "session-automation-coordinator.js"), "utf8");
     assert.match(
       coordinator,
-      /function canOfferSessionTrust\(entry\) \{\s*return canResolve\(entry, \{ sessionOnly: true, mode: MODE_AUTO_TOOLS \}\);/,
-      "if this shape changes, the reminder's effect on the trust offer must be re-decided, not inherited"
+      /function canOfferSessionTrust\(entry\) \{\s*return canResolve\(entry, \{\s*sessionOnly: true,\s*mode: MODE_AUTO_TOOLS,\s*ignoreReviewHold: true,\s*\}\);/,
+      "the offer must ignore ONLY the review hold: a reminder-held card still must not offer trust"
     );
   });
 
@@ -2025,9 +2025,13 @@ describe("destructive reminder — runtime behavior", () => {
       const rt = makeRuntime({
         isDestructiveReminderEnabled: () => true,
         // main.js routes this through the coordinator, whose canOfferSessionTrust is
-        // exactly canResolve(entry, { sessionOnly: true, mode: MODE_AUTO_TOOLS }).
+        // canResolve(entry, { sessionOnly: true, mode: MODE_AUTO_TOOLS, ignoreReviewHold: true }).
         canOfferSessionTrust: (entry) => holder.permission
-          .canAutoResolvePendingPermission(entry, { sessionOnly: true, mode: "auto-tools" }),
+          .canAutoResolvePendingPermission(entry, {
+            sessionOnly: true,
+            mode: "auto-tools",
+            ignoreReviewHold: true,
+          }),
       }, rawInput ? { rawInput } : {});
       holder.permission = rt.permission;
       return rt;

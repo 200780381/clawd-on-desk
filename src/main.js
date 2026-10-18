@@ -86,6 +86,9 @@ const createRoamFenceSettings = require("./roam-fence-settings");
 const createRoamFencePicker = require("./roam-fence-picker");
 const createPermissionAutomationConfirmationRuntime = require("./permission-automation-confirmation");
 const {
+  stopActivePermissionReviews,
+} = require("./permission-review-command");
+const {
   createSettingsSizePreviewSession,
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
@@ -2113,6 +2116,12 @@ const _permCtx = {
     _settingsController.get("permissionAutomationMode") || "off",
   isDestructiveReminderEnabled: () =>
     _settingsController.get("destructiveActionReminder") === true,
+  // Optional external review command (#995). The permission runtime consumes
+  // both values together; an empty command means the feature is off.
+  getPermissionReviewConfig: () => ({
+    command: _settingsController.get("permissionReviewCommand"),
+    timeoutMs: _settingsController.get("permissionReviewTimeoutMs"),
+  }),
   getEffectivePermissionAutomationMode: (entry, options) =>
     sessionAutomationCoordinator
       ? sessionAutomationCoordinator.getEffectiveMode(entry, options)
@@ -2818,6 +2827,11 @@ sendDashboardI18n = () => {
 // `will-quit` never arrives. Tear it down while the app is still deciding to
 // quit; the `will-quit` call stays as an idempotent backstop for a host created
 // after that point.
+// A review process still running after Clawd exits has no reader left, and its
+// verdict can no longer reach a permission decision. Stop it before the rest of
+// the quit path runs. Kept as its own listener so the quick-host teardown below
+// stays a single, directly testable line.
+app.on("before-quit", () => stopActivePermissionReviews());
 app.on("before-quit", () => _dashboard.quick.dispose());
 app.on("will-quit", () => _dashboard.quick.dispose());
 
@@ -3029,6 +3043,25 @@ const _serverCtx = {
     _runtimeAgentGate.shouldSyncAgentIntegration(agentId),
   getAgentIntegrationOptions: _getAgentIntegrationOptions,
   isAgentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentPermissionsEnabled(agentId),
+  // External review (#995): the route derives the review verdict at accept
+  // time, so it needs the same effective-mode and reminder gates the
+  // permission runtime uses. Values are read from the shared controller and
+  // coordinator; nothing is cached per request.
+  getEffectivePermissionAutomationMode: (entry, options) =>
+    sessionAutomationCoordinator
+      ? sessionAutomationCoordinator.getEffectiveMode(entry, options)
+      : (_settingsController.get("permissionAutomationMode") || "off"),
+  hasSessionAutomationOverride: (entry) =>
+    !!(
+      sessionAutomationCoordinator
+      && sessionAutomationCoordinator.getRecordForEntry(entry)
+    ),
+  isDestructiveReminderEnabled: () =>
+    _settingsController.get("destructiveActionReminder") === true,
+  getPermissionReviewConfig: () => ({
+    command: _settingsController.get("permissionReviewCommand"),
+    timeoutMs: _settingsController.get("permissionReviewTimeoutMs"),
+  }),
   isAgentSubagentPermissionsEnabled: (agentId) => _runtimeAgentGate.isAgentSubagentPermissionsEnabled(agentId),
   isCodexNativeNotificationSoundEnabled: () => _runtimeAgentGate.isCodexNativeNotificationSoundEnabled(),
   getCodexPermissionMode: () => _runtimeAgentGate.getCodexPermissionMode(),
