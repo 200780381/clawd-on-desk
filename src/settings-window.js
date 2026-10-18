@@ -112,7 +112,6 @@ function createSettingsWindowRuntime(options = {}) {
     "theme",
     "animOverrides",
     "shortcuts",
-    "telegram-approval",
     "discord-presence",
     "remote-ssh",
     "recap",

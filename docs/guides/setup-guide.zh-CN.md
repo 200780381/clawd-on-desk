@@ -136,11 +136,11 @@ Clawd 可以把受支持、仍待处理的权限请求镜像到专用 Telegram b
 
 ## 飞书 / Lark 远程审批
 
-Clawd 也可以通过飞书（中国）或 Lark（国际）的自建应用发送交互卡片。两者属于同一个远程审批通道，可在 **Settings → 远程审批 → 飞书 / Lark** 中选择平台。权限范围、用户 ID 差异和卡片语言见 [feishu-lark-remote-approval.md](feishu-lark-remote-approval.md)。
+Clawd 也可以通过飞书（中国）或 Lark（国际）的自建应用发送交互卡片。两者属于同一个远程审批通道，可在 **设置 → 权限与审批 → IM 渠道 → 飞书 / Lark** 中选择平台。权限范围、用户 ID 差异和卡片语言见 [feishu-lark-remote-approval.md](feishu-lark-remote-approval.md)。
 
 ## Slack 通知
 
-与上面两个通道不同，Slack 仅做**通知**：会话结束、报错或等待权限时 Clawd 会推送消息，但决定始终在桌面应用中做出——本版本的 Slack 不能执行 Allow 或 Deny。可在 **Settings → 远程审批 → Slack** 使用 Incoming Webhook（推荐）或带 `chat:write` 权限的 `xoxb-` bot token 配置。
+与上面两个通道不同，Slack 仅做**通知**：会话结束、报错或等待权限时 Clawd 会推送消息，但决定始终在桌面应用中做出——本版本的 Slack 不能执行 Allow 或 Deny。可在 **设置 → 权限与审批 → IM 渠道 → Slack** 使用 Incoming Webhook（推荐）或带 `chat:write` 权限的 `xoxb-` bot token 配置。
 
 消息发往 Slack 频道，内容可包含会话标题（由你的 prompt 推导）、文件夹名和主机名，因此**建议使用私有频道**。配置、完整字段清单、密钥存储和排障见 [slack-notifications.md](slack-notifications.md)。
 

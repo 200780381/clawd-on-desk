@@ -1,8 +1,10 @@
 "use strict";
 
-// Permissions tab: how permission requests are handled on this machine, plus
-// the per-tool Codex approval link. patchInPlace only accepts
-// PERMISSIONS_IN_PLACE_KEYS.
+// Permissions & approval tab: a three-sub-page shell (on this machine / IM
+// channels / LAN approval). The local rows live here; the IM and LAN bodies,
+// their status refreshes and their leave-cleaning come from
+// ClawdSettingsTabTelegramApproval, resolved only when a body renders.
+// patchInPlace owns PERMISSIONS_IN_PLACE_KEYS first, then delegates the rest.
 (function initSettingsTabPermissions(root) {
   const PERMISSIONS_IN_PLACE_KEYS = new Set([
     "permissionAutomationMode",
@@ -15,12 +17,31 @@
     { id: "auto-tools", labelKey: "permissionAutomationAutoTools" },
     { id: "unattended", labelKey: "permissionAutomationUnattended" },
   ];
+  // Sub-page navigation uses `id`, never `key`: the tab-split test treats every
+  // `key`-colon string literal in this module as a pref key.
+  const SUBTABS = [
+    { id: "local", labelKey: "permissionsSubtabLocal" },
+    { id: "channels", labelKey: "permissionsSubtabChannels" },
+    { id: "lan", labelKey: "permissionsSubtabLan" },
+  ];
 
   let state = null;
+  let runtime = null;
   let readers = null;
   let helpers = null;
   let ops = null;
   let i18n = null;
+  let mountedSubtabs = null;
+  let mountedHost = null;
+
+  function remote() {
+    return root.ClawdSettingsTabTelegramApproval;
+  }
+
+  function currentSubtab() {
+    const value = runtime && runtime.permissionsSubtab;
+    return value === "channels" || value === "lan" ? value : "local";
+  }
 
   function t(key) {
     return helpers.t(key);
@@ -223,6 +244,32 @@
     subtitle.textContent = t("permissionsSubtitle");
     parent.appendChild(subtitle);
 
+    if (mountedSubtabs) mountedSubtabs.dispose();
+    if (mountedHost) mountedHost.dispose();
+    mountedHost = helpers.createSubpageHost({ disposeBody: () => ops.clearMountedControls() });
+    const switcher = buildSubtabSwitcher();
+    mountedSubtabs = switcher.control;
+    parent.appendChild(switcher.wrap);
+    for (const panel of switcher.control.panels.values()) parent.appendChild(panel);
+    mountedHost.render(switcher.control.panels.get(switcher.control.getValue()), renderSubtabBody);
+  }
+
+  function renderSubtabBody(parent) {
+    const subtab = currentSubtab();
+    if (subtab === "channels") {
+      const remoteApi = remote();
+      if (remoteApi) remoteApi.renderChannelsBody(parent);
+      return;
+    }
+    if (subtab === "lan") {
+      const remoteApi = remote();
+      if (remoteApi) remoteApi.renderLanBody(parent);
+      return;
+    }
+    renderLocalBody(parent);
+  }
+
+  function renderLocalBody(parent) {
     parent.appendChild(helpers.buildSection(t("sectionPermissionLocal"), [
       buildPermissionAutomationRow(),
       helpers.buildSwitchRow({
@@ -238,40 +285,81 @@
     ]));
   }
 
-  function patchInPlace(changes) {
+  function buildSubtabSwitcher() {
+    const wrap = document.createElement("div");
+    wrap.className = "anim-override-subtabs";
+    const control = helpers.buildTabs({
+      id: "settings-permissions",
+      ariaLabel: t("permissionsTitle"),
+      value: currentSubtab(),
+      options: SUBTABS.map((entry) => ({ value: entry.id, label: t(entry.labelKey) })),
+      onChange(value) {
+        if (currentSubtab() === "channels" && value !== "channels") {
+          const remoteApi = remote();
+          if (remoteApi) remoteApi.leave();
+        }
+        runtime.permissionsSubtab = value;
+        mountedHost.render(control.panels.get(value), renderSubtabBody, { scrollTop: 0 });
+      },
+    });
+    wrap.appendChild(control.element);
+    return { wrap, control };
+  }
+
+  function patchInPlace(changes, context) {
     const keys = changes ? Object.keys(changes) : [];
     if (keys.length === 0) return false;
-    if (!keys.every((key) => PERMISSIONS_IN_PLACE_KEYS.has(key))) return false;
-    if (keys.includes("permissionAutomationMode")) {
-      const control = state.mountedControls.permissionAutomationMode;
-      if (!control || !document.body.contains(control.element)) return false;
-    }
-    for (const key of keys) {
-      if (key === "permissionAutomationMode") continue;
-      if (key === "permissionAutomationAutoToolsWarningDismissed"
-        || key === "permissionAutomationUnattendedWarningDismissed") continue;
-      const meta = state.mountedControls.generalSwitches.get(key);
-      if (!meta || !document.body.contains(meta.element)) return false;
-    }
-    for (const key of keys) {
-      if (key === "permissionAutomationMode") {
-        state.mountedControls.permissionAutomationMode.syncFromSnapshot();
-        continue;
+    if (keys.every((key) => PERMISSIONS_IN_PLACE_KEYS.has(key))) {
+      if (keys.includes("permissionAutomationMode")) {
+        const control = state.mountedControls.permissionAutomationMode;
+        if (!control || !document.body.contains(control.element)) return false;
       }
-      if (key === "permissionAutomationAutoToolsWarningDismissed"
-        || key === "permissionAutomationUnattendedWarningDismissed") continue;
-      const meta = state.mountedControls.generalSwitches.get(key);
-      state.transientUiState.generalSwitches.delete(key);
-      meta.control.setState({
-        checked: readers.readGeneralSwitchVisual(key, meta.invert),
-        pending: false,
-      });
+      for (const key of keys) {
+        if (key === "permissionAutomationMode") continue;
+        if (key === "permissionAutomationAutoToolsWarningDismissed"
+          || key === "permissionAutomationUnattendedWarningDismissed") continue;
+        const meta = state.mountedControls.generalSwitches.get(key);
+        if (!meta || !document.body.contains(meta.element)) return false;
+      }
+      for (const key of keys) {
+        if (key === "permissionAutomationMode") {
+          state.mountedControls.permissionAutomationMode.syncFromSnapshot();
+          continue;
+        }
+        if (key === "permissionAutomationAutoToolsWarningDismissed"
+          || key === "permissionAutomationUnattendedWarningDismissed") continue;
+        const meta = state.mountedControls.generalSwitches.get(key);
+        state.transientUiState.generalSwitches.delete(key);
+        meta.control.setState({
+          checked: readers.readGeneralSwitchVisual(key, meta.invert),
+          pending: false,
+        });
+      }
+      return true;
     }
-    return true;
+    const remoteApi = remote();
+    return !!(remoteApi && typeof remoteApi.patchInPlace === "function"
+      && remoteApi.patchInPlace(changes, context));
+  }
+
+  function refreshRuntimeStatus(payload) {
+    const remoteApi = remote();
+    if (!remoteApi || typeof remoteApi.refreshRuntimeStatus !== "function") return false;
+    return remoteApi.refreshRuntimeStatus(payload);
+  }
+
+  function onExit() {
+    const remoteApi = remote();
+    if (remoteApi && typeof remoteApi.leave === "function") remoteApi.leave();
+    if (mountedSubtabs) mountedSubtabs.dispose();
+    if (mountedHost) mountedHost.dispose();
+    mountedSubtabs = null;
+    mountedHost = null;
   }
 
   function init(core) {
     state = core.state;
+    runtime = core.runtime;
     readers = core.readers;
     helpers = core.helpers;
     ops = core.ops;
@@ -279,6 +367,8 @@
     core.tabs.permissions = {
       render,
       patchInPlace,
+      refreshRuntimeStatus,
+      onExit,
     };
   }
 

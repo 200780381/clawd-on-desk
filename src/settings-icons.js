@@ -82,13 +82,6 @@ const ICONS = {
     '<path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h12"/>' +
     '</svg>',
 
-  // paper plane (send)
-  "telegram-approval":
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="100%" height="100%">' +
-    '<path d="M22 2 11 13"/>' +
-    '<path d="M22 2 15 22l-4-9-9-4 20-7Z"/>' +
-    '</svg>',
-
   // gamepad (Discord presence)
   "discord-presence":
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="100%" height="100%">' +
