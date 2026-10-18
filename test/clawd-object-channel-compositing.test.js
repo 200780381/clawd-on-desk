@@ -37,12 +37,14 @@ function formatViolation(file, violation) {
 }
 
 function formatNote(file, note) {
-  if (note.type === "unsupported-selector") {
-    return `${file}: [note ${note.type}] "${note.selector}" — ${note.reason}`;
-  }
-  const value = note.value || note.href || "";
-  return `${file}: [note ${note.type}] ${note.element || "(unknown element)"}`
-    + ` — value "${value}"${note.reason ? `; ${note.reason}` : ""}`;
+  const parts = [`[note ${note.type}]`];
+  if (note.selector) parts.push(`selector "${note.selector}"`);
+  if (note.element) parts.push(`element ${note.element}`);
+  if (note.href) parts.push(`href "${note.href}"`);
+  if (note.value) parts.push(`value "${note.value}"`);
+  if (note.reason) parts.push(note.reason);
+  if (note.hint) parts.push(`Fix: ${note.hint}`);
+  return `${file}: ${parts.join(" ")}`;
 }
 
 function assertR2Move(result) {
@@ -111,11 +113,12 @@ test("R1 accepts only transform and opacity", () => {
 });
 
 test("R1 rejects independent translate, rotate, and scale on SVG targets", () => {
-  for (const property of ["translate", "rotate", "scale"]) {
+  const validValues = { translate: "10px", rotate: "10deg", scale: "2" };
+  for (const property of Object.keys(validValues)) {
     const result = audit(svg(`
       <style>
         .bit { animation: move 1s infinite; }
-        @keyframes move { to { ${property}: 1; } }
+        @keyframes move { to { ${property}: ${validValues[property]}; } }
       </style>
       <rect class="bit"/>
     `));
@@ -164,7 +167,6 @@ test("keyframe metadata is not treated as an animated property", () => {
       @keyframes move {
         to {
           animation-timing-function: steps(2, end);
-          animation-composition: add;
           transform: translateX(1px);
         }
       }
@@ -188,6 +190,55 @@ test("keyframe metadata is not treated as an animated property", () => {
   const violations = violationsOf(withFill, RULES.R1.id);
   assert.equal(violations.length, 1);
   assert.equal(violations[0].property, "fill");
+});
+
+test("animation-composition only allows replace", () => {
+  const add = audit(svg(`
+    <style>
+      rect { animation: move 1s infinite; }
+      @keyframes move {
+        from { transform: translateX(0); animation-composition: add; }
+        to { transform: translateX(10px); animation-composition: accumulate; }
+      }
+    </style>
+    <rect/>
+  `));
+  const addViolations = violationsOf(add, RULES.R1.id);
+  assert.equal(addViolations.length, 1);
+  assert.equal(addViolations[0].property, "animation-composition");
+
+  const replace = audit(svg(`
+    <style>
+      rect { animation: move 1s infinite; }
+      @keyframes move {
+        from { transform: translateX(0); animation-composition: replace; }
+        to { transform: translateX(10px); }
+      }
+    </style>
+    <rect/>
+  `));
+  assert.deepEqual(violationsOf(replace, RULES.R1.id), []);
+
+  const elementAdd = audit(svg(`
+    <style>
+      .bit { animation: move 1s infinite; animation-composition: add; }
+      @keyframes move { to { transform: translateX(1px); } }
+    </style>
+    <rect class="bit"/>
+  `));
+  const elementViolations = violationsOf(elementAdd, RULES.R1.id);
+  assert.equal(elementViolations.length, 1);
+  assert.equal(elementViolations[0].property, "animation-composition");
+  assert.equal(elementViolations[0].element, "rect.bit");
+
+  const elementReplace = audit(svg(`
+    <style>
+      .bit { animation: move 1s infinite; animation-composition: replace; }
+      @keyframes move { to { transform: translateX(1px); } }
+    </style>
+    <rect class="bit"/>
+  `));
+  assert.deepEqual(violationsOf(elementReplace, RULES.R1.id), []);
 });
 
 test("R2 flags transform animation on a <use> that carries x/y", () => {
@@ -283,6 +334,30 @@ test("declaration normalization: comments inside an inline style", () => {
     <defs><path id="p" d="M0 0H4V4H0Z"/></defs>
     <use href="#p" x="3" style="animation:/* note */move 1s infinite"/>
   `));
+  assertR2Move(result);
+});
+
+test("comment markers inside CSS strings do not swallow later declarations", () => {
+  const result = audit(svg(`
+    <style>${ANIMATION_KEYFRAMES}</style>
+    <defs><rect id="p" width="4" height="4"/></defs>
+    <rect style="animation:fade 1s infinite"/>
+    <use href="#p" x="3" style='--a:"/*";animation:move 1s infinite;--b:"*/"'/>
+  `));
+
+  assert.equal(result.animations.length, 2);
+  assertR2Move(result);
+});
+
+test("declaration normalization: whitespace inside ! important", () => {
+  const result = auditUseWithRule(`
+    .u {
+      animation-name: fade, move ! important;
+      animation-duration: 1s;
+      animation-iteration-count: infinite;
+    }
+  `);
+  assert.deepEqual(result.animations.map((entry) => entry.name).sort(), ["fade", "move"]);
   assertR2Move(result);
 });
 
@@ -536,6 +611,21 @@ test("a shorthand whose name is only var() leaves an unresolved note", () => {
   assert.match(notes[0].hint, /explicit animation name/);
 });
 
+test("a shorthand with var() leaves a note even when an explicit name is found", () => {
+  const result = audit(svg(`
+    <style>${ANIMATION_KEYFRAMES}</style>
+    <defs><path id="p" d="M0 0H4V4H0Z"/></defs>
+    <use href="#p" x="3"
+         style="--a:move 1s infinite,; animation:var(--a) fade 1s infinite"/>
+  `));
+
+  assert.deepEqual(result.animations.map((entry) => entry.name), ["fade"]);
+  const notes = result.notes.filter((note) => note.type === "unresolved-animation-name");
+  assert.equal(notes.length, 1);
+  assert.match(notes[0].value, /var\(--a\)/);
+  assert.match(notes[0].reason, /var\(\)/);
+});
+
 test("CSS-wide animation values leave an unsupported-animation-value note", () => {
   for (const keyword of ["inherit", "initial", "unset", "revert", "revert-layer"]) {
     const result = audit(svg(`
@@ -549,6 +639,16 @@ test("CSS-wide animation values leave an unsupported-animation-value note", () =
     assert.match(notes[0].reason, /inherit/);
     assert.ok(notes[0].hint);
   }
+});
+
+test("CSS-wide keywords on non-animation properties are ignored", () => {
+  const result = audit(svg(`
+    <style>@keyframes fade { to { opacity: 0.5; } }</style>
+    <rect style="opacity:initial;animation:fade 1s infinite"/>
+  `));
+
+  assert.deepEqual(result.notes, []);
+  assert.deepEqual(result.animations.map((entry) => entry.name), ["fade"]);
 });
 
 test("CSS nesting leaves a note and skips the containing rule", () => {
@@ -589,6 +689,44 @@ test("unsupported selectors are reported instead of silently skipped", () => {
       ["unsupported-selector", ".b[data-x]"],
     ],
   );
+});
+
+test("formatNote always shows selector, reason, and hint", () => {
+  const nesting = formatNote("x.svg", {
+    type: "unsupported-nesting",
+    selector: ".a",
+    reason: "CSS nesting is not modeled.",
+    hint: "Flatten the nested rule.",
+  });
+  assert.match(nesting, /selector "\.a"/);
+  assert.match(nesting, /CSS nesting is not modeled/);
+  assert.match(nesting, /Fix: Flatten the nested rule/);
+  assert.doesNotMatch(nesting, /unknown element/);
+
+  const target = formatNote("x.svg", {
+    type: "unresolved-use-target",
+    element: "use",
+    href: "#missing",
+    reason: "No element exists.",
+    hint: "Point at an existing id.",
+  });
+  assert.match(target, /element use/);
+  assert.match(target, /href "#missing"/);
+  assert.match(target, /No element exists/);
+  assert.match(target, /Fix: Point at an existing id/);
+
+  const animation = formatNote("x.svg", {
+    type: "unresolved-animation-name",
+    selector: ".p",
+    element: "rect.p",
+    value: "var(--a)",
+    reason: "A var() may expand.",
+    hint: "Use an explicit name.",
+  });
+  assert.match(animation, /selector "\.p"/);
+  assert.match(animation, /element rect\.p/);
+  assert.match(animation, /value "var\(--a\)"/);
+  assert.match(animation, /Fix: Use an explicit name/);
 });
 
 // ---------------------------------------------------------------------------

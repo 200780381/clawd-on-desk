@@ -31,7 +31,8 @@ const RULES = Object.freeze({
 // filter/backdrop-filter are candidates in Chromium but deliberately excluded
 // here as a project policy, so this allowlist is stricter than the browser.
 const COMPOSITED_PROPERTIES = new Set(["transform", "opacity"]);
-const KEYFRAME_METADATA_PROPERTIES = new Set(["animation-timing-function", "animation-composition"]);
+const KEYFRAME_METADATA_PROPERTIES = new Set(["animation-timing-function"]);
+const COMPOSITION_PROPERTY = "animation-composition";
 const TRANSFORM_PROPERTIES = new Set(["transform", "translate", "rotate", "scale"]);
 const SMIL_TAGS = new Set(["animate", "animatetransform", "animatemotion", "set"]);
 const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "unset", "revert", "revert-layer"]);
@@ -87,7 +88,39 @@ function describeElement(element) {
 }
 
 function stripCssComments(css) {
-  return css.replace(/\/\*[\s\S]*?\*\//g, "");
+  let out = "";
+  let quote = "";
+
+  for (let i = 0; i < css.length; i += 1) {
+    const ch = css[i];
+    if (quote) {
+      out += ch;
+      if (ch === "\\") {
+        if (i + 1 < css.length) {
+          out += css[i + 1];
+          i += 1;
+        }
+      } else if (ch === quote) {
+        quote = "";
+      }
+      continue;
+    }
+
+    if (ch === "\"" || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && css[i + 1] === "*") {
+      const end = css.indexOf("*/", i + 2);
+      if (end < 0) break;
+      i = end + 1;
+      continue;
+    }
+    out += ch;
+  }
+
+  return out;
 }
 
 /** Split on a delimiter that is not inside parentheses or quotes. */
@@ -178,7 +211,7 @@ function parseDeclarations(block) {
     const rawProperty = chunk.slice(0, colon).trim().toLowerCase();
     const property = PROPERTY_ALIASES.get(rawProperty) || rawProperty;
     const value = chunk.slice(colon + 1)
-      .replace(/\s*!important\s*$/i, "")
+      .replace(/\s*!\s*important\s*$/i, "")
       .trim();
     if (!property || !value) continue;
     declarations.push({ property, value });
@@ -209,6 +242,13 @@ function animationNameFromShorthand(part) {
   return null;
 }
 
+function compositionNeedsMainThread(value) {
+  return splitTopLevel(value, ",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean)
+    .some((part) => part !== "replace");
+}
+
 function analyzeAnimationDeclaration(declaration) {
   const names = [];
   const unresolved = [];
@@ -218,21 +258,20 @@ function analyzeAnimationDeclaration(declaration) {
     return { names, unresolved, unsupportedValue: value };
   }
 
+  // A var() may expand into additional animation entries. Even when explicit
+  // names are present, keep a note so the unseen part cannot pass silently.
+  if (/var\(/i.test(value)) unresolved.push(value);
+
   if (declaration.property === "animation") {
     for (const part of splitTopLevel(value, ",")) {
       const name = animationNameFromShorthand(part);
-      if (name) {
-        names.push(name);
-      } else if (/var\(/i.test(part)) {
-        unresolved.push(part.trim());
-      }
+      if (name) names.push(name);
     }
   } else if (declaration.property === "animation-name") {
     for (const part of splitTopLevel(value, ",")) {
       const name = unquote(part);
-      if (!name || name.toLowerCase() === "none") continue;
-      if (/var\(/i.test(name)) unresolved.push(name);
-      else names.push(name);
+      if (!name || name.toLowerCase() === "none" || /var\(/i.test(name)) continue;
+      names.push(name);
     }
   }
 
@@ -263,6 +302,8 @@ function findMatchingBrace(text, openIndex) {
 
 function parseKeyframeProperties(block) {
   const properties = new Set();
+  const compositionValues = [];
+
   let i = 0;
   while (i < block.length) {
     const open = block.indexOf("{", i);
@@ -270,22 +311,30 @@ function parseKeyframeProperties(block) {
     const close = findMatchingBrace(block, open);
     for (const declaration of parseDeclarations(block.slice(open + 1, close))) {
       properties.add(declaration.property);
+      if (declaration.property === COMPOSITION_PROPERTY) {
+        compositionValues.push(declaration.value);
+      }
     }
     i = close + 1;
   }
-  return properties;
+  return { properties, compositionValues };
 }
 
-function registerKeyframe(keyframes, name, properties) {
+function registerKeyframe(keyframes, name, parsed) {
   const existing = keyframes.get(name);
   if (existing) {
     // Duplicate @keyframes definitions (for example inside an ignored
     // @media block) are merged. Unioning properties is the conservative
     // choice: a later definition must not erase a real violation.
-    for (const property of properties) existing.properties.add(property);
+    for (const property of parsed.properties) existing.properties.add(property);
+    for (const value of parsed.compositionValues) existing.compositionValues.add(value);
     return;
   }
-  keyframes.set(name, { name, properties: new Set(properties) });
+  keyframes.set(name, {
+    name,
+    properties: new Set(parsed.properties),
+    compositionValues: new Set(parsed.compositionValues),
+  });
 }
 
 function containsBraceOutsideQuotes(text) {
@@ -334,7 +383,10 @@ function parseCss(cssText) {
           const nested = parseCss(block);
           rules.push(...nested.rules);
           for (const [name, keyframe] of nested.keyframes) {
-            registerKeyframe(keyframes, name, keyframe.properties);
+            registerKeyframe(keyframes, name, {
+              properties: keyframe.properties,
+              compositionValues: keyframe.compositionValues,
+            });
           }
           unsupported.push(...nested.unsupported);
         }
@@ -371,6 +423,7 @@ function parseCss(cssText) {
           type: "unsupported-selector",
           selector: rawSelector.trim(),
           reason: parsed.reason,
+          hint: "Rewrite the selector with a tag name, .class, #id, and descendant/child combinators only.",
         });
       } else {
         subjects.push(parsed.subject);
@@ -496,6 +549,8 @@ function collectAnimationsByElement(elements, rules, keyframes, notes) {
   };
 
   const applyDeclaration = (element, declaration, selector) => {
+    if (declaration.property !== "animation" && declaration.property !== "animation-name") return;
+
     const { names, unresolved, unsupportedValue } = analyzeAnimationDeclaration(declaration);
     for (const name of names) add(element, name);
 
@@ -552,6 +607,7 @@ function addKeyframeViolations(keyframes, animationsByElement, violations) {
   for (const [name, keyframe] of keyframes) {
     for (const property of keyframe.properties) {
       if (KEYFRAME_METADATA_PROPERTIES.has(property)) continue;
+      if (property === COMPOSITION_PROPERTY) continue;
       if (COMPOSITED_PROPERTIES.has(property)) continue;
       const users = usersByAnimation.get(name) || [];
       violations.push({
@@ -562,6 +618,57 @@ function addKeyframeViolations(keyframes, animationsByElement, violations) {
         property,
         message: `@keyframes "${name}" animates "${property}". ${RULES.R1.hint}`,
       });
+    }
+
+    if ([...keyframe.compositionValues].some(compositionNeedsMainThread)) {
+      const users = usersByAnimation.get(name) || [];
+      violations.push({
+        rule: "R1",
+        id: RULES.R1.id,
+        element: users.length ? users.join(", ") : "(unused @keyframes)",
+        animation: name,
+        property: COMPOSITION_PROPERTY,
+        message: `@keyframes "${name}" uses a non-replace ${COMPOSITION_PROPERTY}; Chromium keeps that effect on the main thread. Use replace or omit the property.`,
+      });
+    }
+  }
+}
+
+function addElementCompositionViolations(elements, rules, violations) {
+  const seen = new Set();
+
+  const add = (element, selector, declaration) => {
+    if (!compositionNeedsMainThread(declaration.value)) return;
+    const key = `${describeElement(element)}\u0000${declaration.value}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const source = selector ? `Rule "${selector}"` : "Inline style";
+    violations.push({
+      rule: "R1",
+      id: RULES.R1.id,
+      element: describeElement(element),
+      animation: "(element declaration)",
+      property: COMPOSITION_PROPERTY,
+      message: `${source} sets a non-replace ${COMPOSITION_PROPERTY}; Chromium keeps that effect on the main thread. Use replace or omit the property.`,
+    });
+  };
+
+  for (const rule of rules) {
+    const compositions = rule.declarations.filter((declaration) => (
+      declaration.property === COMPOSITION_PROPERTY
+    ));
+    if (!compositions.length) continue;
+    for (const element of elements) {
+      if (!rule.subjects.some((subject) => matchesSubject(element, subject))) continue;
+      for (const declaration of compositions) add(element, rule.selector, declaration);
+    }
+  }
+
+  for (const element of elements) {
+    const style = element.node.attribs && element.node.attribs.style;
+    if (!style) continue;
+    for (const declaration of parseDeclarations(style)) {
+      if (declaration.property === COMPOSITION_PROPERTY) add(element, null, declaration);
     }
   }
 }
@@ -776,6 +883,7 @@ function auditSvgCompositing(markup) {
 
   const violations = [];
   addKeyframeViolations(css.keyframes, animationsByElement, violations);
+  addElementCompositionViolations(elements, css.rules, violations);
   addUseTranslationViolations(elements, css.rules, animationsByElement, css.keyframes, violations);
   addAnimatedUseTargetViolations(elements, animationsByElement, css.keyframes, violations, css.unsupported);
   addSmilViolations(elements, violations);
