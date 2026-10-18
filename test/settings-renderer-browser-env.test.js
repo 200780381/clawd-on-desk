@@ -27,6 +27,10 @@ const DOCTOR_IPC = path.join(SRC_DIR, "doctor-ipc.js");
 const { SUPPORTED_LANGS } = require("../src/i18n");
 const TAB_MODULES = [
   path.join(SRC_DIR, "settings-tab-general.js"),
+  path.join(SRC_DIR, "settings-tab-pet.js"),
+  path.join(SRC_DIR, "settings-tab-notifications.js"),
+  path.join(SRC_DIR, "settings-tab-sessions.js"),
+  path.join(SRC_DIR, "settings-tab-permissions.js"),
   path.join(SRC_DIR, "settings-tab-agents.js"),
   path.join(SRC_DIR, "settings-tab-theme.js"),
   path.join(SRC_DIR, "settings-tab-anim-map.js"),
@@ -1165,6 +1169,7 @@ function loadGeneralLanguageRowForTest({
 }
 
 function loadGeneralTabForTest({
+  tab = "general",
   snapshot,
   settingsAPI = {},
   sizeSliderExports = null,
@@ -1247,25 +1252,38 @@ function loadGeneralTabForTest({
   vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_ANIM_OVERRIDES_MERGE, "utf8"), context);
   vm.runInContext(fs.readFileSync(SETTINGS_UI_CORE, "utf8"), context);
-  vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8"), context);
+  for (const file of [
+    "settings-tab-general.js",
+    "settings-tab-pet.js",
+    "settings-tab-notifications.js",
+    "settings-tab-sessions.js",
+    "settings-tab-permissions.js",
+  ]) {
+    vm.runInContext(fs.readFileSync(path.join(SRC_DIR, file), "utf8"), context);
+  }
 
   const core = context.ClawdSettingsCore;
   core.state.snapshot = snapshot || {};
-  core.state.activeTab = "general";
+  core.state.activeTab = tab;
   context.ClawdSettingsTabGeneral.init(core);
+  context.ClawdSettingsTabPet.init(core);
+  context.ClawdSettingsTabNotifications.init(core);
+  context.ClawdSettingsTabSessions.init(core);
+  context.ClawdSettingsTabPermissions.init(core);
 
   let contentRenderCount = 0;
   function renderContent() {
     contentRenderCount++;
     core.ops.clearMountedControls();
     content.innerHTML = "";
-    core.tabs.general.render(content, core);
+    core.tabs[tab].render(content, core);
   }
   core.ops.installRenderHooks({ content: renderContent });
 
   return {
     core,
     content,
+    tab,
     renderContent,
     getContentRenderCount: () => contentRenderCount,
     getSwitchMeta: (key) => core.state.mountedControls.generalSwitches.get(key) || null,
@@ -3890,6 +3908,10 @@ describe("settings renderer browser environment", () => {
       "settings-ui-core.js",
       "settings-agent-order.js",
       "settings-tab-general.js",
+      "settings-tab-pet.js",
+      "settings-tab-notifications.js",
+      "settings-tab-sessions.js",
+      "settings-tab-permissions.js",
       "settings-tab-agents.js",
       "settings-tab-theme.js",
       "settings-tab-anim-map.js",
@@ -8854,7 +8876,7 @@ describe("settings renderer browser environment", () => {
 
   it("unifies the size slider on the simple volume-style control (no floating bubble, no ticks)", () => {
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
-    const tabSource = fs.readFileSync(SETTINGS_TAB_GENERAL, "utf8");
+    const tabSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-pet.js"), "utf8");
     // Old floating-bubble/tick design must be fully gone.
     assert.ok(!/\.size-bubble/.test(css));
     assert.ok(!/\.size-ticks/.test(css));
@@ -8873,6 +8895,7 @@ describe("settings renderer browser environment", () => {
     let context = { ui: 70, overMax: false, synced: false };
     let notify;
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -8900,6 +8923,7 @@ describe("settings renderer browser environment", () => {
   it("shows the over-limit warning only until a size drag starts", async () => {
     const previewCalls = [];
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -8936,6 +8960,7 @@ describe("settings renderer browser environment", () => {
     let contextCalls = 0;
     const commits = [];
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -8972,6 +8997,7 @@ describe("settings renderer browser environment", () => {
     for (const ending of ["pointerup", "pointercancel", "blur"]) {
       let contextCalls = 0;
       const harness = loadGeneralTabForTest({
+      tab: "pet",
         snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
         sizeSliderExports: require("../src/settings-size-slider"),
         settingsAPI: {
@@ -9003,6 +9029,7 @@ describe("settings renderer browser environment", () => {
     let calls = 0;
     let notify;
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9042,6 +9069,7 @@ describe("settings renderer browser environment", () => {
     const fresh = createDeferred();
     let calls = 0;
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9060,7 +9088,7 @@ describe("settings renderer browser environment", () => {
     harness.dispatchWindowEvent("focus");
     await Promise.resolve();
     harness.core.state.snapshot.size = "P:21.3";
-    assert.strictEqual(harness.core.tabs.general.patchInPlace({ size: "P:21.3" }), true);
+    assert.strictEqual(harness.core.tabs.pet.patchInPlace({ size: "P:21.3" }), true);
     assert.strictEqual(slider.value, "71");
     stale.resolve({ ui: 70, overMax: false, synced: false });
     await Promise.resolve(); await Promise.resolve();
@@ -9069,13 +9097,14 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve(); await Promise.resolve();
     assert.strictEqual(slider.value, "71");
     harness.core.state.snapshot.keepSizeAcrossDisplays = false;
-    assert.strictEqual(harness.core.tabs.general.patchInPlace({ keepSizeAcrossDisplays: false }), true);
+    assert.strictEqual(harness.core.tabs.pet.patchInPlace({ keepSizeAcrossDisplays: false }), true);
     assert.strictEqual(slider.value, "71");
   });
 
   it("refreshes the mounted size row when keep size across displays changes", async () => {
     let contextCalls = 0;
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5", keepSizeAcrossDisplays: true }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9093,7 +9122,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(contextCalls, 1);
 
     harness.core.state.snapshot.keepSizeAcrossDisplays = false;
-    assert.strictEqual(harness.core.tabs.general.patchInPlace({ keepSizeAcrossDisplays: false }), true);
+    assert.strictEqual(harness.core.tabs.pet.patchInPlace({ keepSizeAcrossDisplays: false }), true);
     assert.strictEqual(harness.content.querySelector(".size-slider"), slider);
     for (let i = 0; i < 8; i++) await Promise.resolve();
     assert.strictEqual(contextCalls, 2);
@@ -9106,6 +9135,7 @@ describe("settings renderer browser environment", () => {
     const calls = [];
     let harness;
     harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9118,7 +9148,7 @@ describe("settings renderer browser environment", () => {
           calls.push(key);
           saved = true;
           harness.core.state.snapshot.size = key;
-          harness.core.tabs.general.patchInPlace({ size: key });
+          harness.core.tabs.pet.patchInPlace({ size: key });
           return { status: "ok" };
         },
       },
@@ -9143,6 +9173,7 @@ describe("settings renderer browser environment", () => {
   it("keeps the size readout reset action on the existing preview commit IPC", async () => {
     const calls = [];
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9160,6 +9191,7 @@ describe("settings renderer browser environment", () => {
 
   it("restores the effective tick after a failed size commit", async () => {
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9184,6 +9216,7 @@ describe("settings renderer browser environment", () => {
   it("falls back to the snapshot when context is unavailable and unsubscribes on disposal", async () => {
     let notify;
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9199,6 +9232,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(notify, null);
     assert.strictEqual(harness.getWindowListenerCount("focus"), 0);
     const missing = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
     });
@@ -9210,6 +9244,7 @@ describe("settings renderer browser environment", () => {
     let result = { ui: 70, overMax: false, synced: false };
     let notify;
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ size: "P:10.5" }),
       sizeSliderExports: require("../src/settings-size-slider"),
       settingsAPI: {
@@ -9339,11 +9374,12 @@ describe("settings renderer browser environment", () => {
   it("makes both percent readouts clickable reset buttons", () => {
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
     const tabSource = fs.readFileSync(SETTINGS_TAB_GENERAL, "utf8");
+    const petSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-pet.js"), "utf8");
     assert.ok(/\.text-scale-readout\s*\{[\s\S]*cursor:\s*pointer;/.test(css));
     // Size readout resets the pet to the prefs default (P:9 → 30 on the UI scale).
-    assert.ok(/SIZE_UI_DEFAULT = 30/.test(tabSource));
-    assert.ok(/controller\.change\(SIZE_UI_DEFAULT\)/.test(tabSource));
-    assert.ok(/rowSizeResetTitle/.test(tabSource));
+    assert.ok(/SIZE_UI_DEFAULT = 30/.test(petSource));
+    assert.ok(/controller\.change\(SIZE_UI_DEFAULT\)/.test(petSource));
+    assert.ok(/rowSizeResetTitle/.test(petSource));
     // Text-size readout resets to 100% via the per-display command.
     assert.ok(/setTextScaleForDisplay/.test(tabSource));
     assert.ok(/textScaleResetTitle/.test(tabSource));
@@ -10309,7 +10345,7 @@ describe("settings renderer browser environment", () => {
     const files = [
       "settings-tab-agents.js",
       "settings-tab-discord-presence.js",
-      "settings-tab-general.js",
+      "settings-tab-notifications.js",
       "settings-tab-remote-ssh.js",
       "settings-tab-telegram-approval.js",
     ];
@@ -11099,35 +11135,31 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.menu.style.maxHeight, "");
   });
 
-  it("exposes aggregate and split bubble controls in the General tab", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+  it("exposes aggregate and split bubble controls in the Notifications tab", () => {
+    const notificationsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-notifications.js"), "utf8");
     const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
-    assert.ok(generalSource.includes('key: "hideBubbles"'));
-    assert.ok(generalSource.includes("rowHideBubbles"));
-    assert.ok(generalSource.includes("setAllBubblesHidden"));
-    assert.ok(generalSource.includes('{ hidden: nextRaw }'));
-    assert.ok(generalSource.includes('keys.includes("hideBubbles")'));
-    assert.ok(generalSource.includes("buildBubblePolicyRow()"));
-    assert.ok(generalSource.includes("setBubbleCategoryEnabled"));
-    assert.ok(generalSource.includes("state.mountedControls.bubblePolicyControls"));
-    assert.ok(generalSource.includes("state.mountedControls.bubblePolicySummary"));
-    assert.ok(generalSource.includes("confirmDisableUpdateBubbles"));
-    assert.ok(generalSource.indexOf("buildBubblePolicyRow(),") < generalSource.indexOf("buildBubblePlacementGroup(),"));
-    assert.ok(generalSource.includes("category === \"update\" && next === 0"));
-    assert.ok(generalSource.includes("notificationBubbleAutoCloseSeconds"));
-    assert.ok(generalSource.includes("updateBubbleAutoCloseSeconds"));
-    assert.ok(generalSource.includes("bubble-policy-prefix"));
-    assert.ok(generalSource.includes("helpers.buildTextInput({"));
-    assert.ok(generalSource.includes("maxLength: 4"));
-    assert.ok(generalSource.includes('pattern: "[0-9]*"'));
-    assert.ok(generalSource.includes('input.value.replace(/\\D+/g, "").slice(0, 4)'));
-    assert.ok(generalSource.includes("showSettingsConfirmModal"));
-    assert.ok(generalSource.includes("updateBubbleDisableConfirmTitle"));
+    assert.ok(notificationsSource.includes('key: "hideBubbles"'));
+    assert.ok(notificationsSource.includes("rowHideBubbles"));
+    assert.ok(notificationsSource.includes("setAllBubblesHidden"));
+    assert.ok(notificationsSource.includes('{ hidden: nextRaw }'));
+    assert.ok(notificationsSource.includes('keys.includes("hideBubbles")'));
+    assert.ok(notificationsSource.includes("setBubbleCategoryEnabled"));
+    assert.ok(notificationsSource.includes("state.mountedControls.bubblePolicyControls"));
+    assert.ok(notificationsSource.includes("confirmDisableUpdateBubbles"));
+    assert.ok(notificationsSource.includes("category === \"update\" && next === 0"));
+    assert.ok(notificationsSource.includes("notificationBubbleAutoCloseSeconds"));
+    assert.ok(notificationsSource.includes("updateBubbleAutoCloseSeconds"));
+    assert.ok(notificationsSource.includes("bubble-policy-prefix"));
+    assert.ok(notificationsSource.includes("helpers.buildTextInput({"));
+    assert.ok(notificationsSource.includes("maxLength: 4"));
+    assert.ok(notificationsSource.includes('pattern: "[0-9]*"'));
+    assert.ok(notificationsSource.includes('input.value.replace(/\\D+/g, "").slice(0, 4)'));
+    assert.ok(notificationsSource.includes("showSettingsConfirmModal"));
+    assert.ok(notificationsSource.includes("updateBubbleDisableConfirmTitle"));
     assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*58px;/.test(css));
     assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*text-align:\s*center;/.test(css));
     assert.ok(i18nSource.includes("rowHideBubbles"));
-    assert.ok(i18nSource.includes("rowBubblePolicy"));
     assert.ok(i18nSource.includes("bubbleUpdateWarning"));
     assert.ok(i18nSource.includes("bubbleSecondsPrefix"));
   });
@@ -11144,6 +11176,7 @@ describe("settings renderer browser environment", () => {
       bubbleFixedCorner: "top-right",
     });
     const harness = loadGeneralTabForTest({
+      tab: "notifications",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -11229,6 +11262,7 @@ describe("settings renderer browser environment", () => {
 
   it("renders the opt-in test-result reaction switch with all supported translations", () => {
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ testReactionsEnabled: false }),
     });
     harness.renderContent();
@@ -11248,10 +11282,10 @@ describe("settings renderer browser environment", () => {
   });
 
   it("renders Free roam movement style as a dependent segmented choice", async () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-pet.js"), "utf8");
     const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
     assert.ok(generalSource.includes("function buildFreeRoamGroup()"));
-    assert.ok(generalSource.includes('id: "general:free-roam"'));
+    assert.ok(generalSource.includes('id: "pet:free-roam"'));
     assert.ok(generalSource.includes('className: "free-roam-collapsible"'));
     assert.ok(generalSource.includes("defaultCollapsed: true"));
     assert.ok(generalSource.includes("function buildRoamMovementStyleRow()"));
@@ -11282,6 +11316,7 @@ describe("settings renderer browser environment", () => {
     const updateCalls = [];
     const initialSnapshot = makeGeneralSnapshot({ roamConstrainAxis: true, freeRoam: false });
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -11300,7 +11335,7 @@ describe("settings renderer browser environment", () => {
     const freeRoamSwitch = harness.getSwitch("freeRoam");
     assert.ok(control && row, "the dependent movement-style row must mount");
     assert.ok(group, "Free roam must render as a collapsible group");
-    assert.strictEqual(group.dataset.groupId, "general:free-roam");
+    assert.strictEqual(group.dataset.groupId, "pet:free-roam");
     assert.strictEqual(group.classList.contains("collapsed"), true, "Free roam details default closed");
     assert.strictEqual(header.getAttribute("role"), undefined, "the shared header must not wrap both interactive controls");
     assert.strictEqual(disclosure.getAttribute("role"), "button");
@@ -11411,6 +11446,7 @@ describe("settings renderer browser environment", () => {
   it("shows, selects, and resets the Free roam activity area", async () => {
     const calls = [];
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ freeRoam: true }),
       settingsAPI: {
         getRoamFence: async () => ({
@@ -11456,6 +11492,7 @@ describe("settings renderer browser environment", () => {
 
   it("shows the Free roam activity area as unavailable for a non-ok status", async () => {
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ freeRoam: true }),
       settingsAPI: {
         getRoamFence: async () => ({
@@ -11479,6 +11516,7 @@ describe("settings renderer browser environment", () => {
 
   it("explains when the pet is too large to choose an activity area", async () => {
     const harness = loadGeneralTabForTest({
+      tab: "pet",
       snapshot: makeGeneralSnapshot({ freeRoam: true }),
       settingsAPI: {
         getRoamFence: async () => ({ status: "ok", active: false, fence: null }),
@@ -11504,9 +11542,10 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(toasts[0].options.error, true);
   });
 
-  it("restores the General cleanup action after a failed shared pending state", async () => {
+  it("restores the Sessions cleanup action after a failed shared pending state", async () => {
     const commandDeferred = createDeferred();
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot(),
       settingsAPI: {
         command: () => commandDeferred.promise,
@@ -11530,14 +11569,14 @@ describe("settings renderer browser environment", () => {
   });
 
   it("registers the Session cleanup group with four number rows, atomic reset, and i18n keys", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-sessions.js"), "utf8");
     const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
     const uiCoreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
     const actionsSource = fs.readFileSync(path.join(SRC_DIR, "settings-actions.js"), "utf8");
 
-    // Group is mounted top-level in the General tab (not nested under HUD).
+    // Group is mounted in the Sessions tab's Advanced section (not nested under HUD).
     assert.ok(generalSource.includes("buildSessionCleanupGroup()"));
-    assert.ok(generalSource.includes('id: "general:session-cleanup"'));
+    assert.ok(generalSource.includes('id: "sessions:timeouts"'));
 
     // All four numeric prefs map to their own number input row.
     assert.ok(generalSource.includes('key: "sessionStaleMs"'));
@@ -11587,63 +11626,17 @@ describe("settings renderer browser environment", () => {
     }
   });
 
-  it("uses collapsible option lists for Session HUD and sound controls", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
-    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
-    const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
-    assert.ok(generalSource.includes("function buildSessionHudOptionsList("));
-    assert.ok(generalSource.includes("session-hud-option-list"));
-    assert.ok(generalSource.includes("function buildSoundGroup("));
-    assert.ok(generalSource.includes("function buildSoundEnabledRow("));
-    assert.ok(generalSource.includes('id: "general:sound"'));
-    assert.ok(generalSource.includes("sound-option-list"));
-    assert.ok(generalSource.includes("state.mountedControls.soundSummary"));
-    assert.ok(generalSource.includes('ariaLabel: t("rowSoundEnabled")'));
-    assert.ok(generalSource.includes("toggleSound"));
-    assert.ok(generalSource.includes("syncVolumePreview"));
-    assert.ok(!/key:\s*"soundMuted",[\s\S]{0,120}descKey:\s*"rowSoundDesc"/.test(generalSource));
-    assert.ok(generalSource.includes('state.transientUiState.generalSwitches.set("soundMuted"'));
-    assert.ok(generalSource.includes("if (!result || result.status !== \"ok\" || result.noop)"));
-    assert.ok(generalSource.includes("sessionHudSummaryLabels"));
-    assert.ok(generalSource.includes('key: "sessionHudShowStateLabels"'));
-    assert.ok(generalSource.includes("session-hud-summary-control"));
-    assert.ok(/\.settings-option-list\s*\{[\s\S]*display:\s*grid;[\s\S]*gap:\s*8px;/.test(css));
-    assert.ok(/\.settings-option-list \.settings-option-item\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--panel-bg\) 78%,\s*transparent\);/.test(css));
-    assert.ok(/\.session-hud-collapsible \.collapsible-summary-chip,[\s\S]*\.sound-collapsible \.collapsible-summary-chip\s*\{[\s\S]*max-width:\s*min\(280px,\s*100%\);/.test(css));
-    assert.ok(/\.session-hud-collapsible \.collapsible-group-summary\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*max-width:\s*none;/.test(css));
-    assert.ok(/\.sound-collapsible \.collapsible-group-summary\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*max-width:\s*none;/.test(css));
-    assert.ok(/\.bubble-policy-collapsible \.collapsible-group-summary\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-wrap:\s*nowrap;[^}]*max-width:\s*none;[^}]*\}/.test(css));
-    assert.ok(!/\.session-hud-collapsible \.collapsible-group-summary\s*\{[^}]*flex-wrap:\s*nowrap;/.test(css));
-    assert.ok(!/\.sound-collapsible \.collapsible-group-summary\s*\{[^}]*flex-wrap:\s*nowrap;/.test(css));
-    assert.ok(/\.session-hud-summary-control\s*\{[\s\S]*grid-template-columns:\s*repeat\(3,\s*max-content\);/.test(css));
-    assert.ok(/\.session-hud-summary-control\s*\{[\s\S]*width:\s*max-content;[\s\S]*justify-self:\s*end;/.test(css));
-    assert.ok(/\.session-hud-summary-control\.compact\s*\{[\s\S]*display:\s*inline-flex;[\s\S]*width:\s*auto;/.test(css));
-    assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-collapsible \.collapsible-group-header\s*\{[\s\S]*flex-wrap:\s*wrap;/.test(css));
-    assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-collapsible \.collapsible-group-summary\s*\{[\s\S]*flex:\s*0 0 calc\(100% - 22px\);[\s\S]*margin-left:\s*22px;/.test(css));
-    assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-summary-control\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[\s\S]*width:\s*min\(238px,\s*100%\);/.test(css));
-    assert.ok(/@media \(max-width:\s*720px\)\s*\{[\s\S]*\.session-hud-summary-control\s*\{[\s\S]*justify-self:\s*start;/.test(css));
-    assert.ok(!generalSource.includes("animateExpansion: false"));
-    assert.ok(/\.collapsible-group-text \.row-label\s*\{[\s\S]*text-overflow:\s*ellipsis;[\s\S]*white-space:\s*nowrap;/.test(css));
-    assert.ok(/\.collapsible-group-text \.row-desc\s*\{[\s\S]*white-space:\s*normal;[\s\S]*-webkit-line-clamp:\s*2;/.test(css));
-    assert.ok(/\.sound-summary-control\s*\{[\s\S]*display:\s*inline-flex;/.test(css));
-    assert.ok(/\.sound-summary-control\s*\{[\s\S]*min-width:\s*max-content;/.test(css));
-    assert.ok(/\.sound-summary-control \.collapsible-summary-chip\s*\{[\s\S]*max-width:\s*none;/.test(css));
-    assert.ok(/\.sound-summary-control \.collapsible-summary-chip\s*\{[\s\S]*flex:\s*0 0 auto;/.test(css));
-    assert.ok(/\.sound-collapsible \.collapsible-group-text \.row-desc\s*\{[\s\S]*white-space:\s*normal;[\s\S]*-webkit-line-clamp:\s*2;/.test(css));
-    assert.ok(i18nSource.includes("rowSoundEnabled"));
-  });
-
   it("adds hover affordance to General sliders via the shared volume-style classes", () => {
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
     assert.ok(/\.volume-slider:hover::-webkit-slider-thumb\s*\{[\s\S]*transform:\s*scale\(1\.08\);/.test(css));
     assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.volume-slider:hover::-webkit-slider-thumb,[\s\S]*\.size-control\.dragging \.volume-slider::-webkit-slider-thumb\s*\{[\s\S]*transform:\s*none;/.test(css));
   });
 
-  it("stacks wide General controls from their zoom-corrected card width", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+  it("stacks wide notification controls from their zoom-corrected section width", () => {
+    const notificationsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-notifications.js"), "utf8");
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
-    assert.ok(generalSource.includes('row.className = "row volume-slider-row"'));
-    assert.match(css, /\.quota-ring-collapsible \.settings-option-list,\s*\.sound-collapsible \.settings-option-list\s*\{\s*container-type:\s*inline-size;/s);
+    assert.ok(notificationsSource.includes('row.className = "row volume-slider-row"'));
+    assert.match(css, /\.sound-section \.section-rows,\s*\.quota-ring-section \.section-rows\s*\{\s*container-type:\s*inline-size;/s);
     assert.match(css, /@container \(max-width:\s*400px\)\s*\{[\s\S]*\.quota-ring-display-mode-row,[\s\S]*\.volume-slider-row\s*\{[\s\S]*flex-direction:\s*column;/);
     assert.match(css, /@container \(max-width:\s*400px\)\s*\{[\s\S]*\.quota-alert-thresholds-row,[\s\S]*flex-direction:\s*column;/);
     assert.match(css, /@container \(max-width:\s*400px\)\s*\{[\s\S]*\.volume-slider-row \.volume-control\s*\{[\s\S]*width:\s*100%;[\s\S]*min-width:\s*0;/);
@@ -11661,7 +11654,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("auto-commits bubble seconds shortly after valid input instead of waiting only for change", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-notifications.js"), "utf8");
     assert.ok(generalSource.includes("BUBBLE_SECONDS_AUTO_COMMIT_DELAY_MS"));
     assert.ok(generalSource.includes('input.addEventListener("input", () => {'));
     assert.ok(generalSource.includes("scheduleSecondsCommit(next);"));
@@ -11677,7 +11670,7 @@ describe("settings renderer browser environment", () => {
   it("keeps update bubble disable confirmation inside the Settings renderer", () => {
     const preloadSource = fs.readFileSync(PRELOAD_SETTINGS, "utf8");
     const mainSource = fs.readFileSync(MAIN_PROCESS, "utf8");
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-notifications.js"), "utf8");
     const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
     const uiCoreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
@@ -11727,7 +11720,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("renders three permission automation modes with two confirmation-gated automatic choices", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-permissions.js"), "utf8");
     const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
     const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
@@ -11775,8 +11768,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(i18nSource.includes("CodeBuddy"));
     assert.ok(!generalSource.includes("autoApproveAllPermissions"));
     // Lives in its own Permissions section, not under Bubbles.
-    assert.ok(generalSource.includes('t("sectionPermissions")'));
-    assert.ok(i18nSource.includes('sectionPermissions: "Permissions"'));
+    assert.ok(generalSource.includes('t("sectionPermissionLocal")'));
+    assert.ok(i18nSource.includes('sectionPermissionLocal: "On this machine"'));
   });
 
   it("patches confirmed permission automation changes without replacing the focused control", () => {
@@ -11784,7 +11777,7 @@ describe("settings renderer browser environment", () => {
       permissionAutomationMode: "off",
       permissionAutomationAutoToolsWarningDismissed: false,
     });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "permissions", snapshot: initialSnapshot });
     harness.renderContent();
     const control = harness.content.querySelector(".permission-automation-segmented");
     const beforeRenderCount = harness.getContentRenderCount();
@@ -12058,7 +12051,7 @@ describe("settings renderer browser environment", () => {
 
   it("updates runtime-only Settings bounds without rebuilding the active tab", () => {
     const initialSnapshot = makeGeneralSnapshot({ settingsWindowBounds: null });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "sessions", snapshot: initialSnapshot });
     harness.renderContent();
     const mountedControl = harness.getSwitch("sessionHudEnabled");
     harness.content.scrollTop = 317;
@@ -12111,6 +12104,7 @@ describe("settings renderer browser environment", () => {
       updateBubbleAutoCloseSeconds: 12,
     };
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -12126,19 +12120,12 @@ describe("settings renderer browser environment", () => {
     const elapsed = harness.getSwitch("sessionHudShowElapsed");
     const contextUsage = harness.getSwitch("sessionHudShowContextUsage");
     const cleanup = harness.getSwitch("sessionHudCleanupDetached");
-    const summary = harness.core.state.mountedControls.sessionHudSummary.element;
-    const optionList = harness.content.querySelector(".session-hud-option-list");
     assert.ok(master);
     assert.ok(labels);
     assert.ok(elapsed);
     assert.ok(contextUsage);
     assert.ok(cleanup);
-    assert.ok(optionList);
-    assert.ok(optionList.children.every((child) => child.classList.contains("settings-option-item")));
     assert.strictEqual(harness.getSwitchMeta("sessionHudEnabled").row.querySelector(".row-desc"), null);
-    assert.strictEqual(summary.children.length, 1);
-    assert.strictEqual(summary.children[0].textContent, "HUD: off");
-    assert.strictEqual(summary.classList.contains("compact"), true);
     assert.strictEqual(labels.classList.contains("disabled"), true);
     assert.strictEqual(labels.attributes["aria-disabled"], "true");
     assert.strictEqual(labels.tabIndex, -1);
@@ -12158,7 +12145,7 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(
       harness.getContentRenderCount(),
       beforeRenderCount,
-      "Session HUD master broadcasts should patch mounted controls instead of rebuilding General"
+      "Session HUD master broadcasts should patch mounted controls instead of rebuilding Sessions"
     );
     assert.strictEqual(harness.getSwitch("sessionHudEnabled"), master);
     assert.strictEqual(harness.getSwitch("sessionHudShowStateLabels"), labels);
@@ -12178,12 +12165,6 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(contextUsage.tabIndex, 0);
     assert.strictEqual(cleanup.classList.contains("disabled"), false);
     assert.strictEqual(cleanup.tabIndex, 0);
-    assert.strictEqual(summary.children.length, 4);
-    assert.strictEqual(summary.classList.contains("compact"), false);
-    assert.strictEqual(summary.children[0].textContent, "Labels: on");
-    assert.strictEqual(summary.children[1].textContent, "Time: on");
-    assert.strictEqual(summary.children[2].textContent, "Context: on");
-    assert.strictEqual(summary.children[3].textContent, "Auto-clear: on");
 
     assert.ok(
       elapsed.eventListeners.click && elapsed.eventListeners.click.length > 0,
@@ -12197,6 +12178,7 @@ describe("settings renderer browser environment", () => {
 
   it("keeps the quota ring as an independent sibling of the Session HUD", async () => {
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({
         sessionHudEnabled: false,
         sessionHudShowQuota: true,
@@ -12212,9 +12194,6 @@ describe("settings renderer browser environment", () => {
 
     const ringEnabled = harness.getSwitch("sessionHudShowQuota");
     const mergeSources = harness.getSwitch("quotaMergeSources");
-    const ringOptions = harness.content.querySelector(".quota-ring-option-list");
-    const hudOptions = harness.content.querySelector(".session-hud-option-list");
-    const summary = harness.core.state.mountedControls.sessionHudSummary.element;
 
     assert.ok(ringEnabled);
     assert.ok(mergeSources);
@@ -12227,14 +12206,9 @@ describe("settings renderer browser environment", () => {
       !harness.getSwitch("claudeQuotaCollectionEnabled"),
       "Claude quota collection must not be back in General's quota-ring group"
     );
-    assert.ok(ringOptions);
-    assert.ok(hudOptions);
-    assert.notStrictEqual(ringOptions, hudOptions);
     assert.strictEqual(ringEnabled.classList.contains("disabled"), false);
     assert.strictEqual(mergeSources.classList.contains("disabled"), false);
     assert.strictEqual(harness.getSwitchMeta("quotaMergeSources").row.style.display, "");
-    assert.strictEqual(summary.children.length, 1);
-    assert.strictEqual(summary.children[0].textContent, "HUD: off");
   });
 
   it("lets the user pick which providers draw beside the pet, hiding by exception", async () => {
@@ -12242,6 +12216,7 @@ describe("settings renderer browser environment", () => {
     // provider order, so without this the user has no say over which survive.
     const updateCalls = [];
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({ quotaRingHiddenProviders: ["codexQuota"] }),
       settingsAPI: {
         getQuotaSourceCount: async () => 1,
@@ -12304,6 +12279,7 @@ describe("settings renderer browser environment", () => {
       const calls = [];
       const toasts = [];
       const harness = loadGeneralTabForTest({
+        tab: "sessions",
         snapshot: makeGeneralSnapshot({ quotaRingHiddenProviders: ["codexQuota"] }),
         settingsAPI: {
           getQuotaRingProviders: async () => ([
@@ -12346,6 +12322,7 @@ describe("settings renderer browser environment", () => {
     // One connected provider cannot crowd anything out, so the control would be
     // a no-op switch — the same reason merge-sources stays hidden on one machine.
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({}),
       settingsAPI: {
         getQuotaSourceCount: async () => 1,
@@ -12365,6 +12342,7 @@ describe("settings renderer browser environment", () => {
     // Older preload / a failed IPC must leave the rest of the group usable
     // rather than throwing partway through building General.
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({}),
       settingsAPI: { getQuotaSourceCount: async () => 1 },
     });
@@ -12379,6 +12357,7 @@ describe("settings renderer browser environment", () => {
   it("keeps an enabled merge-sources switch visible with only one source", async () => {
     const updateCalls = [];
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({ quotaMergeSources: true }),
       settingsAPI: {
         getQuotaSourceCount: async () => 1,
@@ -12401,12 +12380,13 @@ describe("settings renderer browser environment", () => {
 
   it("quota reminders: hides the reminder rows while the master switch is off", async () => {
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
-    assert.match(css, /\.quota-ring-option-list \.row\[hidden\]\s*\{\s*display:\s*none;/);
+    assert.match(css, /\.quota-ring-section \.section-rows \.row\[hidden\]\s*\{\s*display:\s*none;/);
     assert.match(css, /\.quota-alert-thresholds-row \.settings-select\s*\{[\s\S]*min-width:\s*216px;/);
     const snapshot = makeGeneralSnapshot({
       quotaAlertsEnabled: false, quotaAlertThresholds: [20, 10], quotaRecoveryAlertsEnabled: true,
     });
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot,
       settingsAPI: { update: async () => ({ status: "ok" }) },
     });
@@ -12445,6 +12425,7 @@ describe("settings renderer browser environment", () => {
     const writes = [];
     const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] });
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot,
       settingsAPI: { update: async (key, value) => { writes.push({ key, value }); return { status: "ok" }; } },
     });
@@ -12481,6 +12462,7 @@ describe("settings renderer browser environment", () => {
     const writes = [];
     const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [25, 5] });
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot,
       settingsAPI: { update: async (key, value) => { writes.push({ key, value }); return { status: "ok" }; } },
     });
@@ -12519,6 +12501,7 @@ describe("settings renderer browser environment", () => {
       lang: "zh", quotaAlertsEnabled: true, quotaAlertThresholds: [25, 5],
     });
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot,
       settingsAPI: { update: async () => ({ status: "ok" }) },
     });
@@ -12531,6 +12514,7 @@ describe("settings renderer browser environment", () => {
     const writes = [], toasts = [];
     const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] });
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot,
       settingsAPI: {
         update: async (key, value) => { writes.push({ key, value }); return { status: "error", message: "disk" }; },
@@ -12555,6 +12539,7 @@ describe("settings renderer browser environment", () => {
     const deferred = createDeferred(), writes = [];
     const snapshot = makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] });
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot,
       settingsAPI: { update: (key, value) => { writes.push({ key, value }); return deferred.promise; } },
     });
@@ -12575,6 +12560,7 @@ describe("settings renderer browser environment", () => {
   it("quota reminders: a successful write adopts the server snapshot even when the click differs", async () => {
     for (const committed of [[50, 20, 10], [35, 5]]) {
       const h = loadGeneralTabForTest({
+        tab: "sessions",
         snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] }),
         settingsAPI: {
           update: async () => ({
@@ -12601,6 +12587,7 @@ describe("settings renderer browser environment", () => {
   it("quota reminders: an external replacement mid-write keeps the authoritative value on rejection", async () => {
     const deferred = createDeferred(), toasts = [];
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [20, 10] }),
       settingsAPI: { update: () => deferred.promise },
     });
@@ -12627,6 +12614,7 @@ describe("settings renderer browser environment", () => {
   it("quota reminders: a full re-render mid-write recovers the server value on success", async () => {
     const success = createDeferred();
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true, quotaAlertThresholds: [25, 5] }),
       settingsAPI: { update: () => success.promise },
     });
@@ -12654,6 +12642,7 @@ describe("settings renderer browser environment", () => {
     const pending = createDeferred(), toasts = [];
     let tests = 0, writes = 0;
     const h = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({ quotaAlertsEnabled: true }),
       settingsAPI: {
         testQuotaNotification: () => { tests++; return pending.promise; },
@@ -12680,6 +12669,7 @@ describe("settings renderer browser environment", () => {
     const updateCalls = [];
     const initialSnapshot = makeGeneralSnapshot({ quotaRingDisplayMode: "used" });
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: initialSnapshot,
       settingsAPI: {
         getQuotaSourceCount: async () => 1,
@@ -12716,6 +12706,7 @@ describe("settings renderer browser environment", () => {
   it("reverts quota display selection and reports when the Settings API is unavailable", async () => {
     const toasts = [];
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: makeGeneralSnapshot({ quotaRingDisplayMode: "used" }),
       settingsAPI: {
         getQuotaSourceCount: async () => 1,
@@ -12740,111 +12731,22 @@ describe("settings renderer browser environment", () => {
     assert.equal(toasts[0].options.error, true);
   });
 
-  it("reveals quota options with the shared grid animation and absorbs async sources without measuring height", async () => {
-    const sourceCount = createDeferred();
-    const animationFrames = [];
-    const flushAnimationFrame = () => {
-      const callbacks = animationFrames.splice(0);
-      for (const callback of callbacks) callback();
-    };
-    const harness = loadGeneralTabForTest({
-      snapshot: makeGeneralSnapshot({ quotaMergeSources: false }),
-      settingsAPI: { getQuotaSourceCount: () => sourceCount.promise },
-      requestAnimationFrame: (callback) => {
-        animationFrames.push(callback);
-        return animationFrames.length;
-      },
-    });
-    harness.renderContent();
-    flushAnimationFrame();
-    const group = harness.content.querySelector(".quota-ring-collapsible");
-    const header = group.querySelector(".collapsible-group-header");
-    const body = group.querySelector(".collapsible-group-body");
-    const mergeRow = harness.getSwitchMeta("quotaMergeSources").row;
-    header.dispatchEvent({ type: "click" });
-    assert.equal(group.classList.contains("expanding"), true);
-    assert.equal(group.classList.contains("collapsed"), false);
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "");
-    assert.equal(body.attributes["aria-hidden"], "false");
-
-    sourceCount.resolve(2);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(group.classList.contains("collapsible-content-entering"), false);
-    assert.equal(body.querySelector(".collapsible-group-body-inner").classList.contains("collapsible-content-entering"), false);
-    assert.equal(mergeRow.classList.contains("collapsible-content-entering"), true);
-    assert.equal(mergeRow.style.display, "");
-
-    body.dispatchEvent({
-      type: "transitionend",
-      propertyName: "grid-template-rows",
-      bubbles: false,
-    });
-    assert.equal(group.classList.contains("expanding"), false);
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "");
-    flushAnimationFrame();
-  });
-
-  it("keeps sound controls inert until the shared grid animation finishes", () => {
-    const animationFrames = [];
-    const harness = loadGeneralTabForTest({
-      snapshot: makeGeneralSnapshot({ soundMuted: false, soundVolume: 0.5 }),
-      requestAnimationFrame: (callback) => {
-        animationFrames.push(callback);
-        return animationFrames.length;
-      },
-    });
-    harness.renderContent();
-
-    const group = harness.content.querySelector(".sound-collapsible");
-    const header = group.querySelector(".collapsible-group-header");
-    const body = group.querySelector(".collapsible-group-body");
-    assert.equal(group.classList.contains("collapsed"), true);
-
-    header.dispatchEvent({ type: "click" });
-
-    assert.equal(group.classList.contains("expanding"), true);
-    assert.equal(group.classList.contains("collapsed"), false);
-    assert.equal(body.style.getPropertyValue("--collapsible-body-height"), "");
-    assert.equal(body.attributes["aria-hidden"], "false");
-    assert.equal(body.inert, true);
-
-    body.dispatchEvent({
-      type: "transitionend",
-      propertyName: "grid-template-rows",
-      bubbles: false,
-    });
-    assert.equal(group.classList.contains("expanding"), false);
-    assert.equal(body.inert, false);
-  });
-
-  it("groups sound and volume into one collapsible control with in-place summary updates", () => {
+  it("lays sound and volume out as flat rows in the Notifications tab", () => {
     const initialSnapshot = makeGeneralSnapshot({
       soundMuted: false,
       soundVolume: 0.5,
     });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "notifications", snapshot: initialSnapshot });
     harness.renderContent();
 
     const soundSwitch = harness.getSwitch("soundMuted");
-    const summary = harness.core.state.mountedControls.soundSummary.element;
     const volumeControl = harness.core.state.mountedControls.soundVolume;
     const volumeSlider = volumeControl.row.querySelector(".volume-slider");
-    const optionList = harness.content.querySelector(".sound-option-list");
     assert.ok(soundSwitch);
-    assert.ok(summary);
     assert.ok(volumeControl);
     assert.ok(volumeSlider);
-    assert.ok(optionList);
-    assert.ok(optionList.children.every((child) => child.classList.contains("settings-option-item")));
+    assert.strictEqual(harness.content.querySelector(".sound-collapsible"), null);
     assert.strictEqual(harness.getSwitchMeta("soundMuted").row.querySelector(".row-desc"), null);
-    assert.strictEqual(summary.children.length, 2);
-    assert.strictEqual(summary.children[0].textContent, "on · 50%");
-    assert.ok(summary.children[1].classList.contains("sound-header-switch"));
-    assert.strictEqual(summary.children[1].attributes["aria-label"], "Enable sound effects");
-
-    volumeSlider.value = "75";
-    for (const listener of volumeSlider.eventListeners.input || []) listener();
-    assert.strictEqual(summary.children[0].textContent, "on · 75%");
 
     const beforeRenderCount = harness.getContentRenderCount();
     harness.core.ops.applyChanges({
@@ -12853,10 +12755,9 @@ describe("settings renderer browser environment", () => {
     });
 
     assert.strictEqual(harness.getContentRenderCount(), beforeRenderCount);
-    assert.strictEqual(harness.core.state.mountedControls.soundSummary.element, summary);
+    assert.strictEqual(harness.core.state.mountedControls.soundVolume, volumeControl);
     assert.strictEqual(volumeSlider.value, "25");
     assert.strictEqual(volumeSlider.style.getPropertyValue("--volume-fill"), "25%");
-    assert.strictEqual(summary.children[0].textContent, "on · 25%");
 
     harness.core.ops.applyChanges({
       changes: { soundMuted: true },
@@ -12866,18 +12767,17 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(harness.getContentRenderCount(), beforeRenderCount);
     assert.strictEqual(harness.getSwitch("soundMuted"), soundSwitch);
     assert.strictEqual(soundSwitch.classList.contains("on"), false);
-    assert.strictEqual(summary.children[1].classList.contains("on"), false);
     assert.strictEqual(volumeSlider.disabled, true);
-    assert.strictEqual(summary.children[0].textContent, "off · 25%");
   });
 
-  it("lets the sound summary switch toggle sound without opening the collapsible group", async () => {
+  it("toggles sound through the enable switch with an optimistic pending state", async () => {
     const updateCalls = [];
     const initialSnapshot = makeGeneralSnapshot({
       soundMuted: false,
       soundVolume: 1,
     });
     const harness = loadGeneralTabForTest({
+      tab: "notifications",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -12888,38 +12788,27 @@ describe("settings renderer browser environment", () => {
     });
     harness.renderContent();
 
-    const summary = harness.core.state.mountedControls.soundSummary;
-    const headerSwitch = summary.headerSwitch;
-    const soundGroup = harness.content.querySelector(".sound-collapsible");
-    assert.ok(headerSwitch);
-    assert.ok(soundGroup.classList.contains("collapsed"));
-
+    const soundSwitch = harness.getSwitch("soundMuted");
     let stopped = false;
     let prevented = false;
-    headerSwitch.eventListeners.click[0]({
+    soundSwitch.eventListeners.click[0]({
       stopPropagation: () => { stopped = true; },
       preventDefault: () => { prevented = true; },
     });
-    assert.strictEqual(headerSwitch.classList.contains("pending"), true);
-    assert.strictEqual(harness.getSwitch("soundMuted").classList.contains("pending"), true);
-    assert.strictEqual(summary.element.children[0].textContent, "off · 100%");
-    headerSwitch.eventListeners.click[0]({
-      stopPropagation: () => {},
-      preventDefault: () => {},
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    assert.deepStrictEqual(updateCalls, [{ key: "soundMuted", value: true }]);
     assert.strictEqual(stopped, true);
     assert.strictEqual(prevented, true);
-    assert.ok(soundGroup.classList.contains("collapsed"));
-    assert.strictEqual(headerSwitch.classList.contains("on"), false);
-    assert.strictEqual(headerSwitch.classList.contains("pending"), false);
-    assert.strictEqual(summary.element.children[0].textContent, "off · 100%");
+    assert.deepStrictEqual(updateCalls, [{ key: "soundMuted", value: true }]);
+    assert.strictEqual(soundSwitch.classList.contains("on"), false);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), true);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.strictEqual(soundSwitch.classList.contains("on"), false);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), false);
+    assert.strictEqual(harness.core.state.transientUiState.generalSwitches.has("soundMuted"), false);
   });
 
-  it("keeps the sound child switch and summary in sync while the update is pending", async () => {
+  it("keeps the sound switch pending while the update is in flight and ignores a second click", async () => {
     const updateCalls = [];
     let resolveUpdate = null;
     const initialSnapshot = makeGeneralSnapshot({
@@ -12927,6 +12816,7 @@ describe("settings renderer browser environment", () => {
       soundVolume: 1,
     });
     const harness = loadGeneralTabForTest({
+      tab: "notifications",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -12939,44 +12829,42 @@ describe("settings renderer browser environment", () => {
     });
     harness.renderContent();
 
-    const summary = harness.core.state.mountedControls.soundSummary;
-    const headerSwitch = summary.headerSwitch;
-    const childSwitch = harness.getSwitch("soundMuted");
+    const soundSwitch = harness.getSwitch("soundMuted");
     let stopped = false;
     let prevented = false;
-    childSwitch.eventListeners.click[0]({
+    soundSwitch.eventListeners.click[0]({
       stopPropagation: () => { stopped = true; },
       preventDefault: () => { prevented = true; },
     });
-
-    assert.deepStrictEqual(updateCalls, [{ key: "soundMuted", value: true }]);
     assert.strictEqual(stopped, true);
     assert.strictEqual(prevented, true);
-    assert.strictEqual(childSwitch.classList.contains("on"), false);
-    assert.strictEqual(childSwitch.classList.contains("pending"), true);
-    assert.strictEqual(headerSwitch.classList.contains("on"), false);
-    assert.strictEqual(headerSwitch.classList.contains("pending"), true);
-    assert.strictEqual(summary.element.children[0].textContent, "off · 100%");
+    assert.strictEqual(soundSwitch.classList.contains("on"), false);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), true);
+    assert.deepStrictEqual(updateCalls, [{ key: "soundMuted", value: true }]);
+
+    soundSwitch.eventListeners.click[0]({
+      stopPropagation: () => {},
+      preventDefault: () => {},
+    });
+    assert.deepStrictEqual(updateCalls, [{ key: "soundMuted", value: true }]);
 
     resolveUpdate({ status: "ok" });
     await Promise.resolve();
     await Promise.resolve();
-
-    assert.strictEqual(childSwitch.classList.contains("on"), false);
-    assert.strictEqual(childSwitch.classList.contains("pending"), false);
-    assert.strictEqual(headerSwitch.classList.contains("on"), false);
-    assert.strictEqual(headerSwitch.classList.contains("pending"), false);
-    assert.strictEqual(summary.element.children[0].textContent, "off · 100%");
+    assert.strictEqual(soundSwitch.classList.contains("on"), false);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), false);
     assert.strictEqual(harness.core.state.transientUiState.generalSwitches.has("soundMuted"), false);
   });
 
-  it("restores the sound summary switch when a toggle is a noop", async () => {
+  it("restores the sound switch silently when a toggle is a noop", async () => {
     const updateCalls = [];
+    const toasts = [];
     const initialSnapshot = makeGeneralSnapshot({
       soundMuted: false,
       soundVolume: 1,
     });
     const harness = loadGeneralTabForTest({
+      tab: "notifications",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -12986,11 +12874,10 @@ describe("settings renderer browser environment", () => {
       },
     });
     harness.renderContent();
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
 
-    const summary = harness.core.state.mountedControls.soundSummary;
-    const headerSwitch = summary.headerSwitch;
-    const childSwitch = harness.getSwitch("soundMuted");
-    headerSwitch.eventListeners.click[0]({
+    const soundSwitch = harness.getSwitch("soundMuted");
+    soundSwitch.eventListeners.click[0]({
       stopPropagation: () => {},
       preventDefault: () => {},
     });
@@ -12998,11 +12885,64 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve();
 
     assert.deepStrictEqual(updateCalls, [{ key: "soundMuted", value: true }]);
-    assert.strictEqual(headerSwitch.classList.contains("on"), true);
-    assert.strictEqual(headerSwitch.classList.contains("pending"), false);
-    assert.strictEqual(childSwitch.classList.contains("on"), true);
-    assert.strictEqual(childSwitch.classList.contains("pending"), false);
-    assert.strictEqual(summary.element.children[0].textContent, "on · 100%");
+    assert.strictEqual(soundSwitch.classList.contains("on"), true);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), false);
+    assert.deepStrictEqual(toasts, []);
+    assert.strictEqual(harness.core.state.transientUiState.generalSwitches.has("soundMuted"), false);
+  });
+
+  it("rolls the sound switch back and warns when the update fails", async () => {
+    const toasts = [];
+    const harness = loadGeneralTabForTest({
+      tab: "notifications",
+      snapshot: makeGeneralSnapshot({ soundMuted: false, soundVolume: 1 }),
+      settingsAPI: {
+        update: () => Promise.resolve({ status: "error", message: "boom" }),
+      },
+    });
+    harness.renderContent();
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
+
+    const soundSwitch = harness.getSwitch("soundMuted");
+    soundSwitch.eventListeners.click[0]({
+      stopPropagation: () => {},
+      preventDefault: () => {},
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.strictEqual(soundSwitch.classList.contains("on"), true);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), false);
+    assert.strictEqual(toasts.length, 1);
+    assert.strictEqual(toasts[0].options.error, true);
+    assert.strictEqual(harness.core.state.transientUiState.generalSwitches.has("soundMuted"), false);
+  });
+
+  it("rolls the sound switch back and warns when the update rejects", async () => {
+    const toasts = [];
+    const harness = loadGeneralTabForTest({
+      tab: "notifications",
+      snapshot: makeGeneralSnapshot({ soundMuted: false, soundVolume: 1 }),
+      settingsAPI: {
+        update: () => Promise.reject(new Error("boom")),
+      },
+    });
+    harness.renderContent();
+    harness.core.ops.showToast = (message, options) => toasts.push({ message, options });
+
+    const soundSwitch = harness.getSwitch("soundMuted");
+    soundSwitch.eventListeners.click[0]({
+      stopPropagation: () => {},
+      preventDefault: () => {},
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.strictEqual(soundSwitch.classList.contains("on"), true);
+    assert.strictEqual(soundSwitch.classList.contains("pending"), false);
+    assert.strictEqual(toasts.length, 1);
+    assert.strictEqual(toasts[0].options.error, true);
     assert.strictEqual(harness.core.state.transientUiState.generalSwitches.has("soundMuted"), false);
   });
 
@@ -13427,7 +13367,7 @@ describe("settings renderer browser environment", () => {
       notificationBubbleAutoCloseSeconds: 8,
       updateBubbleAutoCloseSeconds: 12,
     };
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "notifications", snapshot: initialSnapshot });
     harness.renderContent();
 
     const aggregate = harness.getSwitch("hideBubbles");
@@ -13457,10 +13397,11 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(notificationSeconds.disabled, true);
   });
 
-  it("patches the Session HUD master switch off without rebuilding General content", async () => {
+  it("patches the Session HUD master switch off without rebuilding Sessions content", async () => {
     const updateCalls = [];
     const initialSnapshot = makeGeneralSnapshot({ sessionHudEnabled: true });
     const harness = loadGeneralTabForTest({
+      tab: "sessions",
       snapshot: initialSnapshot,
       settingsAPI: {
         update: (key, value) => {
@@ -13512,13 +13453,21 @@ describe("settings renderer browser environment", () => {
   });
 
   it("moves Claude hook management out of General into the Agents claude-code group", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const tabSources = [
+      "settings-tab-general.js",
+      "settings-tab-pet.js",
+      "settings-tab-notifications.js",
+      "settings-tab-sessions.js",
+      "settings-tab-permissions.js",
+    ].map((file) => fs.readFileSync(path.join(SRC_DIR, file), "utf8"));
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
-    // No longer rendered or patched by the General tab.
-    assert.ok(!generalSource.includes('key: "manageClaudeHooksAutomatically"'));
-    assert.ok(!generalSource.includes('key: "autoStartWithClaude"'));
-    assert.ok(!generalSource.includes("CLAUDE_HOOK_MANAGEMENT_CHILD_SWITCH_KEYS"));
-    assert.ok(!generalSource.includes("manageClaudeHooksAutomatically"));
+    // No longer rendered or patched by any of the five general-area tabs.
+    for (const generalSource of tabSources) {
+      assert.ok(!generalSource.includes('key: "manageClaudeHooksAutomatically"'));
+      assert.ok(!generalSource.includes('key: "autoStartWithClaude"'));
+      assert.ok(!generalSource.includes("CLAUDE_HOOK_MANAGEMENT_CHILD_SWITCH_KEYS"));
+      assert.ok(!generalSource.includes("manageClaudeHooksAutomatically"));
+    }
     // Built in the Agents claude-code group as top-level pref rows.
     assert.ok(agentsSource.includes("buildClaudeHookManagementRows"));
     assert.ok(agentsSource.includes('agent.id === "claude-code"'));
@@ -13535,43 +13484,50 @@ describe("settings renderer browser environment", () => {
   });
 
   it("keeps every provider's quota collection opt-in on its own Agents card", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
+    const tabSources = [
+      "settings-tab-general.js",
+      "settings-tab-pet.js",
+      "settings-tab-notifications.js",
+      "settings-tab-sessions.js",
+      "settings-tab-permissions.js",
+    ].map((file) => fs.readFileSync(path.join(SRC_DIR, file), "utf8"));
+    const sessionsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-sessions.js"), "utf8");
     const agentsSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-agents.js"), "utf8");
-    // Claude's collection switch used to live in General's quota-ring group
-    // while Kimi's equivalent lived on its agent card, so turning collection
-    // off meant a different tab depending on the provider and no page could
+    // Claude's collection switch used to live in the quota-ring group while
+    // Kimi's equivalent lived on its agent card, so turning collection off
+    // meant a different tab depending on the provider and no page could
     // answer "which providers am I reading from". Pin the single rule: the
     // ring group is about what the ring looks like, collection is per-card.
-    assert.ok(!generalSource.includes('key: "claudeQuotaCollectionEnabled"'));
+    for (const generalSource of tabSources) {
+      assert.ok(!generalSource.includes('key: "claudeQuotaCollectionEnabled"'));
+    }
     assert.ok(agentsSource.includes('key: "claudeQuotaCollectionEnabled"'));
     assert.ok(agentsSource.includes("rowClaudeQuotaCollection"));
     // Kimi's card is the pattern being matched, not something that moved.
     assert.ok(agentsSource.includes("buildKimiQuotaCard"));
     assert.ok(agentsSource.includes('agent.id === "kimi-cli"'));
-    // General keeps the display-only decisions, and nothing else.
-    assert.ok(generalSource.includes('key: "sessionHudShowQuota"'));
-    assert.ok(generalSource.includes("buildQuotaRingDisplayModeRow"));
-    // A stale entry here would make General try to patch a control it no
+    // Sessions keeps the display-only decisions, and nothing else.
+    assert.ok(sessionsSource.includes('key: "sessionHudShowQuota"'));
+    assert.ok(sessionsSource.includes("buildQuotaRingDisplayModeRow"));
+    // A stale entry here would make Sessions try to patch a control it no
     // longer renders instead of falling through to a full re-render.
-    const inPlaceKeys = generalSource.slice(0, generalSource.indexOf("]);"));
+    const inPlaceKeys = sessionsSource.slice(0, sessionsSource.indexOf("]);"));
     assert.ok(!inPlaceKeys.includes('"claudeQuotaCollectionEnabled"'));
   });
 
   it("patches hide-bubbles aggregate off without rebuilding General content", () => {
     const initialSnapshot = makeGeneralSnapshot({ hideBubbles: true });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "notifications", snapshot: initialSnapshot });
     harness.renderContent();
 
     const aggregate = harness.getSwitch("hideBubbles");
     const notificationPolicy = harness.core.state.mountedControls.bubblePolicyControls.get("notificationBubbleAutoCloseSeconds");
     const notificationSwitch = notificationPolicy.row.querySelector(".switch");
     const notificationSeconds = notificationPolicy.row.querySelector("input");
-    const summary = harness.core.state.mountedControls.bubblePolicySummary.element;
     assert.ok(aggregate);
     assert.strictEqual(aggregate.classList.contains("on"), true);
     assert.strictEqual(notificationSwitch.classList.contains("on"), false);
     assert.strictEqual(notificationSeconds.disabled, true);
-    assert.ok(summary.children.every((chip) => !chip.classList.contains("accent")));
 
     const beforeRenderCount = harness.getContentRenderCount();
     harness.core.ops.applyChanges({
@@ -13585,8 +13541,6 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(notificationSwitch.classList.contains("on"), true);
     assert.strictEqual(notificationSeconds.disabled, false);
     assert.strictEqual(notificationSeconds.value, "8");
-    assert.strictEqual(summary.children.length, 3);
-    assert.ok(summary.children.every((chip) => chip.classList.contains("accent")));
   });
 
   it("rerenders General content for mixed non-patchable broadcasts", () => {
@@ -13594,7 +13548,7 @@ describe("settings renderer browser environment", () => {
       lang: "en",
       sessionHudEnabled: false,
     });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "sessions", snapshot: initialSnapshot });
     harness.renderContent();
 
     const master = harness.getSwitch("sessionHudEnabled");
@@ -13614,7 +13568,7 @@ describe("settings renderer browser environment", () => {
       hideBubbles: false,
       notificationBubbleAutoCloseSeconds: 8,
     });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "notifications", snapshot: initialSnapshot });
     harness.renderContent();
 
     const aggregate = harness.getSwitch("hideBubbles");
@@ -13645,13 +13599,12 @@ describe("settings renderer browser environment", () => {
       hideBubbles: false,
       notificationBubbleAutoCloseSeconds: 0,
     });
-    const harness = loadGeneralTabForTest({ snapshot: initialSnapshot });
+    const harness = loadGeneralTabForTest({ tab: "notifications", snapshot: initialSnapshot });
     harness.renderContent();
 
     const notificationPolicy = harness.core.state.mountedControls.bubblePolicyControls.get("notificationBubbleAutoCloseSeconds");
     const notificationSwitch = notificationPolicy.row.querySelector(".switch");
     const notificationSeconds = notificationPolicy.row.querySelector("input");
-    const summary = harness.core.state.mountedControls.bubblePolicySummary.element;
     assert.strictEqual(notificationSwitch.classList.contains("on"), false);
     assert.strictEqual(notificationSeconds.disabled, true);
 
@@ -13665,7 +13618,6 @@ describe("settings renderer browser environment", () => {
     assert.strictEqual(notificationSwitch.classList.contains("on"), true);
     assert.strictEqual(notificationSeconds.disabled, false);
     assert.strictEqual(notificationSeconds.value, "5");
-    assert.strictEqual(summary.children[1].classList.contains("accent"), true);
   });
 
   it("uses a roomier grid layout for Settings confirmation buttons", () => {
@@ -15104,25 +15056,6 @@ describe("settings renderer browser environment", () => {
     assert.ok(!css.includes(".collapsible-group.collapsible-content-entering"));
     assert.ok(!css.includes("max-height: var(--collapsible-body-height"));
     assert.ok(/@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.settings-disclosure-body/.test(css));
-  });
-
-  it("collapses only the detailed bubble policy controls while keeping primary bubble rows visible", () => {
-    const generalSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-general.js"), "utf8");
-    const i18nSource = fs.readFileSync(SETTINGS_I18N, "utf8");
-    assert.ok(generalSource.includes("buildBubblePolicySummary"));
-    assert.ok(generalSource.includes("helpers.buildCollapsibleGroup({"));
-    assert.ok(generalSource.includes('id: "general:bubble-policy"'));
-    assert.ok(generalSource.includes("defaultCollapsed: true"));
-    assert.ok(generalSource.includes('title: t("rowBubblePolicy")'));
-    assert.ok(generalSource.includes("const summaryControl = buildBubblePolicySummary();"));
-    assert.ok(generalSource.includes("summary: summaryControl.element"));
-    assert.ok(generalSource.includes("children: [buildBubblePolicyList()]"));
-    assert.ok(generalSource.includes("buildBubblePlacementGroup"));
-    assert.ok(!generalSource.includes('key: "showSessionId"'));
-    assert.ok(generalSource.includes('key: "hideBubbles"'));
-    assert.ok(i18nSource.includes("bubblePolicySummaryPermission"));
-    assert.ok(i18nSource.includes("bubblePolicySummaryNotification"));
-    assert.ok(i18nSource.includes("bubblePolicySummaryUpdate"));
   });
 
   it("renders Agent management as collapsed per-agent groups with master switches always visible", () => {
@@ -16619,10 +16552,13 @@ describe("settings renderer browser environment", () => {
     );
   });
 
-  it("General exposes the Codex approval owner and links to its Agents control", () => {
+  it("Permissions exposes the Codex approval owner and links to its Agents control", () => {
     for (const mode of ["auto", "intercept"]) {
-      const harness = loadGeneralTabForTest({ snapshot: { agents: { codex: {
-        integrationInstalled: true, enabled: true, permissionMode: mode } } } });
+      const harness = loadGeneralTabForTest({
+        tab: "permissions",
+        snapshot: { agents: { codex: {
+          integrationInstalled: true, enabled: true, permissionMode: mode } } },
+      });
       harness.renderContent();
       const row = harness.content.querySelector(".codex-approval-owner-row");
       assert.ok(row);
@@ -20038,7 +19974,7 @@ describe("Settings tabs and segmented choice contracts", () => {
     document.body.append(sidebar, content);
     const core = loadSettingsCoreForTest({}, { document });
     let exits = 0;
-    for (const id of ["general", "agents", "theme", "animOverrides", "shortcuts", "telegram-approval", "discord-presence", "remote-ssh", "recap", "about"]) {
+    for (const id of ["general", "pet", "notifications", "sessions", "permissions", "telegram-approval", "agents", "remote-ssh", "discord-presence", "theme", "animOverrides", "shortcuts", "recap", "about"]) {
       core.tabs[id] = { render(panel) { const heading = document.createElement("h1"); heading.textContent = id; panel.appendChild(heading); },
         onExit() { exits++; } };
     }
@@ -20050,20 +19986,26 @@ describe("Settings tabs and segmented choice contracts", () => {
     core.ops.requestRender({ sidebar: true, content: true });
     const group = sidebar.children[1];
     assert.equal(group.getAttribute("role"), "tablist");
-    const [general, agents] = group.querySelectorAll("button");
+    const [general, pet, notifications, sessions, permissions, telegramApproval, agents, remoteSsh, discordPresence, theme, animOverrides, shortcuts, recap, about] = group.querySelectorAll("button");
+    for (const button of [agents, theme, recap]) {
+      assert.ok(button.classList.contains("sidebar-item-group-start"), `${button.dataset.value} starts a group`);
+    }
+    for (const button of [general, pet, notifications, sessions, permissions, telegramApproval, remoteSsh, discordPresence, animOverrides, shortcuts, about]) {
+      assert.ok(!button.classList.contains("sidebar-item-group-start"), `${button.dataset.value} does not start a group`);
+    }
     general.focus();
     general.dispatchEvent(createKeyboardEventForTest("ArrowDown"));
-    assert.strictEqual(document.activeElement, agents);
+    assert.strictEqual(document.activeElement, pet);
     assert.equal(core.state.activeTab, "general");
     assert.equal(exits, 0);
     core.ops.requestRender({ content: true });
-    agents.dispatchEvent(createKeyboardEventForTest("Enter"));
-    assert.equal(core.state.activeTab, "agents");
+    pet.dispatchEvent(createKeyboardEventForTest("Enter"));
+    assert.equal(core.state.activeTab, "pet");
     assert.equal(exits, 1);
-    assert.equal(document.activeElement.dataset.value, "agents");
+    assert.equal(document.activeElement.dataset.value, "pet");
     assert.equal(document.activeElement.getAttribute("aria-selected"), "true");
     assert.equal(content.children.filter((panel) => !panel.hidden).length, 1);
-    assert.equal(content.children.find((panel) => !panel.hidden).textContent, "agents");
+    assert.equal(content.children.find((panel) => !panel.hidden).textContent, "pet");
     assert.equal(general.eventListeners.click.length, 0, "old sidebar listeners are removed");
   });
 

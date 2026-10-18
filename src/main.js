@@ -5086,7 +5086,7 @@ const settingsSizePreviewSession = createSettingsSizePreviewSession({
 const quotaNotifications = createQuotaNotificationPresenter({
   Notification, platform: process.platform, trayBalloonOwner, getTray: () => _menu.getTray(),
   isSuppressed: () => doNotDisturb || isQuitting || !app.isReady(),
-  isMuted: () => soundMuted, getLang: () => lang, openSettings: () => settingsWindowRuntime.open(),
+  isMuted: () => soundMuted, getLang: () => lang, openSettings: () => settingsWindowRuntime.open({ tab: "sessions" }),
 });
 const quotaNotificationIpc = registerQuotaNotificationIpc({
   ipcMain, settingsController: _settingsController, getSettingsWindow,
