@@ -94,6 +94,8 @@ Pages mount only their active panel's content and retain ownership of rendering,
 exit cleanup, drafts, persistence and scrolling. An existing `panels` Map may be
 passed when rebuilding only the sidebar, preserving the mounted page.
 
+设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限（本机处理方式、按工具的 Codex 审批）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
+
 Tabs use manual activation: arrows/Home/End move focus; Enter/Space/click activate.
 Horizontal tabs leave Up/Down available for scrolling; the vertical sidebar uses
 Up/Down. Disabled options are skipped. Focus and selection are separate; leaving
@@ -127,7 +129,7 @@ inspection, including empty/unknown/future coverage states; native title tooltip
 are omitted. Blur, Escape and body disposal dismiss the popover.
 
 Enumerated values use the existing `buildSegmentedRadio`: Codex permission mode,
-Feishu platform and ID type, Recap period, and the General/approval choices. Add a
+Feishu platform and ID type, Recap period, and the Permissions/approval choices. Add a
 stable `id` for focus restoration and an accessible name (`ariaLabel` or
 `labelledBy`). Arrows select immediately. `onChange` may return synchronously or
 asynchronously; false/rejection rolls back unless a newer `setValue` snapshot has
@@ -323,7 +325,7 @@ Mini 状态映射：
 
 ### Test Result Reactions
 
-- Settings → General → Alerts & feedback 的“测试结果动画”是独立 opt-in，默认关闭
+- Settings → Pet → Reactions 的“测试结果动画”是独立 opt-in，默认关闭
 - Claude Code（包括 Cursor 导入的兼容 hook）的 Bash `PostToolUse` / `PostToolUseFailure` 只在命令以常见测试 runner 开头、且结果可可靠判断时上报 `pass` / `fail`；命令和测试输出不会传给 renderer，server 也只接受这两个来源的结果标签
 - `pass` 在 `#pet-particle-layer` 播放一次像素纸屑，`fail` 只对 `#pet-facing-stage` 使用独立 `translate` / `rotate` 抖动，不覆盖 mini 镜像、漫步位移或跨屏 viewport offset
 - DND、隐藏桌宠、mini / mini transition、拖拽和 headless 会话都会压住测试结果动画；状态机本身仍照常处理测试事件

@@ -87,10 +87,7 @@
       animMapReset: null,
       animOverrideTimingSliders: new Map(),
       idleVisualPicker: null,
-      bubblePolicySummary: null,
-      sessionHudSummary: null,
       size: null,
-      soundSummary: null,
       soundVolume: null,
       textScale: null,
       roamMovementStyle: null,
@@ -1946,11 +1943,8 @@
     state.mountedControls.animMapSwitches.clear();
     state.mountedControls.animMapReset = null;
     state.mountedControls.animOverrideTimingSliders.clear();
-    state.mountedControls.bubblePolicySummary = null;
-    state.mountedControls.sessionHudSummary = null;
     state.mountedControls.idleVisualPicker = null;
     state.mountedControls.size = null;
-    state.mountedControls.soundSummary = null;
     state.mountedControls.soundVolume = null;
     state.mountedControls.textScale = null;
     state.mountedControls.roamMovementStyle = null;

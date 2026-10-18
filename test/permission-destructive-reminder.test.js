@@ -2628,10 +2628,10 @@ describe("destructive reminder — wiring", () => {
 
   it("the settings row carries its limits on the second description line", () => {
     // Rendered in Electron, the single-description version was 669 characters --
-    // the longest blurb on the General tab by a factor of three against a 240
+    // the longest blurb on the Permissions tab by a factor of three against a 240
     // maximum. The limits moved to the descExtraKey slot the agent rows already
     // use, which keeps both lines inside the tab's own range.
-    const tab = fs.readFileSync(path.join(SRC, "settings-tab-general.js"), "utf8");
+    const tab = fs.readFileSync(path.join(SRC, "settings-tab-permissions.js"), "utf8");
     assert.match(tab, /descKey: "rowDestructiveActionReminderDesc"/);
     assert.match(tab, /descExtraKey: "rowDestructiveActionReminderNote"/);
     const i18n = fs.readFileSync(path.join(SRC, "settings-i18n.js"), "utf8");
