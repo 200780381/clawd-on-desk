@@ -4,97 +4,182 @@
 //
 // Under the X11 Ozone backend, Electron's screen.getCursorScreenPoint() returns
 // the root location of the last pointer event Chromium itself received, not a
-// fresh XQueryPointer. Once the cursor leaves our own windows the value
-// freezes at the last point seen, so idle eye tracking looks at a stale spot
-// (measured on Electron 41 / Xorg: ~80% of samples wrong while the cursor
-// roamed a dual-head desktop, correct only near the pet window).
+// fresh query. Once the cursor leaves our own windows the value freezes at the
+// last point seen, so idle eye tracking looks at a stale spot (measured on
+// Electron 41 / Xorg: ~80% of samples wrong while the cursor roamed a
+// dual-head desktop, correct only near the pet window).
 //
-// Fix: on an X11 backend, ask the X server directly via libX11 XQueryPointer
-// (through koffi, which already ships Linux binaries) and convert the
-// physical root coordinates to DIP. Any failure — no libX11, no display,
-// pointer on another X screen — falls back to Electron's own value.
+// Fix: on the X11 backend, ask the X server directly with xcb_query_pointer on
+// the root window and convert the physical root coordinates to DIP. The caller
+// decides "X11 backend" the same way as linux-x11-input-hint (Chromium's
+// resolved --ozone-platform), so this also covers the #441 XWayland relaunch.
+// Any failure falls back to Electron's own value.
+//
+// XCB rather than Xlib, as in linux-x11-input-hint: a failed request comes
+// back as a value instead of reaching Xlib's default error handler, which
+// exits the process. The private connection stays open for the life of the
+// process (one round trip per poll); Chromium's own X connection is never
+// touched.
 
-const { parseOzonePlatformFromArgv } = require("./linux-ozone");
+function loadXcbPointerBindings(koffi) {
+  const xcb = koffi.load("libxcb.so.1");
+  // free() from the process's global symbol scope, not libc.so.6: Chromium
+  // interposes malloc/free (PartitionAlloc), so libxcb's replies come from the
+  // shim and glibc's own free() on them crashes Electron (measured: SIGSEGV on
+  // the first reply). In plain Node both resolve to glibc.
+  const self = koffi.load(null);
+  // Anonymous structs: nothing is registered by name in the Koffi registry.
+  const ScreenIterator = koffi.struct({ data: "void *", rem: "int", index: "int" });
+  const QueryPointerCookie = koffi.struct({ sequence: "unsigned int" });
+  const QueryPointerReply = koffi.struct({
+    response_type: "uint8_t",
+    same_screen: "uint8_t",
+    sequence: "uint16_t",
+    length: "uint32_t",
+    root: "uint32_t",
+    child: "uint32_t",
+    root_x: "int16_t",
+    root_y: "int16_t",
+    win_x: "int16_t",
+    win_y: "int16_t",
+    mask: "uint16_t",
+    pad0: koffi.array("uint8_t", 2),
+  });
 
-// Whether this process runs Chromium's X11 Ozone backend with a reachable
-// DISPLAY. Pure for tests.
-function shouldUseX11CursorQuery(options = {}) {
-  const platform = options.platform || process.platform;
-  if (platform !== "linux") return false;
-  const env = options.env || process.env;
-  if (!String(env.DISPLAY || "").trim()) return false;
-  const argvOzone = String(parseOzonePlatformFromArgv(options.argv || process.argv) || "").trim().toLowerCase();
-  if (argvOzone) return argvOzone === "x11";
-  // No explicit flag: Chromium's auto hint picks Wayland on a Wayland session.
-  const sessionType = String(env.XDG_SESSION_TYPE || "").trim().toLowerCase();
-  const underWayland = sessionType === "wayland" || !!String(env.WAYLAND_DISPLAY || "").trim();
-  return !underWayland;
+  const connect = xcb.func("xcb_connect", "void *", ["str", koffi.out(koffi.pointer("int"))]);
+  const getSetup = xcb.func("xcb_get_setup", "void *", ["void *"]);
+  const rootsIterator = xcb.func("xcb_setup_roots_iterator", ScreenIterator, ["void *"]);
+  const screenNext = xcb.func("xcb_screen_next", "void", [koffi.inout(koffi.pointer(ScreenIterator))]);
+  const queryPointer = xcb.func("xcb_query_pointer", QueryPointerCookie, ["void *", "uint32_t"]);
+  const queryPointerReply = xcb.func("xcb_query_pointer_reply", "void *", [
+    "void *", QueryPointerCookie, koffi.out(koffi.pointer("void *")),
+  ]);
+  const free = self.func("free", "void", ["void *"]);
+
+  return {
+    // xcb_connect() never returns NULL: a failure is an error connection,
+    // which still has to be disconnected.
+    connect(displayName) {
+      const screen = [0];
+      const connection = connect(displayName, screen);
+      return { connection, screen: screen[0] };
+    },
+    hasError: xcb.func("xcb_connection_has_error", "int", ["void *"]),
+    rootWindow(connection, screenNumber) {
+      const iterator = rootsIterator(getSetup(connection));
+      for (let i = 0; i < screenNumber && iterator.rem > 0; i++) screenNext(iterator);
+      if (!iterator.data || iterator.rem <= 0) return null;
+      // xcb_screen_t starts with its root window id.
+      return koffi.decode(iterator.data, "uint32_t");
+    },
+    queryPointer(connection, root) {
+      const error = [null];
+      const reply = queryPointerReply(connection, queryPointer(connection, root), error);
+      if (error[0]) free(error[0]);
+      if (!reply) return null;
+      try {
+        const fields = koffi.decode(reply, QueryPointerReply);
+        return { sameScreen: fields.same_screen !== 0, x: fields.root_x, y: fields.root_y };
+      } finally {
+        free(reply);
+      }
+    },
+    disconnect: xcb.func("xcb_disconnect", "void", ["void *"]),
+  };
 }
 
-function createX11PointerQuery(loadKoffi = () => require("koffi")) {
-  let state = null; // null = not tried, false = unavailable
+// Returns a function that yields the pointer's physical root coordinates, or
+// null when unavailable (no libxcb, connection failed or lost, pointer on
+// another X screen). A failed connection is not retried.
+function createX11PointerQuery(options = {}) {
+  const displayName = typeof options.displayName === "string" && options.displayName
+    ? options.displayName
+    : null;
+  const onError = typeof options.onError === "function" ? options.onError : () => {};
+  const reportError = (error) => {
+    try { onError(error); } catch {}
+  };
 
-  function init() {
-    const koffi = loadKoffi();
-    const lib = koffi.load("libX11.so.6");
-    const XOpenDisplay = lib.func("void *XOpenDisplay(const char *name)");
-    const XDefaultRootWindow = lib.func("unsigned long XDefaultRootWindow(void *display)");
-    const XQueryPointer = lib.func(
-      "int XQueryPointer(void *display, unsigned long w, _Out_ unsigned long *root_return, "
-      + "_Out_ unsigned long *child_return, _Out_ int *root_x, _Out_ int *root_y, "
-      + "_Out_ int *win_x, _Out_ int *win_y, _Out_ unsigned int *mask)"
-    );
-    const display = XOpenDisplay(null);
-    if (!display) throw new Error("XOpenDisplay failed");
-    return { XQueryPointer, display, root: XDefaultRootWindow(display) };
+  let state = null; // null = not opened yet, false = unavailable
+
+  function open() {
+    const bindings = options.bindings || loadXcbPointerBindings(options.koffi || require("koffi"));
+    const { connection, screen } = bindings.connect(displayName);
+    if (!connection) throw new Error("X11 connection failed");
+    try {
+      const connectionError = bindings.hasError(connection);
+      if (connectionError) {
+        throw new Error(`X11 connection failed (xcb_connection_has_error ${connectionError})`);
+      }
+      const root = bindings.rootWindow(connection, screen);
+      if (!root) throw new Error(`X11 root window not found for screen ${screen}`);
+      return { bindings, connection, root };
+    } catch (error) {
+      try { bindings.disconnect(connection); } catch {}
+      throw error;
+    }
+  }
+
+  function shutdown(error) {
+    const current = state;
+    state = false;
+    reportError(error);
+    try { current.bindings.disconnect(current.connection); } catch (err) { reportError(err); }
   }
 
   return function queryPointer() {
     if (state === false) return null;
     if (state === null) {
       try {
-        state = init();
-      } catch (err) {
+        state = open();
+      } catch (error) {
         state = false;
-        console.warn("Clawd: X11 cursor query unavailable, using Electron cursor point:", err && err.message ? err.message : err);
+        reportError(error);
         return null;
       }
     }
-    const rootRet = [0], childRet = [0], rx = [0], ry = [0], wx = [0], wy = [0], mask = [0];
-    let sameScreen = 0;
     try {
-      sameScreen = state.XQueryPointer(state.display, state.root, rootRet, childRet, rx, ry, wx, wy, mask);
-    } catch {
+      const pointer = state.bindings.queryPointer(state.connection, state.root);
+      if (pointer) return pointer.sameScreen ? { x: pointer.x, y: pointer.y } : null;
+      const connectionError = state.bindings.hasError(state.connection);
+      if (connectionError) {
+        shutdown(new Error(`X11 connection lost (xcb_connection_has_error ${connectionError})`));
+      }
+      return null;
+    } catch (error) {
+      shutdown(error);
       return null;
     }
-    if (!sameScreen) return null;
-    return { x: rx[0], y: ry[0] };
   };
 }
 
-// Replace screen.getCursorScreenPoint with a live X11 query when appropriate.
+// Replace screen.getCursorScreenPoint with the live X11 query on the X11
+// backend. Must run after app ready (the screen module throws before it).
 // Returns true if installed.
 function installLinuxX11CursorFallback(screen, options = {}) {
+  if (!options.isLinuxX11) return false;
   if (!screen || typeof screen.getCursorScreenPoint !== "function") return false;
-  if (!shouldUseX11CursorQuery(options)) return false;
-  const query = options.queryPointer || createX11PointerQuery();
+  // Without DIP conversion the physical point is off by the scale factor.
+  if (typeof screen.screenToDipPoint !== "function") return false;
+  const query = options.queryPointer || createX11PointerQuery(options);
   const original = screen.getCursorScreenPoint.bind(screen);
   screen.getCursorScreenPoint = function getCursorScreenPoint() {
     const physical = query();
     if (!physical) return original();
-    if (typeof screen.screenToDipPoint === "function") {
-      try {
-        const dip = screen.screenToDipPoint(physical);
-        return { x: Math.round(dip.x), y: Math.round(dip.y) };
-      } catch {}
+    try {
+      // Floor, not round: at scale 2 the last physical column 1919 maps to
+      // 959.5, and rounding would put it outside a 960-DIP-wide display.
+      const dip = screen.screenToDipPoint(physical);
+      return { x: Math.floor(dip.x), y: Math.floor(dip.y) };
+    } catch {
+      return original();
     }
-    return physical;
   };
   return true;
 }
 
 module.exports = {
-  shouldUseX11CursorQuery,
+  loadXcbPointerBindings,
   createX11PointerQuery,
   installLinuxX11CursorFallback,
 };
