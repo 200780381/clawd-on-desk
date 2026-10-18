@@ -94,7 +94,7 @@ Pages mount only their active panel's content and retain ownership of rendering,
 exit cleanup, drafts, persistence and scrolling. An existing `panels` Map may be
 passed when rebuilding only the sidebar, preserving the mounted page.
 
-设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限（本机处理方式、按工具的 Codex 审批）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
+设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限与审批（本机处理 / IM 渠道 / 局域网审批三个子页，远程渠道的身体由 `settings-tab-telegram-approval.js` 提供）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
 
 Tabs use manual activation: arrows/Home/End move focus; Enter/Space/click activate.
 Horizontal tabs leave Up/Down available for scrolling; the vertical sidebar uses
@@ -104,7 +104,7 @@ stable `aria-controls`/`aria-labelledby` panel relationship. Sidebar ownership i
 separate from content disposal; Animation Overrides owns its persistent subtab
 controller across local body refreshes and disposes it on full render/exit.
 
-Animation/Sound, Remote Approval and Recap share `helpers.createSubpageHost({
+Animation/Sound, Permissions and Recap share `helpers.createSubpageHost({
 disposeBody })`. Its `render(panel, renderBody, { scrollTop })` replaces only the
 active body, cleans up outgoing body controls, restores lost keyed focus, and
 preserves the current scroll position unless the page supplies another one.
@@ -113,7 +113,7 @@ global content teardown still owns final mounted-control disposal. Navigation
 must remain outside body disposal. `dispose()` invalidates queued scroll work.
 Tabs offer `onBeforeChange(next, previous)` for capturing outgoing scroll before
 the previous panel is hidden; Animation/Sound uses it for per-subpage positions.
-Remote Approval retains its Channels-to-LAN credential/lookup cleanup.
+Permissions keeps the Feishu credential/lookup cleanup when leaving the IM channels sub-page or the tab.
 
 Recap periods remain radios. A period change captures the requested period and
 fences stale responses, retains the previous chart as inert/busy until new data

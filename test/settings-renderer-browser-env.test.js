@@ -1936,12 +1936,13 @@ function loadAnimMapTabForTest({
   };
 }
 
-function loadTelegramApprovalTabForTest({
+function loadPermissionsTabForTest({
   snapshot,
   settingsAPI = {},
   confirm = () => true,
   console: consoleOverride = console,
   showConfirmModal = () => Promise.resolve("confirm"),
+  subtab = "channels",
   requestAnimationFrame: requestAnimationFrameOverride = (cb) => {
     cb();
     return 1;
@@ -2032,6 +2033,7 @@ function loadTelegramApprovalTabForTest({
   vm.runInContext(fs.readFileSync(LANGUAGE_PICKER_JS, "utf8"), context);
   vm.runInContext(fs.readFileSync(FEISHU_APPROVAL_RECIPIENT, "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-telegram-approval.js"), "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-permissions.js"), "utf8"), context);
   const buttonHelpers = loadSharedButtonHelpersForTest(document, api, () => core.helpers.t);
 
   const core = {
@@ -2049,12 +2051,18 @@ function loadTelegramApprovalTabForTest({
           connectionTimeoutSeconds: 15,
         },
       },
-      activeTab: "telegram-approval",
+      activeTab: "permissions",
       mountedControls: {
         settingsSelects: new Set(),
+        generalSwitches: new Map(),
+        permissionAutomationMode: null,
+        agentPermissionModes: new Map(),
+      },
+      transientUiState: {
+        generalSwitches: new Map(),
       },
     },
-    runtime: {},
+    runtime: { permissionsSubtab: subtab },
     helpers: {
       ...loadSharedChoiceHelpersForTest(document),
       t: (key) => key,
@@ -2064,9 +2072,71 @@ function loadTelegramApprovalTabForTest({
       buildButton: buttonHelpers.buildButton,
       setButtonState: buttonHelpers.setButtonState,
       buildSwitch: buttonHelpers.buildSwitch,
+      buildSwitchRow: ({
+        key,
+        labelKey,
+        descKey,
+        descExtraKey = null,
+        invert = false,
+      }) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const text = document.createElement("div");
+        text.className = "row-text";
+        const label = document.createElement("span");
+        label.className = "row-label";
+        label.textContent = key;
+        text.appendChild(label);
+        let extra = null;
+        if (descKey) {
+          const desc = document.createElement("span");
+          desc.className = "row-desc";
+          desc.textContent = descKey;
+          text.appendChild(desc);
+        }
+        if (descExtraKey) {
+          extra = document.createElement("span");
+          extra.className = "row-desc row-desc-extra";
+          extra.textContent = descExtraKey;
+          text.appendChild(extra);
+        }
+        row.appendChild(text);
+        const controlElement = document.createElement("div");
+        controlElement.className = "row-control";
+        const switchElement = document.createElement("div");
+        switchElement.className = "switch";
+        if (core.state.snapshot && core.state.snapshot[key] === true) switchElement.classList.add("on");
+        const control = {
+          element: switchElement,
+          setState(patch = {}) {
+            if (Object.prototype.hasOwnProperty.call(patch, "checked")) {
+              switchElement.classList.toggle("on", patch.checked === true);
+            }
+            if (Object.prototype.hasOwnProperty.call(patch, "pending")) {
+              switchElement.classList.toggle("pending", patch.pending === true);
+            }
+          },
+        };
+        controlElement.appendChild(switchElement);
+        row.appendChild(controlElement);
+        core.state.mountedControls.generalSwitches.set(key, {
+          control,
+          element: switchElement,
+          row,
+          invert,
+        });
+        return row;
+      },
       showSettingsConfirmModal: showConfirmModal,
-      buildSection: (_title, rows) => {
+      buildSection: (title, rows) => {
         const section = document.createElement("section");
+        section.className = "section";
+        if (title) {
+          const heading = document.createElement("h2");
+          heading.className = "section-title";
+          heading.textContent = title;
+          section.appendChild(heading);
+        }
         for (const row of rows) section.appendChild(row);
         return section;
       },
@@ -2145,6 +2215,23 @@ function loadTelegramApprovalTabForTest({
         return group;
       },
     },
+    readers: {
+      readGeneralSwitchVisual(key, invert = false) {
+        const raw = !!(core.state.snapshot && core.state.snapshot[key]);
+        return invert ? !raw : raw;
+      },
+      readAgentIntegrationInstalled(agentId) {
+        const entry = core.state.snapshot && core.state.snapshot.agents
+          && core.state.snapshot.agents[agentId];
+        return entry ? entry.integrationInstalled === true : true;
+      },
+      readAgentPermissionMode(agentId) {
+        const entry = core.state.snapshot && core.state.snapshot.agents
+          && core.state.snapshot.agents[agentId];
+        if (agentId === "codex" && entry && entry.permissionMode === "intercept") return "intercept";
+        return "auto";
+      },
+    },
     ops: {
       requestRender: (payload) => {
         renderRequests.push(payload || {});
@@ -2154,11 +2241,16 @@ function loadTelegramApprovalTabForTest({
     tabs: {},
   };
   coreRef = core;
-  core.ops.clearMountedControls = core.helpers.clearMountedControls;
+  core.ops.clearMountedControls = () => {
+    core.state.mountedControls.generalSwitches.clear();
+    core.state.mountedControls.permissionAutomationMode = null;
+    core.state.mountedControls.agentPermissionModes.clear();
+  };
+  context.ClawdSettingsTabPermissions.init(core);
   context.ClawdSettingsTabTelegramApproval.init(core);
   function render() {
     content.innerHTML = "";
-    core.tabs["telegram-approval"].render(content, core);
+    core.tabs.permissions.render(content, core);
   }
   render();
 
@@ -2180,7 +2272,7 @@ function createFeishuCredentialDraftLifecycleHarness({
   const capturedConsole = Object.fromEntries(
     Object.keys(consoleOutput).map((method) => [method, (...args) => consoleOutput[method].push(args)]),
   );
-  const harness = loadTelegramApprovalTabForTest({
+  const harness = loadPermissionsTabForTest({
     console: capturedConsole,
     showConfirmModal: (options) => {
       modalCalls.push(options);
@@ -2364,7 +2456,7 @@ function createFeishuLookupPreflightHarness({
       connectionTimeoutSeconds: 15,
     },
   };
-  const harness = loadTelegramApprovalTabForTest({
+  const harness = loadPermissionsTabForTest({
     snapshot,
     requestAnimationFrame,
     settingsAPI: {
@@ -2905,23 +2997,26 @@ describe("settings renderer browser environment", () => {
     assert.equal(queries.length, 3);
   });
 
-  it("keeps Remote Approval chrome mounted while switching Channels and LAN", async () => {
-    const harness = loadTelegramApprovalTabForTest();
+  it("keeps Permissions chrome mounted while switching local, IM channels and LAN", async () => {
+    const harness = loadPermissionsTabForTest();
     await Promise.resolve();
     const heading = harness.content.children[0];
     const tabs = harness.content.querySelector(".settings-tabs");
     const choices = tabs.querySelectorAll("button");
     const renders = harness.renderRequests.length;
-    choices[1].click();
+    choices[2].click();
     assert.strictEqual(harness.content.children[0], heading);
     assert.strictEqual(harness.content.querySelector(".settings-tabs"), tabs);
-    assert.equal(harness.core.runtime.remoteApprovalSubtab, "lan");
+    assert.equal(harness.core.runtime.permissionsSubtab, "lan");
     assert.equal(harness.renderRequests.length, renders);
     choices[0].click();
-    assert.equal(harness.core.runtime.remoteApprovalSubtab, "channels");
-    assert.equal(choices[0].getAttribute("aria-selected"), "true");
+    assert.equal(harness.core.runtime.permissionsSubtab, "local");
     assert.equal(harness.renderRequests.length, renders);
-    assert.strictEqual(harness.document.activeElement, choices[0]);
+    choices[1].click();
+    assert.equal(harness.core.runtime.permissionsSubtab, "channels");
+    assert.equal(choices[1].getAttribute("aria-selected"), "true");
+    assert.equal(harness.renderRequests.length, renders);
+    assert.strictEqual(harness.document.activeElement, choices[1]);
   });
 
   it("re-queries an unavailable recap page after the runtime recovery signal", async () => {
@@ -3666,7 +3761,7 @@ describe("settings renderer browser environment", () => {
       },
     };
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: base,
       settingsAPI: {
         command: (name, payload) => {
@@ -3707,7 +3802,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("guards invalid Enable setup on both mouse and keyboard paths", async () => {
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: false, platform: "lark", idType: "open_id", approverId: "ou_legacy", connectionTimeoutSeconds: 15 },
@@ -3751,7 +3846,7 @@ describe("settings renderer browser environment", () => {
       ["approver-app-mismatch", "feishuApprovalLookupApproverAppMismatch"],
     ];
     for (const [setupReason, expectedTitleKey] of cases) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -3800,7 +3895,7 @@ describe("settings renderer browser environment", () => {
     }
 
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: {
@@ -4587,7 +4682,7 @@ describe("settings renderer browser environment", () => {
 
   it("renders a blocking retired-legacy gate and dispatches only the verified native action", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -4690,7 +4785,7 @@ describe("settings renderer browser environment", () => {
       ["timeout", undefined, "telegramApprovalVerificationTimeout", "telegramNativeMigrationTimeout"],
       ["native-start-failed", "apply-failed", "telegramApprovalVerificationApplyFailed", "telegramNativeMigrationStartFailed"],
     ]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: {
             enabled: true,
@@ -4751,7 +4846,7 @@ describe("settings renderer browser environment", () => {
       { state: "IDLE", transport: "off", revision: 1, ownerSnapshot: {} },
       { state: "NATIVE_ACTIVE", transport: "native", revision: 1, ownerSnapshot: { nativePolling: true } },
     ]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         settingsAPI: {
           command: (name) => {
             if (name === "telegramMigration.snapshot") {
@@ -4780,7 +4875,7 @@ describe("settings renderer browser environment", () => {
       ["timeout", "timeout", "telegramApprovalVerificationTimeout"],
       ["unknown", "failed", "telegramApprovalCardFailed"],
     ]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: {
             enabled: false,
@@ -4841,7 +4936,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("prioritizes missing setup over a stale verification failure", async () => {
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -4896,7 +4991,7 @@ describe("settings renderer browser environment", () => {
 
   it("force-refreshes Telegram status when only the verification error code changes", async () => {
     let errorCode = "401";
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       settingsAPI: {
         command: (name) => {
           if (name === "telegramMigration.snapshot") {
@@ -4941,7 +5036,7 @@ describe("settings renderer browser environment", () => {
 
     const before = harness.renderRequests.length;
     errorCode = "403";
-    harness.core.tabs["telegram-approval"].refreshRuntimeStatus({ channel: "telegram" });
+    harness.core.tabs.permissions.refreshRuntimeStatus({ channel: "telegram" });
     await Promise.resolve();
     await Promise.resolve();
     assert.ok(harness.renderRequests.length > before, "Telegram status push should force a content render");
@@ -4953,7 +5048,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("uses native re-verification copy when a previously verified setup is repaired", async () => {
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5005,7 +5100,7 @@ describe("settings renderer browser environment", () => {
   it("refreshes Telegram migration state from the scoped async revision signal", async () => {
     const commandCalls = [];
     let revision = 1;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5049,7 +5144,7 @@ describe("settings renderer browser environment", () => {
     revision = 2;
 
     assert.equal(
-      harness.core.tabs["telegram-approval"].refreshRuntimeStatus({
+      harness.core.tabs.permissions.refreshRuntimeStatus({
         channel: "telegram",
         revision: 2,
       }),
@@ -5071,7 +5166,7 @@ describe("settings renderer browser environment", () => {
 
   it("keeps Telegram approval drafts local across toggles and rerenders", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5140,7 +5235,7 @@ describe("settings renderer browser environment", () => {
 
   it("preserves notifyOnComplete=false through a Telegram approval disable save", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5196,7 +5291,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("preserves notifyOnComplete=true through a Telegram recipient save", async () => {
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5254,7 +5349,7 @@ describe("settings renderer browser environment", () => {
 
   it("dispatches USER_DISABLE when the enabled switch is turned off (zombie-switch fix)", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5313,7 +5408,7 @@ describe("settings renderer browser environment", () => {
 
   it("uses the shared warning modal before enabling full Telegram completion output", async () => {
     const confirmCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5376,7 +5471,7 @@ describe("settings renderer browser environment", () => {
     const offButton = select.querySelectorAll("button").find((button) => button.dataset.value === "off");
     assert.equal(offButton.getAttribute("aria-checked"), "true");
 
-    const confirmed = loadTelegramApprovalTabForTest({
+    const confirmed = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5412,7 +5507,7 @@ describe("settings renderer browser environment", () => {
 
   it("toggles Telegram completion replies without changing the approval transport", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5482,7 +5577,7 @@ describe("settings renderer browser environment", () => {
 
   it("shows native-active Telegram approval as enabled even when the legacy flag is false", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5541,7 +5636,7 @@ describe("settings renderer browser environment", () => {
   it("uses native running status while migration snapshot is still loading", async () => {
     const commandCalls = [];
     const never = new Promise(() => {});
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5593,7 +5688,7 @@ describe("settings renderer browser environment", () => {
 
   it("turning the Telegram approval switch on starts the native migration test", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5646,7 +5741,7 @@ describe("settings renderer browser environment", () => {
 
   it("does not show Telegram approval enabled for broken native setup debt", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5700,7 +5795,7 @@ describe("settings renderer browser environment", () => {
 
   it("disables the independent Telegram approval test while native migration is testing", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5752,7 +5847,7 @@ describe("settings renderer browser environment", () => {
 
   it("disables Telegram approval test until runtime status is ready", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -5797,7 +5892,7 @@ describe("settings renderer browser environment", () => {
 
   it("renders Feishu approval setup and saves secrets outside prefs", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -5877,7 +5972,7 @@ describe("settings renderer browser environment", () => {
         connectionTimeoutSeconds: 15,
       },
     };
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: initialSnapshot,
       settingsAPI: {
         getSnapshot: () => authoritativeSnapshot.promise,
@@ -6002,7 +6097,7 @@ describe("settings renderer browser environment", () => {
       const commandCalls = [];
       const toasts = [];
       const rawMessage = `raw detail ${code} ou_must_not_render`;
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: JSON.parse(JSON.stringify(snapshot)),
         settingsAPI: {
           command: (name, payload) => {
@@ -6057,11 +6152,11 @@ describe("settings renderer browser environment", () => {
     }
   });
 
-  it("cancels and invalidates network lookup on tab exit and Channels to LAN navigation", async () => {
-    for (const navigate of ["tab-exit", "lan"]) {
+  it("cancels and invalidates network lookup on tab exit and Channels to LAN/local navigation", async () => {
+    for (const navigate of ["tab-exit", "lan", "local"]) {
       const lookup = createDeferred();
       const calls = [];
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -6109,10 +6204,11 @@ describe("settings renderer browser environment", () => {
       );
 
       if (navigate === "tab-exit") {
-        harness.core.tabs["telegram-approval"].onExit();
+        harness.core.tabs.permissions.onExit();
       } else {
         harness.content.querySelectorAll("button")
-          .find((button) => button.textContent === "remoteApprovalSubtabLan")
+          .find((button) => button.textContent === (navigate === "lan"
+            ? "permissionsSubtabLan" : "permissionsSubtabLocal"))
           .dispatchEvent({ type: "click" });
       }
       assert.deepStrictEqual(
@@ -6131,9 +6227,9 @@ describe("settings renderer browser environment", () => {
         "a stale lookup result must not request another render",
       );
 
-      if (navigate === "lan") {
+      if (navigate !== "tab-exit") {
         harness.content.querySelectorAll("button")
-          .find((button) => button.textContent === "remoteApprovalSubtabChannels")
+          .find((button) => button.textContent === "permissionsSubtabChannels")
           .dispatchEvent({ type: "click" });
       }
       harness.render();
@@ -6152,7 +6248,7 @@ describe("settings renderer browser environment", () => {
   it("blocks every Feishu mutation while Test is pending", async () => {
     const testCall = createDeferred();
     let testCalls = 0;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: {
@@ -6209,7 +6305,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("keeps a legacy approver visible with a reconfirmation warning", () => {
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: {
@@ -6229,7 +6325,7 @@ describe("settings renderer browser environment", () => {
   it("keeps transient Feishu fields after lookup failure, localizes the stable code, and expands fallback help", async () => {
     const strings = loadSettingsI18nForTest().en;
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: {
@@ -6409,7 +6505,7 @@ describe("settings renderer browser environment", () => {
     for (const approverId of ["abc", "name@", "@example.com"]) {
       const commandCalls = [];
       const toasts = [];
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -6474,7 +6570,7 @@ describe("settings renderer browser environment", () => {
   it("cancels without a request handle and preserves the email", async () => {
     const lookup = createDeferred();
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: {
@@ -6554,7 +6650,7 @@ describe("settings renderer browser environment", () => {
       ["union_id", "union_id_manual"],
     ]) {
       const commandCalls = [];
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -6600,7 +6696,7 @@ describe("settings renderer browser environment", () => {
   it("routes an email-looking ou_ value through lookup before every manual ID type", async () => {
     for (const idType of ["open_id", "user_id", "union_id"]) {
       const commandCalls = [];
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -6682,7 +6778,7 @@ describe("settings renderer browser environment", () => {
     ]) {
       for (const code of ["missing-contact-scope", "approver-not-found", "lookup-failed"]) {
         const openExternalCalls = [];
-        const harness = loadTelegramApprovalTabForTest({
+        const harness = loadPermissionsTabForTest({
           snapshot: {
             tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
             feishuApproval: {
@@ -6781,7 +6877,7 @@ describe("settings renderer browser environment", () => {
 
   it("switches the API Explorer fallback draft to open_id before saving its returned ID", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: {
@@ -6880,7 +6976,7 @@ describe("settings renderer browser environment", () => {
         hint: "输入邮箱可自动查询并保存 open_id；也可以选择 ID 类型并粘贴已有 ID。",
       },
     ]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -7255,7 +7351,7 @@ describe("settings renderer browser environment", () => {
       "exit",
     );
 
-    harness.core.tabs["telegram-approval"].onExit();
+    harness.core.tabs.permissions.onExit();
     harness.render();
     card = harness.content.querySelector(".feishu-approval-channel-card");
     assert.ok(card.querySelector(".tg-approval-token-stored-row"), "saved credentials should return to the masked row");
@@ -7283,11 +7379,11 @@ describe("settings renderer browser environment", () => {
     );
 
     harness.content.querySelectorAll("button")
-      .find((button) => button.textContent === "remoteApprovalSubtabLan")
+      .find((button) => button.textContent === "permissionsSubtabLan")
       .dispatchEvent({ type: "click" });
     harness.render();
     harness.content.querySelectorAll("button")
-      .find((button) => button.textContent === "remoteApprovalSubtabChannels")
+      .find((button) => button.textContent === "permissionsSubtabChannels")
       .dispatchEvent({ type: "click" });
     harness.render();
     card = harness.content.querySelector(".feishu-approval-channel-card");
@@ -7343,7 +7439,7 @@ describe("settings renderer browser environment", () => {
 
   it("saves Feishu approver through the authoritative command and enables testing only when runtime is configured", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -7429,7 +7525,7 @@ describe("settings renderer browser environment", () => {
 
   it("saves Feishu long connection timeout from settings", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -7508,14 +7604,14 @@ describe("settings renderer browser environment", () => {
       },
     };
     harness.core.state.snapshot = nextSnapshot;
-    assert.equal(harness.core.tabs["telegram-approval"].patchInPlace(
+    assert.equal(harness.core.tabs.permissions.patchInPlace(
       { feishuApproval: nextSnapshot.feishuApproval },
       { previousSnapshot, snapshot: nextSnapshot }
     ), true);
     assert.strictEqual(harness.content.querySelector(".feishu-approval-timeout-select"), select);
     assert.equal(getSelectedPickerValue(select), "30");
 
-    assert.equal(harness.core.tabs["telegram-approval"].patchInPlace(
+    assert.equal(harness.core.tabs.permissions.patchInPlace(
       { feishuApproval: { ...nextSnapshot.feishuApproval, enabled: false } },
       {
         previousSnapshot: nextSnapshot,
@@ -7529,7 +7625,7 @@ describe("settings renderer browser environment", () => {
 
   it("saves Feishu Enable through an authoritative field-level patch", async () => {
     const commandCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -7588,7 +7684,7 @@ describe("settings renderer browser environment", () => {
       { status: "error", code: "not-connected", message: "Feishu approval client is not running" },
       { status: "error", code: "card-send-failed", message: "invalid receive_id" },
     ];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -7664,7 +7760,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("defaults the platform selector to Feishu and saves Lark through the settings controller", async () => {
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         // A pre-platform config, exactly as an upgrading Feishu user has it.
@@ -7699,7 +7795,7 @@ describe("settings renderer browser environment", () => {
 
   it("keeps the Lark platform selected across re-render and shows Lark brand copy", async () => {
     const strings = loadSettingsI18nForTest().en;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: true, platform: "lark", idType: "open_id", approverId: "ou_1", connectionTimeoutSeconds: 15 },
@@ -7732,7 +7828,7 @@ describe("settings renderer browser environment", () => {
   it("shows the extra-permission note for user_id only", async () => {
     const strings = loadSettingsI18nForTest().en;
     for (const [idType, shouldShow] of [["open_id", false], ["union_id", false], ["user_id", true]]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: { enabled: true, platform: "lark", idType, approverId: "ou_1", connectionTimeoutSeconds: 15 },
@@ -7757,7 +7853,7 @@ describe("settings renderer browser environment", () => {
     // field is filled in, so the old code fell through to "ready to enable"
     // while configured=false silently disabled the test button.
     const strings = loadSettingsI18nForTest().en;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: true, platform: "lark", idType: "open_id", approverId: "ou_1", connectionTimeoutSeconds: 15 },
@@ -7814,7 +7910,7 @@ describe("settings renderer browser environment", () => {
 
   it("shows a fixed localized secrets-save failure without raw rejection detail", async () => {
     const strings = loadSettingsI18nForTest().en;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: false, platform: "lark", idType: "open_id", approverId: "", connectionTimeoutSeconds: 15 },
@@ -7882,7 +7978,7 @@ describe("settings renderer browser environment", () => {
         { status: "stopped", enabled: false, platform: "lark", configured: false, reason: "missing-secret", message: "App ID and App Secret are not configured", secretsStored: true, secretsConfigured: false, credentialReady: false, credentialReason: "missing-credentials", configurationReady: false, setupReason: "missing-credentials" },
       ],
     ]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: { enabled: false, platform: "lark", idType: "open_id", approverId: "ou_1", connectionTimeoutSeconds: 15 },
@@ -7924,7 +8020,7 @@ describe("settings renderer browser environment", () => {
     // ID, so a switched-off config must keep its normal copy — the blocking
     // reason path must not swallow it.
     const strings = loadSettingsI18nForTest().en;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: false, platform: "feishu", idType: "open_id", approverId: "ou_1", connectionTimeoutSeconds: 15 },
@@ -7958,7 +8054,7 @@ describe("settings renderer browser environment", () => {
     const strings = loadSettingsI18nForTest().en;
 
     async function renderSlack({ config, status, secretInfo }) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: { enabled: false, platform: "feishu", idType: "open_id", approverId: "", connectionTimeoutSeconds: 15 },
@@ -8088,7 +8184,7 @@ describe("settings renderer browser environment", () => {
 
   it("accepts a legacy Slack status payload without explicit readiness axes", async () => {
     const strings = loadSettingsI18nForTest().en;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: false, platform: "feishu", idType: "open_id", approverId: "", connectionTimeoutSeconds: 15 },
@@ -8118,7 +8214,7 @@ describe("settings renderer browser environment", () => {
   it("localizes common bot channel and scope failures from Send Test", async () => {
     const strings = loadSettingsI18nForTest().en;
     let testCode = "slack-missing_scope";
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: false, platform: "feishu", idType: "open_id", approverId: "", connectionTimeoutSeconds: 15 },
@@ -8170,7 +8266,7 @@ describe("settings renderer browser environment", () => {
     let deferClear = false;
     let resolveClear = null;
     const updateCalls = [];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: false, platform: "feishu", idType: "open_id", approverId: "", connectionTimeoutSeconds: 15 },
@@ -8332,7 +8428,7 @@ describe("settings renderer browser environment", () => {
     // The brand comes from the saved config (what the user picked), so the
     // snapshot platform must track the case under test.
     async function statusText(state) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: {
@@ -8401,7 +8497,7 @@ describe("settings renderer browser environment", () => {
       { status: "error", code: "invalid-config", message: "Approver id is not configured" },
       { status: "error", code: "disabled", message: "Remote approval is disabled" },
     ];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
         feishuApproval: { enabled: true, platform: "lark", idType: "open_id", approverId: "ou_1", connectionTimeoutSeconds: 15 },
@@ -8449,7 +8545,7 @@ describe("settings renderer browser environment", () => {
   });
 
   it("expands only whitelisted hosts in Feishu/Lark guide links", async () => {
-    const harness = loadTelegramApprovalTabForTest({});
+    const harness = loadPermissionsTabForTest({});
     const probe = [
       // Feishu near-misses
       "[evil](https://open.feishu.cn.evil.com/x)",
@@ -8497,7 +8593,7 @@ describe("settings renderer browser environment", () => {
       ["feishu", "https://open.feishu.cn/", "larksuite.com"],
       ["lark", "https://open.larksuite.com/", "feishu.cn"],
     ]) {
-      const harness = loadTelegramApprovalTabForTest({
+      const harness = loadPermissionsTabForTest({
         snapshot: {
           tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
           feishuApproval: { enabled: false, platform, idType: "open_id", approverId: "", connectionTimeoutSeconds: 15 },
@@ -8524,7 +8620,7 @@ describe("settings renderer browser environment", () => {
 
   it("refreshes Feishu status while long connection is starting", async () => {
     let feishuStatusCalls = 0;
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: false,
@@ -8580,7 +8676,7 @@ describe("settings renderer browser environment", () => {
     const staleStatus = createDeferred();
     const updatedStatus = createDeferred();
     const statusResponses = [staleStatus, updatedStatus];
-    const harness = loadTelegramApprovalTabForTest({
+    const harness = loadPermissionsTabForTest({
       snapshot: {
         tgApproval: {
           enabled: true,
@@ -19974,7 +20070,7 @@ describe("Settings tabs and segmented choice contracts", () => {
     document.body.append(sidebar, content);
     const core = loadSettingsCoreForTest({}, { document });
     let exits = 0;
-    for (const id of ["general", "pet", "notifications", "sessions", "permissions", "telegram-approval", "agents", "remote-ssh", "discord-presence", "theme", "animOverrides", "shortcuts", "recap", "about"]) {
+    for (const id of ["general", "pet", "notifications", "sessions", "permissions", "agents", "remote-ssh", "discord-presence", "theme", "animOverrides", "shortcuts", "recap", "about"]) {
       core.tabs[id] = { render(panel) { const heading = document.createElement("h1"); heading.textContent = id; panel.appendChild(heading); },
         onExit() { exits++; } };
     }
@@ -19986,11 +20082,11 @@ describe("Settings tabs and segmented choice contracts", () => {
     core.ops.requestRender({ sidebar: true, content: true });
     const group = sidebar.children[1];
     assert.equal(group.getAttribute("role"), "tablist");
-    const [general, pet, notifications, sessions, permissions, telegramApproval, agents, remoteSsh, discordPresence, theme, animOverrides, shortcuts, recap, about] = group.querySelectorAll("button");
+    const [general, pet, notifications, sessions, permissions, agents, remoteSsh, discordPresence, theme, animOverrides, shortcuts, recap, about] = group.querySelectorAll("button");
     for (const button of [agents, theme, recap]) {
       assert.ok(button.classList.contains("sidebar-item-group-start"), `${button.dataset.value} starts a group`);
     }
-    for (const button of [general, pet, notifications, sessions, permissions, telegramApproval, remoteSsh, discordPresence, animOverrides, shortcuts, about]) {
+    for (const button of [general, pet, notifications, sessions, permissions, remoteSsh, discordPresence, animOverrides, shortcuts, about]) {
       assert.ok(!button.classList.contains("sidebar-item-group-start"), `${button.dataset.value} does not start a group`);
     }
     general.focus();

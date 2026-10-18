@@ -11,7 +11,6 @@ const SIDEBAR_TABS = [
   { id: "notifications", labelKey: "sidebarNotifications", available: true },
   { id: "sessions", labelKey: "sidebarSessions", available: true },
   { id: "permissions", labelKey: "sidebarPermissions", available: true },
-  { id: "telegram-approval", labelKey: "sidebarTelegramApproval", available: true },
   { id: "agents", labelKey: "sidebarAgents", available: true, groupStart: true },
   { id: "remote-ssh", labelKey: "sidebarRemoteSsh", available: true },
   { id: "discord-presence", labelKey: "sidebarDiscordPresence", available: true },

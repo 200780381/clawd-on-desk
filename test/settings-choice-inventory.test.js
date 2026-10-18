@@ -31,7 +31,7 @@ test("the migrated choice inventory distinguishes navigation from values", () =>
     ["settings-renderer.js", "buildTabs", ["settings-navigation"]],
     ["settings-tab-agents.js", "buildTabs", ["settings-agents"]],
     ["settings-tab-anim-overrides.js", "buildTabs", ["settings-animations"]],
-    ["settings-tab-telegram-approval.js", "buildTabs", ["settings-remote-approval"]],
+    ["settings-tab-permissions.js", "buildTabs", ["settings-permissions"]],
     ["settings-tab-agents.js", "buildSegmentedRadio", ["codex-permission-mode"]],
     ["settings-tab-pet.js", "buildSegmentedRadio", ["roam-movement-style"]],
     ["settings-tab-notifications.js", "buildSegmentedRadio", ["bubble-placement-mode", "bubble-follow-preference", "bubble-fixed-corner"]],

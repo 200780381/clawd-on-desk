@@ -277,12 +277,12 @@ upgrade path.
   revoke-all invalidates both current and previous routing nonces, and a normal
   edit of a profile-isolated profile preserves its runtime mode/key/layout.
 - Upgrade a profile that used the retired Telegram sidecar. Confirm the one-time
-  startup reminder points to Settings -> Remote Approval, saved token/recipient
+  startup reminder points to Settings -> Permissions & approval -> IM channels, saved token/recipient
   values remain, and approval plus completion notifications stay disabled until
   a real native verification callback succeeds. Failure/timeout must not restart
   the retired sidecar.
 - Upgrade the prepared legacy v0.15.0 Feishu/Lark profile. Confirm the legacy setup
-  remains fail-closed, a one-time startup warning points to Remote Approval,
+  remains fail-closed, a one-time startup warning points to Permissions & approval -> IM channels,
   and Doctor reports the binding problem. Re-save the selected platform and
   App ID/App Secret, then re-save the approver; restart and confirm the client
   becomes ready without another warning.

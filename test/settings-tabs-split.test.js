@@ -11,6 +11,9 @@ const I18N = path.join(SRC_DIR, "settings-i18n.js");
 const LANGUAGE_PICKER_JS = path.join(SRC_DIR, "language-picker.js");
 const ANIM_MERGE = path.join(SRC_DIR, "settings-anim-overrides-merge.js");
 const UI_CORE = path.join(SRC_DIR, "settings-ui-core.js");
+const FEISHU_APPROVAL_RECIPIENT = path.join(SRC_DIR, "feishu-approval-recipient.js");
+const TELEGRAM_APPROVAL_TAB = path.join(SRC_DIR, "settings-tab-telegram-approval.js");
+const MOBILE_TAB = path.join(SRC_DIR, "settings-tab-mobile.js");
 const ICONS = path.join(SRC_DIR, "settings-icons.js");
 const RENDERER = path.join(SRC_DIR, "settings-renderer.js");
 const WINDOW_SOURCE = path.join(SRC_DIR, "settings-window.js");
@@ -502,9 +505,36 @@ function createHarness({
     },
     command: (action, payload) => {
       commandCalls.push({ action, payload });
+      if (action === "telegramApproval.status") {
+        return Promise.resolve({ status: "ok", state: { status: "stopped" } });
+      }
+      if (action === "telegramApproval.tokenInfo") {
+        return Promise.resolve({ status: "ok", configured: false, masked: "" });
+      }
+      if (action === "feishuApproval.status") {
+        return Promise.resolve({ status: "ok", state: { status: "stopped", secretsStored: false } });
+      }
+      if (action === "feishuApproval.secretInfo") {
+        return Promise.resolve({ status: "ok", configured: false });
+      }
+      if (action === "slackNotify.status") {
+        return Promise.resolve({ status: "ok", state: { status: "stopped" } });
+      }
+      if (action === "slackNotify.secretInfo") {
+        return Promise.resolve({ status: "ok", configured: false });
+      }
+      if (action === "telegramMigration.snapshot") {
+        return Promise.resolve({
+          status: "ok",
+          snapshot: { state: "", transport: "", revision: 0, testOrigin: "" },
+        });
+      }
       return Promise.resolve({ status: "ok" });
     },
     getPreviewSoundUrl: () => Promise.resolve(null),
+    getMobileConnectionInfo: () => Promise.resolve({
+      status: "ok", port: 23334, token: "test-token", lanIp: "127.0.0.1",
+    }),
     getTextScaleContext: () => Promise.resolve({ percent: 100 }),
     getSizeContext: () => Promise.resolve({ ui: 50, synced: true, overMax: false }),
     getQuotaSourceCount: () => Promise.resolve(1),
@@ -549,6 +579,11 @@ function createHarness({
   for (const file of Object.values(TAB_FILES)) {
     vm.runInContext(fs.readFileSync(path.join(SRC_DIR, file), "utf8"), context);
   }
+  // Remote-approval bodies are loaded separately: they are not part of
+  // TAB_FILES (whose key ownership scan covers only the five split pages).
+  vm.runInContext(fs.readFileSync(FEISHU_APPROVAL_RECIPIENT, "utf8"), context);
+  vm.runInContext(fs.readFileSync(TELEGRAM_APPROVAL_TAB, "utf8"), context);
+  vm.runInContext(fs.readFileSync(MOBILE_TAB, "utf8"), context);
   const core = context.ClawdSettingsCore;
   core.state.snapshot = snapshot || makeSnapshot();
   core.state.activeTab = tab;
@@ -557,6 +592,8 @@ function createHarness({
   context.ClawdSettingsTabNotifications.init(core);
   context.ClawdSettingsTabSessions.init(core);
   context.ClawdSettingsTabPermissions.init(core);
+  context.ClawdSettingsTabTelegramApproval.init(core);
+  context.ClawdSettingsTabMobile.init(core);
 
   let contentRenderCount = 0;
   function render() {
@@ -608,6 +645,22 @@ function activeValue(element) {
   const active = element.querySelectorAll("button")
     .find((button) => button.classList.contains("active"));
   return active ? active.dataset.value : null;
+}
+
+function getSelectedPickerValue(picker) {
+  const selected = picker.querySelectorAll(".language-picker-option")
+    .find((option) => option.classList.contains("selected"));
+  return selected ? selected.dataset.lang : null;
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function findRow(harness, labelKey) {
@@ -687,6 +740,10 @@ describe("settings tab split", () => {
     assert.deepStrictEqual(sectionRowLabels(permissions), [
       ["权限请求处理", "自动处理时暂停破坏性操作"],
       ["Codex 审批处理"],
+    ]);
+    const permissionPills = permissions.content.querySelector(".settings-tabs").querySelectorAll("button");
+    assert.deepStrictEqual(permissionPills.map((button) => button.textContent), [
+      "本机处理", "IM 渠道", "局域网审批",
     ]);
 
     const general = createHarness({
@@ -971,6 +1028,231 @@ describe("settings tab split", () => {
     assert.strictEqual(general.getSwitch("showDock").classList.contains("disabled"), true);
   });
 
+  it("renders the three Permissions sub-pages from the shell and remote module", async () => {
+    const harness = createHarness({
+      tab: "permissions",
+      snapshot: makeSnapshot({ lang: "zh" }),
+    });
+    const visiblePanel = () => harness.content.children.find((child) => (
+      child.getAttribute("role") === "tabpanel" && !child.hidden
+    ));
+    const pills = () => harness.content.querySelector(".settings-tabs").querySelectorAll("button");
+
+    assert.deepStrictEqual(pills().map((button) => button.textContent), [
+      "本机处理", "IM 渠道", "局域网审批",
+    ]);
+    assert.deepStrictEqual(pills().map((button) => button.getAttribute("aria-selected")), [
+      "true", "false", "false",
+    ]);
+    assert.deepStrictEqual(sectionTitles(harness), ["本机怎么处理", "按工具"]);
+
+    pills()[1].click();
+    await harness.settle();
+    const heading = harness.content.children[0];
+    const tabs = harness.content.querySelector(".settings-tabs");
+    const channelsPanel = visiblePanel();
+    assert.strictEqual(channelsPanel.children[0].className, "subtitle");
+    assert.strictEqual(channelsPanel.children[0].textContent,
+      "把本地权限请求路由到远程渠道。密钥不写入 prefs，本地权限气泡仍然保留作为兜底。");
+    assert.deepStrictEqual(channelsPanel.children.slice(1).map((child) => [
+      child.classList.contains("tg-approval-channel-card"),
+      child.classList.contains("feishu-approval-channel-card"),
+      child.classList.contains("slack-notify-channel-card"),
+    ]), [
+      [true, false, false],
+      [false, true, false],
+      [false, false, true],
+    ]);
+    assert.strictEqual(harness.core.runtime.permissionsSubtab, "channels");
+
+    pills()[2].click();
+    await harness.settle();
+    const lanPanel = visiblePanel();
+    assert.strictEqual(lanPanel.children.length, 1);
+    const mobileCard = lanPanel.querySelector(".mobile-channel-card");
+    assert.ok(mobileCard, "the LAN sub-page renders the mobile card");
+    assert.ok(mobileCard.querySelectorAll(".row-label")
+      .some((row) => row.textContent === harness.core.helpers.t("mobileToggle")),
+    "the LAN card contains the controls drawn by settings-tab-mobile.js");
+    assert.strictEqual(harness.core.runtime.permissionsSubtab, "lan");
+
+    pills()[0].click();
+    await harness.settle();
+    assert.deepStrictEqual(sectionTitles(harness), ["本机怎么处理", "按工具"]);
+    assert.strictEqual(harness.core.runtime.permissionsSubtab, "local");
+    assert.strictEqual(harness.content.children[0], heading);
+    assert.strictEqual(harness.content.querySelector(".settings-tabs"), tabs);
+  });
+
+  it("cleans Feishu lookup UI only when leaving IM channels or the tab", async () => {
+    let lookup;
+    const calls = [];
+    const command = (action, payload) => {
+      calls.push({ action, payload });
+      if (action === "telegramApproval.status") {
+        return Promise.resolve({ status: "ok", state: { status: "stopped" } });
+      }
+      if (action === "telegramApproval.tokenInfo") {
+        return Promise.resolve({ status: "ok", configured: false, masked: "" });
+      }
+      if (action === "feishuApproval.status") {
+        return Promise.resolve({ status: "ok", state: {
+          status: "stopped", secretsStored: true, secretsConfigured: true,
+          credentialReady: true, credentialReason: "",
+          configurationReady: false, setupReason: "missing-approver",
+        } });
+      }
+      if (action === "feishuApproval.secretInfo") {
+        return Promise.resolve({
+          status: "ok", configured: true, credentialPlatform: "feishu", appId: "cli_......saved",
+        });
+      }
+      if (action === "feishuApproval.saveApproverByEmail") {
+        lookup = createDeferred();
+        return lookup.promise;
+      }
+      if (action === "feishuApproval.cancelApproverLookup") return Promise.resolve({ status: "ok" });
+      if (action === "slackNotify.status") {
+        return Promise.resolve({ status: "ok", state: { status: "stopped" } });
+      }
+      if (action === "slackNotify.secretInfo") {
+        return Promise.resolve({ status: "ok", configured: false });
+      }
+      if (action === "telegramMigration.snapshot") {
+        return Promise.resolve({
+          status: "ok",
+          snapshot: { state: "", transport: "", revision: 0, testOrigin: "" },
+        });
+      }
+      return Promise.resolve({ status: "ok" });
+    };
+    const harness = createHarness({
+      tab: "permissions",
+      snapshot: makeSnapshot({
+        lang: "en",
+        tgApproval: { enabled: false, allowedTgUserId: "", targetSessionKey: "" },
+        feishuApproval: {
+          enabled: false,
+          platform: "feishu",
+          idType: "open_id",
+          approverId: "",
+          connectionTimeoutSeconds: 15,
+        },
+      }),
+      settingsAPI: { command },
+    });
+    const cancelCount = () => calls.filter((call) => call.action === "feishuApproval.cancelApproverLookup").length;
+    const pill = (labelKey) => harness.content.querySelectorAll("button")
+      .find((button) => button.textContent === harness.core.helpers.t(labelKey));
+    const startLookup = () => {
+      const card = harness.content.querySelector(".feishu-approval-channel-card");
+      const input = card.querySelectorAll("input").at(-1);
+      input.value = "leave@example.com";
+      input.dispatchEvent({ type: "input" });
+      card.querySelectorAll("button")
+        .find((button) => button.textContent === harness.core.helpers.t("feishuApprovalSaveApprover"))
+        .click();
+    };
+
+    pill("permissionsSubtabChannels").click();
+    await harness.settle();
+    startLookup();
+    await harness.settle();
+    assert.ok(lookup, "the lookup is in flight");
+
+    pill("permissionsSubtabLocal").click();
+    await harness.settle();
+    assert.strictEqual(cancelCount(), 1);
+
+    pill("permissionsSubtabLan").click();
+    await harness.settle();
+    assert.strictEqual(cancelCount(), 1, "local to LAN does not clean up again");
+
+    pill("permissionsSubtabChannels").click();
+    await harness.settle();
+    startLookup();
+    await harness.settle();
+    pill("permissionsSubtabLocal").click();
+    await harness.settle();
+    assert.strictEqual(cancelCount(), 2);
+
+    pill("permissionsSubtabChannels").click();
+    await harness.settle();
+    startLookup();
+    await harness.settle();
+    harness.core.tabs.permissions.onExit();
+    assert.strictEqual(cancelCount(), 3, "leaving the tab also cancels the lookup");
+  });
+
+  it("only repaints remote channel status while the IM or LAN body is visible", async () => {
+    const harness = createHarness({ tab: "permissions", snapshot: makeSnapshot() });
+    const pills = () => harness.content.querySelector(".settings-tabs").querySelectorAll("button");
+
+    pills()[1].click();
+    await harness.settle();
+    pills()[0].click();
+    await harness.settle();
+    let baseline = harness.renderCount();
+
+    harness.core.tabs.permissions.refreshRuntimeStatus({ channel: "telegram" });
+    await harness.settle();
+    assert.strictEqual(harness.renderCount(), baseline, "local sub-page does not repaint");
+
+    pills()[1].click();
+    await harness.settle();
+    baseline = harness.renderCount();
+    harness.core.state.activeTab = "general";
+    harness.core.tabs.permissions.refreshRuntimeStatus({ channel: "telegram" });
+    await harness.settle();
+    assert.strictEqual(harness.renderCount(), baseline, "another tab does not repaint");
+
+    harness.core.state.activeTab = "permissions";
+    harness.core.tabs.permissions.refreshRuntimeStatus({ channel: "telegram" });
+    await harness.settle();
+    assert.strictEqual(harness.renderCount(), baseline + 1, "visible IM channels repaint once");
+  });
+
+  it("routes local and remote in-place patches to their owning module", async () => {
+    const harness = createHarness({ tab: "permissions", snapshot: makeSnapshot() });
+    const local = harness.core.state.mountedControls.permissionAutomationMode;
+    harness.apply("permissionAutomationMode", "auto-tools");
+    assert.strictEqual(local.element, harness.core.state.mountedControls.permissionAutomationMode.element);
+    assert.strictEqual(activeValue(local.element), "auto-tools");
+
+    const pills = () => harness.content.querySelector(".settings-tabs").querySelectorAll("button");
+    pills()[1].click();
+    await harness.settle();
+    const select = harness.content.querySelector(".feishu-approval-timeout-select");
+    assert.strictEqual(getSelectedPickerValue(select), "15");
+
+    const previousSnapshot = harness.core.state.snapshot;
+    const nextSnapshot = {
+      ...previousSnapshot,
+      feishuApproval: { ...previousSnapshot.feishuApproval, connectionTimeoutSeconds: 30 },
+    };
+    harness.core.state.snapshot = nextSnapshot;
+    assert.strictEqual(harness.core.tabs.permissions.patchInPlace(
+      { feishuApproval: nextSnapshot.feishuApproval },
+      { previousSnapshot, snapshot: nextSnapshot },
+    ), true);
+    assert.strictEqual(harness.content.querySelector(".feishu-approval-timeout-select"), select);
+    assert.strictEqual(getSelectedPickerValue(select), "30");
+
+    const otherFieldSnapshot = {
+      ...nextSnapshot,
+      feishuApproval: { ...nextSnapshot.feishuApproval, enabled: true },
+    };
+    assert.strictEqual(harness.core.tabs.permissions.patchInPlace(
+      { feishuApproval: otherFieldSnapshot.feishuApproval },
+      { previousSnapshot: nextSnapshot, snapshot: otherFieldSnapshot },
+    ), false, "the context is forwarded unchanged to the remote module");
+
+    assert.strictEqual(harness.core.tabs.permissions.patchInPlace(
+      { textScale: 1.1 },
+      { previousSnapshot, snapshot: { ...nextSnapshot, textScale: 1.1 } },
+    ), false);
+  });
+
   it("keeps the sidebar, deep-link whitelist, and icons in sync", () => {
     const rendererSource = fs.readFileSync(RENDERER, "utf8");
     const sidebarMatch = rendererSource.match(/const SIDEBAR_TABS = \[([\s\S]*?)\n\];/);
@@ -988,7 +1270,6 @@ describe("settings tab split", () => {
       "notifications",
       "sessions",
       "permissions",
-      "telegram-approval",
       "agents",
       "remote-ssh",
       "discord-presence",
@@ -1072,6 +1353,21 @@ describe("settings tab split", () => {
     unknown.state.activeTab = "general";
     assert.strictEqual(unknown.ops.restoreNavigationState(), true);
     assert.strictEqual(unknown.state.activeTab, "general");
+
+    const legacy = loadCore(JSON.stringify({ activeTab: "telegram-approval", scrollPositions: {} }));
+    legacy.tabs.general = {};
+    legacy.tabs.permissions = {};
+    assert.strictEqual(legacy.ops.restoreNavigationState(), true);
+    assert.strictEqual(legacy.state.activeTab, "permissions");
+    assert.strictEqual(legacy.runtime.persistedSettingsTab, "permissions");
+    assert.strictEqual(legacy.runtime.permissionsSubtab, "channels");
+
+    const permissions = loadCore(JSON.stringify({ activeTab: "permissions", scrollPositions: {} }));
+    permissions.tabs.permissions = {};
+    permissions.state.activeTab = "general";
+    assert.strictEqual(permissions.ops.restoreNavigationState(), true);
+    assert.strictEqual(permissions.state.activeTab, "permissions");
+    assert.strictEqual(permissions.runtime.permissionsSubtab, "local");
   });
 
   it("wires the deep-link receiver for sessions and recap only", () => {
@@ -1128,7 +1424,12 @@ describe("settings tab split", () => {
       const document = {
         title: "",
         getElementById: () => null,
-        createElement: (tagName) => new FakeElement(tagName),
+    createElement: (tagName) => new FakeElement(tagName),
+    createTextNode: (value) => {
+      const node = new FakeElement("#text");
+      node.textContent = String(value || "");
+      return node;
+    },
       };
       vm.runInNewContext(slice, {
         ClawdSettingsCore: core,

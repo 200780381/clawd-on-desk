@@ -177,7 +177,7 @@ deletes those settings and never falls back to the retired runtime.
 
 Clawd can also mirror permission bubbles to a Feishu (China) or Lark
 (International) self-built app as an interactive card. Pick the platform in
-**Settings → Remote Approval → Feishu / Lark**; both are the same channel, so
+**Settings → Permissions & approval → IM channels → Feishu / Lark**; both are the same channel, so
 existing Feishu users keep their credentials and stay on Feishu by default. See
 [feishu-lark-remote-approval.md](feishu-lark-remote-approval.md) for the
 platform choice, permission scope, `open_id` / `union_id` / `user_id`
@@ -189,7 +189,7 @@ Unlike the two channels above, Slack is **notification-only**: Clawd posts when
 a session finishes, errors out, or is waiting for permission, but the decision
 is always made in the desktop app — Slack cannot Allow or Deny in this version.
 Set it up with an Incoming Webhook (recommended) or an `xoxb-` bot token with
-the `chat:write` scope under **Settings → Remote Approval → Slack**.
+the `chat:write` scope under **Settings → Permissions & approval → IM channels → Slack**.
 
 Messages go to a Slack channel and can include the session title (derived from
 your prompt), folder name, and host name, so a **private channel is
