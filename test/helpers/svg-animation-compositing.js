@@ -19,16 +19,26 @@
 const { parseDocument } = require("htmlparser2");
 
 const RULES = Object.freeze({
-  R1: Object.freeze({ id: "keyframes-property", hint: "Only animate transform, translate, rotate, scale, or opacity inside @keyframes. For a color flash, stack two layers and animate only the top layer's opacity. Replace visibility with opacity plus steps()." }),
-  R2: Object.freeze({ id: "use-translation-transform", hint: "Keep the animated <g> outside and put the offset on an inner static <g transform=\"translate(x,y)\">: outer animated <g> -> inner <g transform> -> content. Do not animate transform on a <use> that also carries x/y." }),
+  R1: Object.freeze({ id: "keyframes-property", hint: "Only animate transform or opacity inside @keyframes. Chromium does not composite the independent translate, rotate, or scale properties on SVG targets. filter/backdrop-filter stay disallowed by project policy (stricter than Chromium). For a color flash, stack two layers and animate only the top layer's opacity. Replace visibility with opacity plus steps()." }),
+  R2: Object.freeze({ id: "use-translation-transform", hint: "Keep the animated <g> outside and put the offset on an inner static <g transform=\"translate(x,y)\">: outer animated <g> -> inner <g transform> -> content. Do not animate transform on a <use> that also carries x/y, whether x/y comes from attributes or CSS." }),
   R3: Object.freeze({ id: "animated-use-target", hint: "Move the animation onto the <use> element itself (then R2 applies) or inline-clone the referenced content instead of animating the definition." }),
   R4: Object.freeze({ id: "smil-animation", hint: "Replace SMIL with CSS @keyframes that only animate transform/opacity so the compositor can take over." }),
   R5: Object.freeze({ id: "nested-svg", hint: "Flatten the inner <svg> into a <g> with a transform so the root document owns a single animation tree." }),
 });
 
-const COMPOSITED_PROPERTIES = new Set(["transform", "translate", "rotate", "scale", "opacity"]);
+// Chromium 146 compositor_animations.cc treats SVG targets with independent
+// translate/rotate/scale as non-composited (kSVGTargetHasIndependentTransformProperty).
+// filter/backdrop-filter are candidates in Chromium but deliberately excluded
+// here as a project policy, so this allowlist is stricter than the browser.
+const COMPOSITED_PROPERTIES = new Set(["transform", "opacity"]);
+const KEYFRAME_METADATA_PROPERTIES = new Set(["animation-timing-function", "animation-composition"]);
 const TRANSFORM_PROPERTIES = new Set(["transform", "translate", "rotate", "scale"]);
 const SMIL_TAGS = new Set(["animate", "animatetransform", "animatemotion", "set"]);
+const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "unset", "revert", "revert-layer"]);
+const PROPERTY_ALIASES = new Map([
+  ["-webkit-animation", "animation"],
+  ["-webkit-animation-name", "animation-name"],
+]);
 
 const SHORTHAND_KEYWORDS = new Set([
   "infinite",
@@ -53,7 +63,7 @@ const SHORTHAND_KEYWORDS = new Set([
 
 const TIME_VALUE_RE = /^[+-]?(?:\d+|\d*\.\d+)(?:ms|s)$/i;
 const NUMBER_RE = /^[+-]?(?:\d+|\d*\.\d+)$/;
-const FUNCTION_RE = /^(?:steps|cubic-bezier|var)\(/i;
+const FUNCTION_TOKEN_RE = /^[A-Za-z_-][\w-]*\(/;
 const COMPOUND_TOKEN_RE = /[A-Za-z_][\w-]*|\.[A-Za-z_][\w-]*|#[A-Za-z_][\w-]*/g;
 const COMPOUND_RE = /^(?:[A-Za-z_][\w-]*|\.[A-Za-z_][\w-]*|#[A-Za-z_][\w-]*)+$/;
 
@@ -162,11 +172,14 @@ function splitTokens(value) {
 
 function parseDeclarations(block) {
   const declarations = [];
-  for (const chunk of splitTopLevel(block, ";")) {
+  for (const chunk of splitTopLevel(stripCssComments(block), ";")) {
     const colon = chunk.indexOf(":");
     if (colon < 0) continue;
-    const property = chunk.slice(0, colon).trim().toLowerCase();
-    const value = chunk.slice(colon + 1).trim();
+    const rawProperty = chunk.slice(0, colon).trim().toLowerCase();
+    const property = PROPERTY_ALIASES.get(rawProperty) || rawProperty;
+    const value = chunk.slice(colon + 1)
+      .replace(/\s*!important\s*$/i, "")
+      .trim();
     if (!property || !value) continue;
     declarations.push({ property, value });
   }
@@ -188,7 +201,7 @@ function animationNameFromShorthand(part) {
     if (TIME_VALUE_RE.test(lower)) continue;
     if (NUMBER_RE.test(lower)) continue;
     if (SHORTHAND_KEYWORDS.has(lower)) continue;
-    if (FUNCTION_RE.test(lower)) continue;
+    if (FUNCTION_TOKEN_RE.test(token)) continue;
     if (lower.startsWith("!")) continue;
     if (lower === "") continue;
     return unquote(token);
@@ -199,9 +212,14 @@ function animationNameFromShorthand(part) {
 function analyzeAnimationDeclaration(declaration) {
   const names = [];
   const unresolved = [];
+  const value = declaration.value.trim();
+
+  if (CSS_WIDE_KEYWORDS.has(value.toLowerCase())) {
+    return { names, unresolved, unsupportedValue: value };
+  }
 
   if (declaration.property === "animation") {
-    for (const part of splitTopLevel(declaration.value, ",")) {
+    for (const part of splitTopLevel(value, ",")) {
       const name = animationNameFromShorthand(part);
       if (name) {
         names.push(name);
@@ -210,7 +228,7 @@ function analyzeAnimationDeclaration(declaration) {
       }
     }
   } else if (declaration.property === "animation-name") {
-    for (const part of splitTopLevel(declaration.value, ",")) {
+    for (const part of splitTopLevel(value, ",")) {
       const name = unquote(part);
       if (!name || name.toLowerCase() === "none") continue;
       if (/var\(/i.test(name)) unresolved.push(name);
@@ -218,7 +236,7 @@ function analyzeAnimationDeclaration(declaration) {
     }
   }
 
-  return { names, unresolved };
+  return { names, unresolved, unsupportedValue: null };
 }
 
 function findMatchingBrace(text, openIndex) {
@@ -258,6 +276,33 @@ function parseKeyframeProperties(block) {
   return properties;
 }
 
+function registerKeyframe(keyframes, name, properties) {
+  const existing = keyframes.get(name);
+  if (existing) {
+    // Duplicate @keyframes definitions (for example inside an ignored
+    // @media block) are merged. Unioning properties is the conservative
+    // choice: a later definition must not erase a real violation.
+    for (const property of properties) existing.properties.add(property);
+    return;
+  }
+  keyframes.set(name, { name, properties: new Set(properties) });
+}
+
+function containsBraceOutsideQuotes(text) {
+  let quote = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") i += 1;
+      else if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "\"" || ch === "'") quote = ch;
+    else if (ch === "{") return true;
+  }
+  return false;
+}
+
 function parseCss(cssText) {
   const css = stripCssComments(cssText);
   const rules = [];
@@ -282,13 +327,15 @@ function parseCss(cssText) {
       const keyframesMatch = prelude.match(/^@(?:-\w+-)?keyframes\s+(.+)$/i);
       if (keyframesMatch) {
         const name = unquote(keyframesMatch[1].trim());
-        keyframes.set(name, { name, properties: parseKeyframeProperties(block) });
+        registerKeyframe(keyframes, name, parseKeyframeProperties(block));
       } else {
         const atName = (prelude.match(/^@([\w-]+)/) || [])[1];
         if (atName && NESTED_RULE_AT_RULES.has(atName.toLowerCase())) {
           const nested = parseCss(block);
           rules.push(...nested.rules);
-          for (const [name, keyframe] of nested.keyframes) keyframes.set(name, keyframe);
+          for (const [name, keyframe] of nested.keyframes) {
+            registerKeyframe(keyframes, name, keyframe.properties);
+          }
           unsupported.push(...nested.unsupported);
         }
       }
@@ -300,7 +347,20 @@ function parseCss(cssText) {
     if (open < 0) break;
     const selectorText = css.slice(i, open).trim();
     const close = findMatchingBrace(css, open);
-    const declarations = parseDeclarations(css.slice(open + 1, close));
+    const ruleBlock = css.slice(open + 1, close);
+
+    if (containsBraceOutsideQuotes(ruleBlock)) {
+      unsupported.push({
+        type: "unsupported-nesting",
+        selector: selectorText,
+        reason: "CSS nesting is not modeled; this rule was skipped.",
+        hint: "Flatten the nested rule or move the animation to a top-level rule.",
+      });
+      i = close + 1;
+      continue;
+    }
+
+    const declarations = parseDeclarations(ruleBlock);
     const selectorParts = splitTopLevel(selectorText, ",");
     const subjects = [];
 
@@ -424,22 +484,37 @@ function collectAnimationsByElement(elements, rules, keyframes, notes) {
     names.add(name);
   };
 
-  const addUnresolvedNote = (element, selector, value) => {
-    const key = `${selector || ""}\u0000${describeElement(element)}\u0000${value}`;
+  const addNote = (element, selector, note) => {
+    const key = `${note.type}\u0000${selector || ""}\u0000${describeElement(element)}\u0000${note.value || ""}`;
     if (seenNotes.has(key)) return;
     seenNotes.add(key);
     notes.push({
-      type: "unresolved-animation-name",
+      ...note,
       selector: selector || null,
       element: describeElement(element),
-      value,
     });
   };
 
   const applyDeclaration = (element, declaration, selector) => {
-    const { names, unresolved } = analyzeAnimationDeclaration(declaration);
+    const { names, unresolved, unsupportedValue } = analyzeAnimationDeclaration(declaration);
     for (const name of names) add(element, name);
-    for (const value of unresolved) addUnresolvedNote(element, selector, value);
+
+    if (unsupportedValue) {
+      addNote(element, selector, {
+        type: "unsupported-animation-value",
+        value: unsupportedValue,
+        reason: "CSS-wide keywords may inherit an animation from an ancestor; inheritance is not modeled.",
+        hint: "Use an explicit animation or animation-name list on the element.",
+      });
+    }
+    for (const value of unresolved) {
+      addNote(element, selector, {
+        type: "unresolved-animation-name",
+        value,
+        reason: "The animation name is a var() expression, so the audit cannot resolve it.",
+        hint: "Use an explicit animation name, or extend the audit if this syntax is intended.",
+      });
+    }
   };
 
   for (const rule of rules) {
@@ -476,6 +551,7 @@ function addKeyframeViolations(keyframes, animationsByElement, violations) {
 
   for (const [name, keyframe] of keyframes) {
     for (const property of keyframe.properties) {
+      if (KEYFRAME_METADATA_PROPERTIES.has(property)) continue;
       if (COMPOSITED_PROPERTIES.has(property)) continue;
       const users = usersByAnimation.get(name) || [];
       violations.push({
@@ -490,12 +566,47 @@ function addKeyframeViolations(keyframes, animationsByElement, violations) {
   }
 }
 
-function addUseTranslationViolations(elements, animationsByElement, keyframes, violations) {
+function offsetValueIsNonZero(value) {
+  const text = String(value).trim();
+  if (!text) return false;
+  const numeric = Number.parseFloat(text);
+  // Non-numeric but present values (3%, calc(...), var(...)) are treated as
+  // non-zero on purpose: conservative, never hides a real AdditionalTranslation.
+  return !Number.isFinite(numeric) || numeric !== 0;
+}
+
+function collectUseOffsets(element, rules) {
+  const offsets = [];
+  const attribs = element.node.attribs || {};
+  for (const axis of ["x", "y"]) {
+    if (attribs[axis] !== undefined) offsets.push(attribs[axis]);
+  }
+
+  const inline = attribs.style;
+  if (inline) {
+    for (const declaration of parseDeclarations(inline)) {
+      if (declaration.property === "x" || declaration.property === "y") {
+        offsets.push(declaration.value);
+      }
+    }
+  }
+
+  for (const rule of rules) {
+    if (!rule.subjects.some((subject) => matchesSubject(element, subject))) continue;
+    for (const declaration of rule.declarations) {
+      if (declaration.property === "x" || declaration.property === "y") {
+        offsets.push(declaration.value);
+      }
+    }
+  }
+
+  return offsets;
+}
+
+function addUseTranslationViolations(elements, rules, animationsByElement, keyframes, violations) {
   for (const element of elements) {
     if (element.name !== "use") continue;
-    const x = Number.parseFloat(element.node.attribs.x || "0");
-    const y = Number.parseFloat(element.node.attribs.y || "0");
-    if (!x && !y) continue;
+    if (!collectUseOffsets(element, rules).some(offsetValueIsNonZero)) continue;
 
     const names = animationsByElement.get(element);
     if (!names) continue;
@@ -509,14 +620,14 @@ function addUseTranslationViolations(elements, animationsByElement, keyframes, v
           element: describeElement(element),
           animation: name,
           property,
-          message: `<use> has non-zero x/y and also animates "${property}" via "${name}". ${RULES.R2.hint}`,
+          message: `<use> has a non-zero x/y offset (attribute or CSS) and also animates "${property}" via "${name}". ${RULES.R2.hint}`,
         });
       }
     }
   }
 }
 
-function addAnimatedUseTargetViolations(elements, animationsByElement, keyframes, violations) {
+function addAnimatedUseTargetViolations(elements, animationsByElement, keyframes, violations, notes) {
   const byId = new Map();
   const byNode = new Map();
   for (const element of elements) {
@@ -524,6 +635,22 @@ function addAnimatedUseTargetViolations(elements, animationsByElement, keyframes
     if (element.id) byId.set(element.id, element);
   }
   const seen = new Set();
+  const seenNotes = new Set();
+
+  const addUnresolvedTargetNote = (element, href, reason) => {
+    const elementDescription = describeElement(element);
+    const key = `${elementDescription}\u0000${href}`;
+    if (seenNotes.has(key)) return;
+    seenNotes.add(key);
+    notes.push({
+      type: "unresolved-use-target",
+      selector: null,
+      element: elementDescription,
+      href,
+      reason,
+      hint: "Point href at an existing local id, or extend the audit if this reference form should be modeled.",
+    });
+  };
 
   const collectSubtree = (root) => {
     const out = [root];
@@ -543,8 +670,20 @@ function addAnimatedUseTargetViolations(elements, animationsByElement, keyframes
     if (element.name !== "use") continue;
     const href = element.node.attribs.href || element.node.attribs["xlink:href"];
     if (!href || !href.trim().startsWith("#")) continue;
-    const target = byId.get(href.trim().slice(1));
-    if (!target) continue;
+
+    let fragment;
+    try {
+      fragment = decodeURIComponent(href.trim().slice(1));
+    } catch {
+      addUnresolvedTargetNote(element, href, "The href fragment has malformed percent-encoding.");
+      continue;
+    }
+
+    const target = byId.get(fragment);
+    if (!target) {
+      addUnresolvedTargetNote(element, href, `No element with id "${fragment}" exists.`);
+      continue;
+    }
 
     for (const node of collectSubtree(target)) {
       const names = animationsByElement.get(node);
@@ -614,7 +753,7 @@ function addNestedSvgViolations(document, violations) {
  * @returns {{
  *   animations: Array<{element: string, name: string, properties: string[]}>,
  *   violations: Array<{rule: string, id: string, element: string, animation: string|null, property: string|null, message: string}>,
- *   notes: Array<{type: string, selector: string|null, reason?: string, element?: string, value?: string}>
+ *   notes: Array<{type: string, selector: string|null, reason?: string, hint?: string, element?: string, value?: string, href?: string}>
  * }}
  */
 function auditSvgCompositing(markup) {
@@ -637,8 +776,8 @@ function auditSvgCompositing(markup) {
 
   const violations = [];
   addKeyframeViolations(css.keyframes, animationsByElement, violations);
-  addUseTranslationViolations(elements, animationsByElement, css.keyframes, violations);
-  addAnimatedUseTargetViolations(elements, animationsByElement, css.keyframes, violations);
+  addUseTranslationViolations(elements, css.rules, animationsByElement, css.keyframes, violations);
+  addAnimatedUseTargetViolations(elements, animationsByElement, css.keyframes, violations, css.unsupported);
   addSmilViolations(elements, violations);
   addNestedSvgViolations(document, violations);
 

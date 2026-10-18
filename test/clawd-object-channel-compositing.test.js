@@ -40,8 +40,16 @@ function formatNote(file, note) {
   if (note.type === "unsupported-selector") {
     return `${file}: [note ${note.type}] "${note.selector}" — ${note.reason}`;
   }
+  const value = note.value || note.href || "";
   return `${file}: [note ${note.type}] ${note.element || "(unknown element)"}`
-    + ` — value "${note.value}"`;
+    + ` — value "${value}"${note.reason ? `; ${note.reason}` : ""}`;
+}
+
+function assertR2Move(result) {
+  const violations = violationsOf(result, RULES.R2.id);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].animation, "move");
+  assert.equal(violations[0].property, "transform");
 }
 
 // ---------------------------------------------------------------------------
@@ -87,19 +95,34 @@ test("R1 rejects every non-allowlisted property, not just colors", () => {
   }
 });
 
-test("R1 accepts transform, translate, rotate, scale, and opacity", () => {
+test("R1 accepts only transform and opacity", () => {
   const result = audit(svg(`
     <style>
       .bit { animation: move 1s infinite; }
       @keyframes move {
-        0% { transform: translateX(0); translate: 0 0; rotate: 0deg; scale: 1; opacity: 0; }
-        100% { transform: translateX(2px); translate: 0 -1px; rotate: 4deg; scale: 1.1; opacity: 1; }
+        0% { transform: translateX(0); opacity: 0; }
+        100% { transform: translateX(2px); opacity: 1; }
       }
     </style>
     <rect class="bit"/>
   `));
 
   assert.deepEqual(result.violations, []);
+});
+
+test("R1 rejects independent translate, rotate, and scale on SVG targets", () => {
+  for (const property of ["translate", "rotate", "scale"]) {
+    const result = audit(svg(`
+      <style>
+        .bit { animation: move 1s infinite; }
+        @keyframes move { to { ${property}: 1; } }
+      </style>
+      <rect class="bit"/>
+    `));
+    const violations = violationsOf(result, RULES.R1.id);
+    assert.equal(violations.length, 1, `${property} should be rejected`);
+    assert.equal(violations[0].property, property);
+  }
 });
 
 test("R1 sees the same bad stylesheet wrapped in CDATA", () => {
@@ -115,6 +138,56 @@ test("R1 sees the same bad stylesheet wrapped in CDATA", () => {
     assert.equal(violations.length, 1, `${kind} should report R1`);
     assert.equal(violations[0].property, "fill", `${kind} should see the fill property`);
   }
+});
+
+test("duplicate @keyframes merge properties instead of overriding", () => {
+  const result = audit(svg(`
+    <style>
+      rect { animation: k 1s infinite; }
+      @keyframes k { to { fill: red; } }
+      @media not all {
+        @keyframes k { to { opacity: 0; } }
+      }
+    </style>
+    <rect width="4" height="4"/>
+  `));
+
+  const violations = violationsOf(result, RULES.R1.id);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].property, "fill");
+});
+
+test("keyframe metadata is not treated as an animated property", () => {
+  const metadataOnly = audit(svg(`
+    <style>
+      .bit { animation: move 1s infinite; }
+      @keyframes move {
+        to {
+          animation-timing-function: steps(2, end);
+          animation-composition: add;
+          transform: translateX(1px);
+        }
+      }
+    </style>
+    <rect class="bit"/>
+  `));
+  assert.deepEqual(violationsOf(metadataOnly, RULES.R1.id), []);
+
+  const withFill = audit(svg(`
+    <style>
+      .bit { animation: move 1s infinite; }
+      @keyframes move {
+        to {
+          animation-timing-function: steps(2, end);
+          fill: red;
+        }
+      }
+    </style>
+    <rect class="bit"/>
+  `));
+  const violations = violationsOf(withFill, RULES.R1.id);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].property, "fill");
 });
 
 test("R2 flags transform animation on a <use> that carries x/y", () => {
@@ -173,6 +246,80 @@ test("R2 ignores an explicit zero x/y", () => {
   assert.equal(violationsOf(result, RULES.R2.id).length, 0);
 });
 
+const ANIMATION_KEYFRAMES = `
+  @keyframes fade { to { opacity: 0.5; } }
+  @keyframes move { to { transform: translateX(10px); } }
+`;
+
+function auditUseWithRule(rule) {
+  return audit(svg(`
+    <style>
+      ${rule}
+      ${ANIMATION_KEYFRAMES}
+    </style>
+    <defs><path id="p" d="M0 0H4V4H0Z"/></defs>
+    <use href="#p" x="3" class="u"/>
+  `));
+}
+
+test("declaration normalization: !important in an animation-name list", () => {
+  const result = auditUseWithRule(`
+    .u {
+      animation-name: fade, move !important;
+      animation-duration: 1s;
+      animation-iteration-count: infinite;
+    }
+  `);
+  assertR2Move(result);
+});
+
+test("declaration normalization: !important attached to a shorthand name", () => {
+  assertR2Move(auditUseWithRule(".u { animation: 1s infinite move!important; }"));
+});
+
+test("declaration normalization: comments inside an inline style", () => {
+  const result = audit(svg(`
+    <style>${ANIMATION_KEYFRAMES}</style>
+    <defs><path id="p" d="M0 0H4V4H0Z"/></defs>
+    <use href="#p" x="3" style="animation:/* note */move 1s infinite"/>
+  `));
+  assertR2Move(result);
+});
+
+test("declaration normalization: an arbitrary function token is skipped", () => {
+  assertR2Move(auditUseWithRule(".u { animation: 1s linear(0, 1) move infinite; }"));
+});
+
+test("declaration normalization: calc() is skipped", () => {
+  assertR2Move(auditUseWithRule(".u { animation: calc(1s) move infinite; }"));
+});
+
+test("declaration normalization: -webkit-animation is an alias", () => {
+  assertR2Move(auditUseWithRule(".u { -webkit-animation: move 1s infinite; }"));
+});
+
+test("R2 reads x/y from inline style", () => {
+  const result = audit(svg(`
+    <style>${ANIMATION_KEYFRAMES}</style>
+    <defs><path id="p" d="M0 0H4V4H0Z"/></defs>
+    <use href="#p" style="x:3px;animation:move 1s infinite"/>
+  `));
+  assertR2Move(result);
+});
+
+test("R2 reads x/y from a matching style rule", () => {
+  const result = audit(svg(`
+    <style>
+      .b { x: 3px; }
+      .u { animation: move 1s infinite; }
+      ${ANIMATION_KEYFRAMES}
+    </style>
+    <defs><path id="p" d="M0 0H4V4H0Z"/></defs>
+    <use href="#p" class="b u"/>
+  `));
+  assertR2Move(result);
+});
+
 test("R3 flags animation on a referenced element or its descendants", () => {
   const result = audit(svg(`
     <style>
@@ -207,6 +354,32 @@ test("R3 also follows xlink:href references", () => {
   `));
 
   assert.equal(violationsOf(result, RULES.R3.id).length, 1);
+});
+
+test("R3 decodes URL-encoded href fragments before looking up ids", () => {
+  const result = audit(svg(`
+    <style>@keyframes fade { to { opacity: 0; } }</style>
+    <defs>
+      <rect id="packet" width="4" height="4" style="animation:fade 1s infinite"/>
+    </defs>
+    <use href="#%70acket"/>
+  `));
+
+  const violations = violationsOf(result, RULES.R3.id);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].element, "rect#packet");
+});
+
+test("R3 notes href fragments that cannot be resolved", () => {
+  const result = audit(svg(`
+    <use href="#missing"/>
+    <use href="#%E0%A4%A"/>
+  `));
+
+  const notes = result.notes.filter((note) => note.type === "unresolved-use-target");
+  assert.equal(notes.length, 2);
+  assert.deepEqual(notes.map((note) => note.href).sort(), ["#%E0%A4%A", "#missing"]);
+  assert.ok(notes.every((note) => note.reason && note.hint));
 });
 
 test("R3 allows a static <use> target", () => {
@@ -359,6 +532,43 @@ test("a shorthand whose name is only var() leaves an unresolved note", () => {
   assert.equal(notes[0].selector, ".pulse");
   assert.equal(notes[0].element, "rect.pulse");
   assert.match(notes[0].value, /var\(--anim\)/);
+  assert.match(notes[0].reason, /var\(\)/);
+  assert.match(notes[0].hint, /explicit animation name/);
+});
+
+test("CSS-wide animation values leave an unsupported-animation-value note", () => {
+  for (const keyword of ["inherit", "initial", "unset", "revert", "revert-layer"]) {
+    const result = audit(svg(`
+      <style>.pulse { animation: ${keyword}; }</style>
+      <rect class="pulse"/>
+    `));
+    const notes = result.notes.filter((note) => note.type === "unsupported-animation-value");
+    assert.equal(notes.length, 1, `${keyword} should leave a note`);
+    assert.equal(notes[0].selector, ".pulse");
+    assert.equal(notes[0].value, keyword);
+    assert.match(notes[0].reason, /inherit/);
+    assert.ok(notes[0].hint);
+  }
+});
+
+test("CSS nesting leaves a note and skips the containing rule", () => {
+  const result = audit(svg(`
+    <style>
+      @keyframes fade { to { opacity: 0; } }
+      .a {
+        animation: fade 1s infinite;
+        .b { animation: fade 1s infinite; }
+      }
+    </style>
+    <rect class="a"/>
+  `));
+
+  assert.deepEqual(result.animations, []);
+  const notes = result.notes.filter((note) => note.type === "unsupported-nesting");
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].selector, ".a");
+  assert.match(notes[0].reason, /nesting/i);
+  assert.ok(notes[0].hint);
 });
 
 test("unsupported selectors are reported instead of silently skipped", () => {
