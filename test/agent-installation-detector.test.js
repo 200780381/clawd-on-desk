@@ -118,6 +118,38 @@ afterEach(() => {
 });
 
 describe("agent installation detector", () => {
+  it("detects CN product settings even when international residue is Clawd-only", () => {
+    const homeDir = makeHome();
+    mkdirp(path.join(homeDir, ".qoder"));
+    registerQoderHooks({ homeDir, env: {}, silent: true, nodeBin: process.execPath });
+    const cnPath = path.join(homeDir, ".qoder-cn", "settings.json");
+    writeJson(cnPath, { language: "zh-CN" });
+    registerQoderHooks({ homeDir, env: {}, silent: true, nodeBin: process.execPath });
+    let entry = byId(detectAgentInstallations({ homeDir, env: {} }), "qoder");
+    assert.strictEqual(entry.detectedInstalled, true);
+    assert.ok(entry.detail.includes(cnPath));
+    assert.strictEqual(entry.clawdIntegration.detected, true);
+
+    writeJson(cnPath, {});
+    registerQoderHooks({ homeDir, env: {}, silent: true, nodeBin: process.execPath });
+    entry = byId(detectAgentInstallations({ homeDir, env: {} }), "qoder");
+    assert.strictEqual(entry.detectedInstalled, null);
+    assert.strictEqual(entry.clawdIntegration.detected, true);
+  });
+
+  it("uses QODERCN_CONFIG_DIR for both CN product and hook detection", () => {
+    const homeDir = makeHome();
+    const cnDir = path.join(homeDir, "custom-cn");
+    const env = { QODERCN_CONFIG_DIR: cnDir };
+    writeJson(path.join(cnDir, "settings.json"), { language: "zh-CN" });
+    registerQoderHooks({ homeDir, env, silent: true, nodeBin: process.execPath });
+    const entry = byId(detectAgentInstallations({ homeDir, env }), "qoder");
+    assert.strictEqual(entry.detectedInstalled, true);
+    assert.strictEqual(entry.clawdIntegration.detected, true);
+    assert.strictEqual(entry.clawdIntegration.paths.configPath, path.join(cnDir, "settings.json"));
+    assert.strictEqual(fs.existsSync(path.join(homeDir, ".qoder-cn")), false);
+  });
+
   // #895 T11a/T11b: only Claude is skipped. Its parent dir is created by Clawd's
   // own default sync, so ~/.claude proves nothing; ~/.codex is never created by
   // Clawd, so it stays real evidence and Codex must be reported like any other

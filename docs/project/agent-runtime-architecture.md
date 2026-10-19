@@ -294,6 +294,10 @@ WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
 
   WorkBuddy's native `Notification` subtypes `idle_prompt` and `auth_success` are acknowledged with `{}` locally, before process resolution or HTTP delivery. `idle_prompt` is a "send another message" reminder, observed on 5.2.6 about 60 seconds after Stop (5.6.2's per-turn host exits before it can fire, so it was not observed there); `auth_success` is the login-success toast, emitted by 5.6.2 at the start of every turn. Forwarding either would create or settle a session — a phantom idle row before the first UserPromptSubmit, or knocking a running turn back to idle. Permission, elicitation, needs-input, unknown and untyped notifications retain their existing behavior. This does not change SessionEnd/process-exit handling or resolve completed-session retention in #655.
 
+Qoder / Qoder CN hooks（同一个 `qoder` agent、state-only）：
+
+  `hooks/qoder-install.js` 同步所有已初始化的用户配置目录：国际版 `~/.qoder`、CN 版 `~/.qoder-cn`，分别尊重 `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR`，不创建缺失版本的目录；显式 `settingsPath` 只操作该文件。Settings Uninstall 和 About cleanup 都移除两版里的 Clawd-owned entries，保留第三方 hooks 与其他配置；单个目录失败时继续处理另一目录并汇总报错。Doctor 逐一检查已有目录，任一版本缺失/损坏/禁用 hooks 都不能被另一版的健康结果掩盖；任一版本可安全修复时保留 Fix，尊重其他版本的 disabled 设置。CN 桌面版 Windows worker runtime 1.1.69 的 hook schema 与现有 adapter 相同，仍用 portable Windows command；本机运行时代码和 [CN CLI 配置文档](https://docs.qoder.cn/en/cli/settings)确认用户目录为 `.qoder-cn`，桌面 hooks 网页写成 `.qoder` 的说明与该实现不同。hook 的进程树解析识别 `Qoder CN.exe` / `qodercn` / `qoderclicn`，启动恢复只增加 CLI `qoderclicn`，桌面应用闲置不算活跃任务。2026-10-18 的真实 CN 任务日志确认 SessionStart / UserPromptSubmit / Stop 执行成功，用户确认开启 Clawd Qoder 接入后任务状态恢复；macOS/Linux CN 尚未实测。CN runtime 支持外部配置热重载，本次新增 hooks 已在未重启 worker 的新任务里执行。
+
 Qoder 会话标题（本机、state-only）：
   Hook 转发显式标题与 transcript 路径，保持 stdout 为 `{}` 和原生权限流程不变。
   `agent-runtime-main` 先接受生命周期，再让 `qoder-session-title` 对 SessionStart /
