@@ -7,8 +7,8 @@ session trust.
 
 ## Configuration
 
-The setting lives in `clawd-prefs.json` (Settings → General does not expose it
-yet). Quit Clawd, edit the file, and start it again:
+The setting lives in `clawd-prefs.json` (the Settings page has no entry for this
+command-only option yet). Quit Clawd, edit the file, and start it again:
 
 ```json
 {
