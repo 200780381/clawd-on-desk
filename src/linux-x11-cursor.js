@@ -10,7 +10,8 @@
 // dual-head desktop, correct only near the pet window).
 //
 // Fix: on the X11 backend, ask the X server directly with xcb_query_pointer on
-// the root window and convert the physical root coordinates to DIP. The caller
+// the root window and convert the physical root coordinates to DIP through the
+// display that contains them (see physicalToDipPoint). The caller
 // decides "X11 backend" the same way as linux-x11-input-hint (Chromium's
 // resolved --ozone-platform), so this also covers the #441 XWayland relaunch.
 // Any failure falls back to Electron's own value.
@@ -153,27 +154,50 @@ function createX11PointerQuery(options = {}) {
   };
 }
 
+// Convert physical root coordinates to DIP through the display whose physical
+// rect contains the point; null when none does (a gap between displays, or no
+// nativeOrigin). Not screen.screenToDipPoint(): on X11, Electron 41 picks the
+// display with GetDisplayNearestPoint(physical point), a lookup that expects
+// DIP, so with mixed scale factors it can pick the wrong display.
+function physicalToDipPoint(displays, point) {
+  if (!Array.isArray(displays) || !point) return null;
+  for (const display of displays) {
+    const origin = display && display.nativeOrigin;
+    const bounds = display && display.bounds;
+    const scale = display && display.scaleFactor;
+    if (!origin || !bounds || !(scale > 0)) continue;
+    const dx = point.x - origin.x;
+    const dy = point.y - origin.y;
+    if (dx < 0 || dy < 0) continue;
+    if (dx >= Math.round(bounds.width * scale) || dy >= Math.round(bounds.height * scale)) continue;
+    // Floor, not round: at scale 2 the last physical column 1919 maps to
+    // 959.5, and rounding would put it outside a 960-DIP-wide display.
+    return {
+      x: Math.floor(bounds.x + dx / scale),
+      y: Math.floor(bounds.y + dy / scale),
+    };
+  }
+  return null;
+}
+
 // Replace screen.getCursorScreenPoint with the live X11 query on the X11
 // backend. Must run after app ready (the screen module throws before it).
 // Returns true if installed.
 function installLinuxX11CursorFallback(screen, options = {}) {
   if (!options.isLinuxX11) return false;
   if (!screen || typeof screen.getCursorScreenPoint !== "function") return false;
-  // Without DIP conversion the physical point is off by the scale factor.
-  if (typeof screen.screenToDipPoint !== "function") return false;
+  // Without the display list the physical point cannot be converted to DIP.
+  if (typeof screen.getAllDisplays !== "function") return false;
   const query = options.queryPointer || createX11PointerQuery(options);
   const original = screen.getCursorScreenPoint.bind(screen);
   screen.getCursorScreenPoint = function getCursorScreenPoint() {
     const physical = query();
     if (!physical) return original();
+    let dip = null;
     try {
-      // Floor, not round: at scale 2 the last physical column 1919 maps to
-      // 959.5, and rounding would put it outside a 960-DIP-wide display.
-      const dip = screen.screenToDipPoint(physical);
-      return { x: Math.floor(dip.x), y: Math.floor(dip.y) };
-    } catch {
-      return original();
-    }
+      dip = physicalToDipPoint(screen.getAllDisplays(), physical);
+    } catch {}
+    return dip || original();
   };
   return true;
 }
@@ -181,5 +205,6 @@ function installLinuxX11CursorFallback(screen, options = {}) {
 module.exports = {
   loadXcbPointerBindings,
   createX11PointerQuery,
+  physicalToDipPoint,
   installLinuxX11CursorFallback,
 };

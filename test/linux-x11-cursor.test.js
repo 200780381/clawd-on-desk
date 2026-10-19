@@ -8,13 +8,88 @@ const path = require("node:path");
 const {
   loadXcbPointerBindings,
   createX11PointerQuery,
+  physicalToDipPoint,
   installLinuxX11CursorFallback,
 } = require("../src/linux-x11-cursor");
+
+// Two 1920x1080 panels side by side: left at 200% (960x540 DIP), right at 100%.
+// X11 lays them out in physical pixels; Electron places the DIP bounds edge to
+// edge, so the right panel starts at DIP x=960 but physical x=1920.
+const MIXED_DISPLAYS = [
+  { bounds: { x: 0, y: 0, width: 960, height: 540 }, scaleFactor: 2, nativeOrigin: { x: 0, y: 0 } },
+  { bounds: { x: 960, y: 0, width: 1920, height: 1080 }, scaleFactor: 1, nativeOrigin: { x: 1920, y: 0 } },
+];
+
+// Electron 41's X11 screenToDipPoint: GetDisplayNearestPoint(physical point),
+// a DIP-space lookup, then convert through that display.
+function electronScreenToDipPoint(displays, p) {
+  const distance = (d) => {
+    const b = d.bounds;
+    const dx = Math.max(b.x - p.x, 0, p.x - (b.x + b.width - 1));
+    const dy = Math.max(b.y - p.y, 0, p.y - (b.y + b.height - 1));
+    return dx * dx + dy * dy;
+  };
+  const d = displays.reduce((best, cur) => (distance(cur) < distance(best) ? cur : best));
+  return {
+    x: d.bounds.x + (p.x - d.nativeOrigin.x) / d.scaleFactor,
+    y: d.bounds.y + (p.y - d.nativeOrigin.y) / d.scaleFactor,
+  };
+}
+
+describe("physicalToDipPoint()", () => {
+  it("converts through the display whose physical rect contains the point", () => {
+    assert.deepEqual(physicalToDipPoint(MIXED_DISPLAYS, { x: 1500, y: 100 }), { x: 750, y: 50 });
+    assert.deepEqual(physicalToDipPoint(MIXED_DISPLAYS, { x: 2000, y: 100 }), { x: 1040, y: 100 });
+  });
+
+  it("disagrees with Electron's DIP-nearest lookup where that picks the wrong display", () => {
+    // Physical x=1500 is on the left (200%) panel, but as a DIP x it falls
+    // inside the right panel's DIP bounds, so Electron converts through it.
+    assert.deepEqual(electronScreenToDipPoint(MIXED_DISPLAYS, { x: 1500, y: 100 }), { x: 540, y: 100 });
+    assert.deepEqual(physicalToDipPoint(MIXED_DISPLAYS, { x: 1500, y: 100 }), { x: 750, y: 50 });
+  });
+
+  it("maps the edge pixels on both sides of a scale boundary into their own display", () => {
+    assert.deepEqual(physicalToDipPoint(MIXED_DISPLAYS, { x: 1919, y: 1079 }), { x: 959, y: 539 });
+    assert.deepEqual(physicalToDipPoint(MIXED_DISPLAYS, { x: 1920, y: 0 }), { x: 960, y: 0 });
+    assert.deepEqual(physicalToDipPoint(MIXED_DISPLAYS, { x: 3839, y: 1079 }), { x: 2879, y: 1079 });
+  });
+
+  it("matches Electron's conversion when every display has the same scale", () => {
+    const uniform = [
+      { bounds: { x: 0, y: 0, width: 960, height: 540 }, scaleFactor: 2, nativeOrigin: { x: 0, y: 0 } },
+      { bounds: { x: 960, y: 0, width: 960, height: 540 }, scaleFactor: 2, nativeOrigin: { x: 1920, y: 0 } },
+    ];
+    for (let x = 0; x < 3840; x += 37) {
+      for (let y = 0; y < 1080; y += 29) {
+        const expected = electronScreenToDipPoint(uniform, { x, y });
+        assert.deepEqual(
+          physicalToDipPoint(uniform, { x, y }),
+          { x: Math.floor(expected.x), y: Math.floor(expected.y) },
+          `physical ${x},${y}`,
+        );
+      }
+    }
+  });
+
+  it("returns null outside every display and for displays without nativeOrigin", () => {
+    const shortRight = [
+      MIXED_DISPLAYS[0],
+      { bounds: { x: 960, y: 0, width: 1280, height: 720 }, scaleFactor: 1, nativeOrigin: { x: 1920, y: 0 } },
+    ];
+    assert.equal(physicalToDipPoint(shortRight, { x: 2000, y: 900 }), null);
+    assert.equal(physicalToDipPoint(MIXED_DISPLAYS, { x: 4000, y: 0 }), null);
+    assert.equal(physicalToDipPoint(MIXED_DISPLAYS, { x: -1, y: 0 }), null);
+    const noOrigin = MIXED_DISPLAYS.map(({ nativeOrigin, ...rest }) => rest);
+    assert.equal(physicalToDipPoint(noOrigin, { x: 100, y: 100 }), null);
+    assert.equal(physicalToDipPoint(null, { x: 100, y: 100 }), null);
+  });
+});
 
 function makeScreen(extra = {}) {
   return {
     getCursorScreenPoint: () => ({ x: 1, y: 2 }),
-    screenToDipPoint: (p) => ({ x: p.x, y: p.y }),
+    getAllDisplays: () => MIXED_DISPLAYS,
     ...extra,
   };
 }
@@ -27,26 +102,20 @@ describe("installLinuxX11CursorFallback()", () => {
     assert.equal(screen.getCursorScreenPoint, original);
   });
 
-  it("leaves screen untouched without screenToDipPoint", () => {
-    const screen = makeScreen({ screenToDipPoint: undefined });
+  it("leaves screen untouched without getAllDisplays", () => {
+    const screen = makeScreen({ getAllDisplays: undefined });
     const original = screen.getCursorScreenPoint;
     assert.equal(installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 9, y: 9 }) }), false);
     assert.equal(screen.getCursorScreenPoint, original);
   });
 
-  it("returns the live X11 point converted to DIP", () => {
-    const screen = makeScreen({ screenToDipPoint: (p) => ({ x: p.x / 2, y: p.y / 2 }) });
+  it("returns the live X11 point converted through its own display, not screenToDipPoint", () => {
+    const screen = makeScreen({ screenToDipPoint: () => { throw new Error("must not be used"); } });
     assert.equal(
-      installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 3001, y: 400 }) }),
+      installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 1500, y: 100 }) }),
       true,
     );
-    assert.deepEqual(screen.getCursorScreenPoint(), { x: 1500, y: 200 });
-  });
-
-  it("keeps the last physical pixel inside the display at scale 2", () => {
-    const screen = makeScreen({ screenToDipPoint: (p) => ({ x: p.x / 2, y: p.y / 2 }) });
-    installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 1919, y: 1079 }) });
-    assert.deepEqual(screen.getCursorScreenPoint(), { x: 959, y: 539 });
+    assert.deepEqual(screen.getCursorScreenPoint(), { x: 750, y: 50 });
   });
 
   it("falls back to Electron's value when the X11 query fails", () => {
@@ -55,9 +124,15 @@ describe("installLinuxX11CursorFallback()", () => {
     assert.deepEqual(screen.getCursorScreenPoint(), { x: 1, y: 2 });
   });
 
-  it("falls back to Electron's value when screenToDipPoint throws", () => {
-    const screen = makeScreen({ screenToDipPoint: () => { throw new Error("no display"); } });
-    installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 3000, y: 400 }) });
+  it("falls back to Electron's value when no display contains the point", () => {
+    const screen = makeScreen();
+    installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 5000, y: 100 }) });
+    assert.deepEqual(screen.getCursorScreenPoint(), { x: 1, y: 2 });
+  });
+
+  it("falls back to Electron's value when getAllDisplays throws", () => {
+    const screen = makeScreen({ getAllDisplays: () => { throw new Error("no displays"); } });
+    installLinuxX11CursorFallback(screen, { isLinuxX11: true, queryPointer: () => ({ x: 1500, y: 100 }) });
     assert.deepEqual(screen.getCursorScreenPoint(), { x: 1, y: 2 });
   });
 });
