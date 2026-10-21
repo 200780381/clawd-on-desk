@@ -9,6 +9,7 @@ const { i18n, SUPPORTED_LANGS, createTranslator } = require("../../src/i18n");
 const { makeSessionKey } = require("../../src/session-key");
 const { buildSessionSnapshot } = require("../../src/state-session-snapshot");
 const { getHudWidth, getHudWidthScale, computeHudOuterWidth } = require("../../src/session-hud").__test;
+const { hasTaggedFallbackRow } = require("../../src/session-hud-tagged-fallback");
 
 const SRC = path.resolve(__dirname, "../../src");
 const css = fs.readFileSync(path.join(SRC, "session-hud.html"), "utf8").match(/<style>([\s\S]*?)<\/style>/)[1];
@@ -67,7 +68,7 @@ async function main() {
       getI18n: async () => ({ lang: "en", translations: ${JSON.stringify(i18n.en)} }),
       focusSession() {}, setPinned() {}, openDashboard() {}, ackCompletion: async () => {},
     }; window.settleLayout = () => new Promise(resolve => setTimeout(resolve, 75)); void 0;`);
-    for (const file of ["session-focus-unavailable.js", "session-hud-renderer.js"]) {
+    for (const file of ["session-focus-unavailable.js", "session-hud-tagged-fallback.js", "session-hud-renderer.js"]) {
       await win.webContents.executeJavaScript(`${fs.readFileSync(path.join(SRC, file), "utf8")}\nvoid 0;`);
     }
     for (const language of SUPPORTED_LANGS) {
@@ -94,7 +95,7 @@ async function main() {
         ]) {
           const snapshot = snapshotFor(language, flags);
           win.setContentSize(computeHudOuterWidth(getHudWidth(flags.hudShowElapsed, flags.hudShowStateLabels,
-            flags.hudShowContextUsage, snapshot.sessions.some((entry) => entry.displaySessionTag)), scale, getHudWidthScale(scale)), 160);
+            flags.hudShowContextUsage, hasTaggedFallbackRow(snapshot.sessions)), scale, getHudWidthScale(scale)), 160);
           applyZoomToWindow(win, scale);
           await win.webContents.__clawdTextZoomQueue;
           const rows = await win.webContents.executeJavaScript(`(async () => {
