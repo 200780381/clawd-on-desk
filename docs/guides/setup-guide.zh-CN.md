@@ -26,7 +26,7 @@ npm install
 
 ## Agent 配置说明
 
-全新安装默认只安装并启用 Claude Code 和 Codex。其他本机 agent 需要先到 **Settings → AI 编程工具** 点该 agent 的 **Install / 安装**；安装且启用后，Clawd 才会在启动时继续同步对应 hook / plugin / extension。单独关闭 agent 只会停止事件入口，不会卸载文件；**Uninstall / 卸载** 只删除 Clawd 管理的 hook / plugin / extension 条目，并同时禁用该 agent。
+全新安装默认只安装并启用 Claude Code 和 Codex。其他本机 agent 需要先到 **Settings → AI 编程工具** 点该 agent 的 **Install / 安装**；安装且启用后，Clawd 才会在启动时继续同步对应 hook / plugin / extension。单独关闭 agent 只会停止事件入口，不会卸载文件；要卸载，展开卡片、点底部的 **Disconnect… / 断开…**，再点出现的 **Uninstall / 卸载**，它只删除 Clawd 管理的 hook / plugin / extension 条目，并同时禁用该 agent。没装的工具展开后有 **不装本机文件，只打开接收入口** 开关，给 SSH / WSL 里自己装 hooks 的场景用。
 
 **自定义 HTTP Agent** — Settings 可以注册其他本机可执行文件并分配稳定的 `custom-...` ID，但“注册”不会自动安装 hook，也不会让普通应用自动上报事件。自定义 Agent v1 仅支持状态：应用或你编写的 adapter 必须主动向 Clawd 运行时的 `/state` 地址 POST 生命周期事件；权限决定仍留在应用自己的界面中。动态端口发现、请求体、三平台示例以及禁用/移除语义见 [custom-agent-http.md](custom-agent-http.md)。
 
@@ -85,6 +85,8 @@ Clawd 可以在 Node 的 SQLite 模块可用时读取 Cursor 标准桌面配置�
 **KiroCrew** — 可在 **Settings → AI 编程工具** 安装可选的 state-only gateway bridge，也可运行 `npm run install:kirocrew-hooks`；卸载命令为 `npm run uninstall:kirocrew-hooks`。Hooks 写入 `~/.kiro/crew/hooks.json`（或 `<KIROCREW_HOME>/hooks.json`），覆盖 AgentSpawn、UserPromptSubmit、PostToolUse 和 Stop 四个事件。安装或卸载前先停止 KiroCrew gateway，完成后再启动以加载新配置。Clawd 不注册 PreToolUse 或权限 hook，审批仍由 KiroCrew 处理；gateway payload 中的 cwd 不会用作项目路径。
 
 **Kimi Code** — Clawd 用同一个集成同时支持两代 Kimi。新版 Kimi Code（TypeScript CLI）的 hooks 在 `~/.kimi-code/config.toml`，旧版 Kimi CLI（Python，上游已停更）的在 `~/.kimi/config.toml`；哪个目录存在 Clawd 就装哪个（两个都在就都装）。需要本机 Kimi 追踪时，先到 **Settings → AI 编程工具** 安装；安装且启用后，Clawd 会在启动时持续同步 hooks。也可以手动执行 `npm run install:kimi-hooks`。在 Clawd 中 Kimi 采用 hook-only 集成：状态和权限提示都来自 hook 事件，不依赖日志轮询。在新版 Kimi Code 上，权限气泡由 CLI 原生的 `PermissionRequest`/`PermissionResult` hook 事件驱动——气泡会显示正在等待批准的具体命令，你在终端里作出选择后气泡立即消失，无需任何配置。如果你用过 Kimi Code 内置的旧版迁移，Clawd 下一次同步会自动把迁移过来的 hook 条目升级为新格式（旧的 env 前缀命令写法在 Windows 上无法执行）。旧版 `~/.kimi` 安装的权限提示**默认启用 suspect 启发式**：现行 kimi-cli 版本的 `PreToolUse` 从不携带显式审批字段（1.37 与 1.49 实测），旧的 explicit-only 默认值意味着提示卡根本不会出现。安装器会把模式以 `--permission-mode=suspect` 参数的形式持久化到每条 hook 的 `command` 里；此前选择过的模式——包括 `explicit`——在重新同步时始终原样保留，绝不会被翻转（用已停用的 `CLAWD_KIMI_PERMISSION_MODE=…` env 前缀形式装过的配置会连值一起迁移成参数形式）。想退出默认：在运行安装命令前设置 `CLAWD_KIMI_PERMISSION_MODE=explicit`（持久化），或在运行 kimi-cli 时临时设置该环境变量——运行时环境变量的优先级永远高于持久化参数。需要了解的代价：suspect 启发式下，*已免审*的门控命令若运行超过约 0.8 秒，会短暂弹出一张误报提示卡（卡片几秒后自动关闭；宠物会保持通知姿势直到该命令跑完）。嫌烦可在 **Settings → AI 编程工具** 里整体关闭 Kimi 的权限提示。注意：自动同步会按预期行重写 `command` 字段，你对该字段的手工修改会在下次启动时被静默还原。
+
+**Kimi Code 订阅额度（实验性）** — 展开 **Settings → AI 编程工具** 里的 Kimi Code 卡，在**额度**组点 **Connect Kimi key…** 展开输入；到 Kimi Console 创建专用 API Key 后粘贴并选择 **Connect**。额度读取仅在你手动连接、替换、重连或刷新时发生，不会在后台轮询。
 
 **Qwen Code** — hooks 配置在 `~/.qwen/settings.json`。需要本机 Qwen 追踪时，先到 **Settings → AI 编程工具** 安装；安装且启用后，Clawd 才会在启动时继续同步 hooks。也可以手动执行 `npm run install:qwen-hooks`。Qwen Code 在 Clawd 中采用 hook-only 集成：状态更新和阻塞式 `PermissionRequest` 审批都来自 Qwen hook 事件。如果 Qwen settings 里有 `disableAllHooks: true`，Clawd 可以注册条目，但 Qwen 不会触发它们，直到用户移除该开关。
 
