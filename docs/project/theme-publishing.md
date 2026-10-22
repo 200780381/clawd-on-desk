@@ -2,25 +2,30 @@
 
 这是维护者的操作说明，保存在 `clawd-on-desk` 主仓库。投稿与讨论也在主仓库；本页提到的 manifest、打包脚本、Release 与 catalog 操作属于 [`clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 分发仓库；设置页标识和离线快照属于主仓库。作者从[贡献指南](../guides/contributing-themes.zh-CN.md)和投稿 Issue 开始；发布之前，先完成素材、体验与许可审查。收到投稿或合并说明文件，不等于主题已进入应用下载列表。
 
-## 先确认发布工具能处理真实来源
+## 发布前确认两边支持已合并
 
-当前工具最初用于迁出主仓库的两套主题。先接收投稿，待第一个社区作品通过审核后，再另开 PR 调整发布工具；下表中的来源、展示页和官方标签方案均为待实现计划。
+社区主题的发布工具和应用显示分别在两个仓库维护。首次发布前，确认 `clawd-themes` 已合并社区来源、署名和可选展示页的支持；应用中的社区分组与署名还需要随 `clawd-on-desk` 发版。
 
-| 项目 | 当前规则 | 收录社区主题前的处理 |
-| --- | --- | --- |
-| 源码记录 | `scripts/verify-theme-release.js` 只接受 `source.repository = rullerzhou-afk/clawd-on-desk`，且 `source.path = themes/<id>` | 计划把作者仓库 fork 到 `rullerzhou-afk` 账号下，将校验改为只接受该账号下的仓库，不再固定主题路径；保留 40 位提交 SHA 和逐文件核对。catalog CI 每次会重新下载并核对全部主题来源，作者删库或改写历史可能持续阻塞整个目录校验 |
-| 展示页 | `clawd-themes` 的 schema 和校验要求必填；提供链接时，分发与应用侧都限定 `https://<id>-art.pages.dev/progress/` | 计划将社区主题展示页改为选填，修改分发仓库的 schema 和校验。应用已允许省略展示页，且只有链接存在时才显示「查看动画」；提供链接时仍遵守现有地址规则 |
-| 官方标签 | 设置页统一放在「官方主题」分组并显示「官方 / Official」角标，卡片不显示作者 | 社区主题上架前，计划先调整应用以区分社区作品，具体呈现由鹿鹿确定；需要随应用发版才生效，旧版本仍会显示「官方」 |
-| 主题包内容 | 打包器仅收集 `theme.json`、`assets/`，再加入 `clawd-themes` 中 `themes/<id>/` 下的 `README.md` 和 `LICENSE` | 独立 `sounds/` 等目录不会被打包；遇到这类投稿，先解决兼容或与作者确认删去相关能力，不能无声漏文件 |
-| 下载地址 | 主题包与预览图必须是 `clawd-themes` 的固定版本 Release asset | 作者的发布地址用于投稿与来源审查，不能直接填进正式 catalog |
+| 项目 | 发布约定 |
+| --- | --- |
+| 源码记录 | `source.repository` 只接受 `rullerzhou-afk` 账号下的仓库，包括保留的作者仓库 fork；`source.commit` 固定为 40 位小写 SHA。`source.path` 为仓库内相对目录，根目录写空字符串；禁止绝对路径、反斜杠、空段和 `.` / `..` 段。每次完整校验仍逐文件核对来源 |
+| 社区署名 | manifest 与 catalog 同时写 `category: "community"` 和 `author`，两者必须一致。作者为 1–160 字符的单行文本，无首尾空格。旧条目省略 category 时按 official 处理，不改两套现有主题的身份 |
+| 展示页 | 选填；省略整个 `showcase` 字段即可。提供时仍只接受 `https://<id>-art.pages.dev/progress/`，不接受 null 或任意外部链接 |
+| 应用显示 | 包含本次支持的应用在「社区主题」分组显示「社区」角标和作者，安装后保留这些信息。已发布的旧版应用会继续显示「官方」；提高 minAppVersion 只能限制安装，不能改变旧版标签 |
+| 主题包内容 | 打包器仅收集 `theme.json`、`assets/`，再加入分发仓库的 `README.md` 和 `LICENSE`。独立 `sounds/` 等目录不会被打包，必须先解决兼容或与作者确认删去相关能力 |
+| 下载地址 | 主题包与预览图仍必须是 `clawd-themes` 的固定版本 Release asset；来源仓库与作品分类均不扩大应用的下载地址或运行权限 |
 
-**存在上述阻塞时，停在投稿评审阶段。** 这些是待满足的发布条件，不是文档已经实现的功能。
+兼容策略允许旧版应用继续显示「官方」，作品作者与许可不变。新版本安装的社区标记会保存在安装记录中，断网或条目撤下后仍可显示。旧版安装记录自身没有社区信息：新目录仍包含该条目时可补全显示；条目撤下后，这类历史记录仍按旧默认分类显示。
 
 ## 审阅与固定交付内容
 
 在 Issue 中确认主题 ID、作者署名、设计差异、状态覆盖、许可、实际测试结果，以及后续维护方式。同角色新造型使用新 ID；已有主题的升级沿用原 ID 并增加版本。
 
 取得包含实际 `theme.json` 与全部图片的固定源码提交。完整下载校验会从 GitHub 的原始文件地址读取该提交下的每个资源并逐一核对；Git LFS 指针、临时网盘链接或只有成品 ZIP 的来源不能直接通过这个流程。作者的源文件、许可范围和交付方式需要先谈清楚。
+
+先把已审阅的作者仓库 fork 到 `rullerzhou-afk` 账号，保留公开访问；审核通过不自动授权改作者仓库。确认 fork 中包含实际审核的提交，而非仅有默认分支：在该 fork 为每个发布提交保留一个不移动、不删除的标签或分支，例如 `clawd-source/<id>/v<version>`。不要只记录一个可能失去引用的 SHA，也不要跟随上游改写这些保留引用。
+
+manifest 的 `source.repository` 指向保留的 fork，`source.commit` 指向审核过的同一提交，`source.path` 指向其实际主题目录（仓库根目录为 `""`）。发布前以未登录方式核对该提交下的 `theme.json` 和全部资源可读取；完整 `--download` 校验会再次核对字节数与 SHA-256。作者删库或改写历史后，保留来源仍需可用，否则每次校验全部 catalog 时都可能被阻塞。没有可 fork 的作者仓库时，先与作者商定并建立可追溯的公开来源，再发布。
 
 `clawd-themes` 保留：
 
@@ -31,7 +36,7 @@ themes/<id>/LICENSE
 themes/<id>/preview.webp
 ```
 
-manifest 可参考[现有记录](https://github.com/rullerzhou-afk/clawd-themes/blob/main/themes/whale-chan/manifest.json)的结构，但所有值都必须来自新主题：`id`、`version`、中英文名称与简介、`minAppVersion`、`assetCount`、`source` 和 `license`。不要沿用已有角色的作者或许可。
+manifest 可参考[现有记录](https://github.com/rullerzhou-afk/clawd-themes/blob/main/themes/whale-chan/manifest.json)的结构，但所有值都必须来自新主题：`id`、`version`、中英文名称与简介、`minAppVersion`、`assetCount`、`source`、`license`，社区作品另写 `category: "community"` 与真实 `author`。不要沿用已有角色的作者或许可。
 
 - `assetCount` 是 `assets/` 内实际文件数，不是状态数或动画帧数。
 - `theme.json.version` 必须等于 manifest 的版本，`theme.json.license` 必须等于 `manifest.license.themeJson`。
@@ -49,7 +54,7 @@ node scripts/build-theme-package.js --source "/absolute/path/to/my-theme" --mani
 node scripts/verify-theme-release.js --archive dist/my-theme-1.0.0.clawd-theme.zip --manifest themes/my-theme/manifest.json
 ```
 
-源目录的 basename 必须等于主题 ID。构建生成 ZIP、SHA-256 文件和 metadata JSON，后者包含准确的包大小、展开大小与哈希。正式包由维护者从审查过的来源构建；不要直接把一个未经核对的投稿 ZIP 改名上架。
+源目录名可以与主题 ID 不同；包内顶层目录始终使用 manifest 的 ID。构建生成 ZIP、SHA-256 文件和 metadata JSON，后者包含准确的包大小、展开大小与哈希。正式包由维护者从审查过的来源构建；不要直接把一个未经核对的投稿 ZIP 改名上架。
 
 检查 ZIP 内的 `README.md` 与 `LICENSE` 确实来自 `clawd-themes` 中 `themes/<id>/` 下的已审阅文件。冻结这些内容后再发布；它们改变也需要重新构建，已发布的版本不可原地覆盖。
 
@@ -58,11 +63,12 @@ node scripts/verify-theme-release.js --archive dist/my-theme-1.0.0.clawd-theme.z
 1. 合并审阅过的主题 metadata 文件，记录包含 `themes/<id>/LICENSE` 的实际提交 SHA。此时先不改 catalog。
 2. 准备版本标签 `<id>-v<version>` 的草稿 Release，上传 `<id>-<version>.clawd-theme.zip`，以及内容与 `themes/<id>/preview.webp` 一致的 `<id>-<version>.preview.webp`。保留构建输出供核对。
 3. 核对附件后发布 Release。草稿附件不能供未登录用户或目录 CI 下载，因此正式 catalog 必须等公开下载可用后再提交。
-4. 添加或更新 `catalog-v1.json` 的主题条目。archive 大小与 SHA-256 取自实际构建结果；preview 大小与 SHA-256 取自上传的那份预览图。展示页选填支持落地后，有展示页再填写符合规则的链接；许可链接固定到第 1 步的提交：`https://github.com/rullerzhou-afk/clawd-themes/blob/<commit>/themes/<id>/LICENSE`。
+4. 添加或更新 `catalog-v1.json` 的主题条目。archive 大小与 SHA-256 取自实际构建结果；preview 大小与 SHA-256 取自上传的那份预览图。社区条目的 category 和 author 必须与 manifest 一致。有展示页再填写符合规则的链接；许可链接固定到第 1 步的提交：`https://github.com/rullerzhou-afk/clawd-themes/blob/<commit>/themes/<id>/LICENSE`。
 5. 将 `catalogVersion` 增加到大于当前 main 的值。任何 catalog 内容变化都必须递增，包括纠错或移除条目。
 6. 运行以下检查：
 
 ```sh
+npm test
 node scripts/verify-theme-release.js --catalog catalog-v1.json
 node scripts/verify-theme-release.js --catalog catalog-v1.json --download
 ```

@@ -1037,6 +1037,9 @@
       themeGroupUserThemes: "User Themes",
 
       themeGroupOfficialThemes: "Official themes",
+      themeGroupCommunityThemes: "Community themes",
+      themeBadgeCommunity: "Community",
+      themeAuthor: (author) => `By ${author}`,
       themeBadgeOfficial: "Official",
       themeOfficialViewAnimations: "View animations",
       themeOfficialDownloadLabel: (mib) => `Download \u00b7 ${mib} MB`,
@@ -2270,6 +2273,9 @@
       themeGroupUserThemes: "用户主题",
 
       themeGroupOfficialThemes: "官方主题",
+      themeGroupCommunityThemes: "社区主题",
+      themeBadgeCommunity: "社区",
+      themeAuthor: (author) => `作者：${author}`,
       themeBadgeOfficial: "官方",
       themeOfficialViewAnimations: "查看动画",
       themeOfficialDownloadLabel: (mib) => `下载 \u00b7 ${mib} MB`,
@@ -3505,6 +3511,9 @@
       themeGroupUserThemes: "使用者主題",
 
       themeGroupOfficialThemes: "官方主題",
+      themeGroupCommunityThemes: "社群主題",
+      themeBadgeCommunity: "社群",
+      themeAuthor: (author) => `作者：${author}`,
       themeBadgeOfficial: "官方",
       themeOfficialViewAnimations: "查看動畫",
       themeOfficialDownloadLabel: (mib) => `下載 \u00b7 ${mib} MB`,
@@ -4740,6 +4749,9 @@
       themeGroupUserThemes: "사용자 테마",
 
       themeGroupOfficialThemes: "공식 테마",
+      themeGroupCommunityThemes: "커뮤니티 테마",
+      themeBadgeCommunity: "커뮤니티",
+      themeAuthor: (author) => `제작: ${author}`,
       themeBadgeOfficial: "공식",
       themeOfficialViewAnimations: "애니메이션 보기",
       themeOfficialDownloadLabel: (mib) => `다운로드 \u00b7 ${mib} MB`,
@@ -5975,6 +5987,9 @@
       themeGroupUserThemes: "ユーザーテーマ",
 
       themeGroupOfficialThemes: "公式テーマ",
+      themeGroupCommunityThemes: "コミュニティテーマ",
+      themeBadgeCommunity: "コミュニティ",
+      themeAuthor: (author) => `作者：${author}`,
       themeBadgeOfficial: "公式",
       themeOfficialViewAnimations: "アニメーションを見る",
       themeOfficialDownloadLabel: (mib) => `ダウンロード \u00b7 ${mib} MB`,
@@ -7208,6 +7223,9 @@
       themeGroupUserThemes: "Temas do usuário",
 
       themeGroupOfficialThemes: "Temas oficiais",
+      themeGroupCommunityThemes: "Temas da comunidade",
+      themeBadgeCommunity: "Comunidade",
+      themeAuthor: (author) => `Por ${author}`,
       themeBadgeOfficial: "Oficial",
       themeOfficialViewAnimations: "Ver animações",
       themeOfficialDownloadLabel: (mib) => `Baixar \u00b7 ${mib} MB`,
@@ -8441,6 +8459,9 @@
       themeGroupUserThemes: "Temas del usuario",
 
       themeGroupOfficialThemes: "Temas oficiales",
+      themeGroupCommunityThemes: "Temas de la comunidad",
+      themeBadgeCommunity: "Comunidad",
+      themeAuthor: (author) => `Por ${author}`,
       themeBadgeOfficial: "Oficial",
       themeOfficialViewAnimations: "Ver animaciones",
       themeOfficialDownloadLabel: (mib) => `Descargar \u00b7 ${mib} MB`,
