@@ -202,10 +202,10 @@ body { padding: 2px 3px 8px; }
 .row .left.left-tagged-fallback { gap: 4px; }
 .title-tagged-fallback {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: minmax(0, max-content) max-content;
 }
 .title-fallback-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.title-fallback-tag { flex: 0 0 auto; font-size: 10px; }
+.title-fallback-tag { flex: 0 0 auto; font-size: 10px; white-space: pre; }
 
 .chip-recovered {
   border: 1px dashed currentColor;

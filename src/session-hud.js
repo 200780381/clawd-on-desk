@@ -18,9 +18,9 @@ const HUD_WIDTH_LABELS = 320;
 const HUD_WIDTH_LABELS_COMPACT = 260;
 const HUD_CONTEXT_USAGE_WIDTH_BUMP = 36;
 const HUD_LABELS_ONLY_WIDTH_TRIM = 36;
-// Room for " · " plus a ten-character distinguishing tag alongside a status
-// label and the pin, at the label-only widths where the row is tightest.
-const HUD_TAGGED_FALLBACK_WIDTH_BUMP = 56;
+// Room for a visible folder ellipsis, the preserved separator and a ten-digit
+// tag alongside status/context chips, folder actions and the pin.
+const HUD_TAGGED_FALLBACK_WIDTH_BUMP = 72;
 const HUD_ROW_HEIGHT = 28;
 const HUD_MAX_EXPANDED_ROWS = 3;
 const HUD_MAX_EXPANDED_ROWS_LABELS = 5;
@@ -212,9 +212,12 @@ function computeHudReservedOffset(cardHeight) {
   return HUD_PET_GAP + h + HUD_WINDOW_SHELL.bottom + BUBBLE_GAP;
 }
 
-function getHudWidthScale(scale) {
+function getHudWidthScale(scale, hasTaggedFallback = false) {
   const s = clampTextScale(scale);
-  if (s <= 1) return s;
+  // Tags, chips and actions all retain their intrinsic widths. Preserve their
+  // CSS viewport as text grows; the ordinary compact-width curve can only
+  // reclaim room from a title that is allowed to shrink without a fixed tag.
+  if (s <= 1 || hasTaggedFallback) return s;
   return 1 + (s - 1) * HUD_WIDTH_GROWTH_RATIO;
 }
 
@@ -425,13 +428,16 @@ module.exports = function initSessionHud(ctx) {
     const workArea = typeof ctx.getNearestWorkArea === "function"
       ? ctx.getNearestWorkArea(cx, cy)
       : { x: 0, y: 0, width: 1280, height: 800 };
+    const hasTaggedFallback = layoutHasTaggedFallback(
+      computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false })
+    );
     const width = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false,
-      layoutHasTaggedFallback(computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false }))
+      hasTaggedFallback
     );
-    const widthScale = getHudWidthScale(scale);
+    const widthScale = getHudWidthScale(scale, hasTaggedFallback);
     // Must carry the SAME scale the visible HUD was laid out with — an
     // unscaled expectation makes the auto-hide hot zone smaller than the
     // real window, so the cursor "leaves" while still visually over it.
@@ -806,16 +812,17 @@ module.exports = function initSessionHud(ctx) {
 
     didFinishLoad = false;
     hudFlippedAbove = false;
+    const hasTaggedFallback = layoutHasTaggedFallback(lastHudLayout);
     const hudWidth = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false,
-      layoutHasTaggedFallback(lastHudLayout)
+      hasTaggedFallback
     );
     // Provisional CSS px → DIP size; syncSessionHud() replaces it with the
     // precise computeSessionHudBounds() result before the window is shown.
     const scale = getTextScale();
-    const widthScale = getHudWidthScale(scale);
+    const widthScale = getHudWidthScale(scale, hasTaggedFallback);
     hudWindow = new BrowserWindow({
       parent: ctx.win,
       width: computeHudOuterWidth(hudWidth, scale, widthScale),
@@ -889,13 +896,14 @@ module.exports = function initSessionHud(ctx) {
       : { x: 0, y: 0, width: 1280, height: 800 };
     const layout = computeHudLayout(snapshot, { showStateLabels: ctx.sessionHudShowStateLabels !== false });
     const height = computeHudHeight(layout.rowCount);
+    const hasTaggedFallback = layoutHasTaggedFallback(layout);
     const width = getHudWidth(
       ctx.sessionHudShowElapsed !== false,
       ctx.sessionHudShowStateLabels !== false,
       ctx.sessionHudShowContextUsage !== false,
-      layoutHasTaggedFallback(layout)
+      hasTaggedFallback
     );
-    const widthScale = getHudWidthScale(scale);
+    const widthScale = getHudWidthScale(scale, hasTaggedFallback);
     lastHudHeight = height;
     lastHudLayout = layout;
     return computeSessionHudBounds({ hitRect, anchorRect, workArea, width, height, scale, widthScale });

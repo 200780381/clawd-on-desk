@@ -24,8 +24,9 @@ function snapshotFor(language, flags, titled = false) {
     const id = makeSessionKey({ profileId: "local", rawSessionId });
     sessions.set(id, {
       agentId: "codex", profileId: "local", rawSessionId,
-      codexOriginator: "Codex Desktop", cwd: "C:\\fixture\\非常长的同一项目目录-long-project-name",
-      state: "thinking", updatedAt: Date.now() - 66_000,
+      codexOriginator: "Codex Desktop", cwd: `C:\\fixture\\${flags.fixtureFolder || "非常长的同一项目目录-long-project-name"}`,
+      state: flags.fixtureState || "thinking", updatedAt: Date.now() - 66_000,
+      recentEvents: flags.fixtureEvent ? [{ event: flags.fixtureEvent, at: Date.now() - 66_000 }] : [],
       sessionTitle: titled ? "A real native title" : null,
     });
   }
@@ -35,7 +36,8 @@ function snapshotFor(language, flags, titled = false) {
   for (const entry of snapshot.sessions) {
     entry.iconUrl = pixel;
     entry.canFocus = true;
-    entry.contextUsage = { used: 6000, limit: 100000, percent: 6 };
+    const percent = flags.fixtureFullContext ? 100 : 6;
+    entry.contextUsage = { used: percent * 1000, limit: 100000, percent };
     if (flags.fixtureDone) {
       entry.state = "idle";
       entry.badge = "done";
@@ -86,16 +88,30 @@ async function main() {
           { hudShowStateLabels: false, hudShowElapsed: true, hudShowContextUsage: false },
           { hudShowStateLabels: false, hudShowElapsed: true, hudShowContextUsage: true },
           { hudShowStateLabels: false, hudShowElapsed: false, hudShowContextUsage: true },
+          // Short labels must stay adjacent to the suffix instead of filling
+          // the entire title column and pushing the tag towards the chips.
+          { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureFolder: "repo" },
+          { hudShowStateLabels: false, hudShowElapsed: false, hudShowContextUsage: false, fixtureFolder: "clawd-on-desk" },
+          { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureFolder: "i" },
+          ...[
+            { fixtureState: "working" }, { fixtureState: "juggling" },
+            { fixtureEvent: "PreCompact" }, { fixtureEvent: "PermissionRequest" },
+            { fixtureEvent: "WorktreeCreate" },
+          ].map((status) => ({ hudShowStateLabels: true, hudShowElapsed: false,
+            hudShowContextUsage: true, fixtureUnfocusable: true, fixtureFullContext: true, ...status })),
           ...(scale === 1.6 ? [
             { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureDone: true },
             { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureUnfocusable: true },
             { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: true, fixtureDone: true },
             { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: true, fixtureUnfocusable: true },
+            { hudShowStateLabels: true, hudShowElapsed: true, hudShowContextUsage: true, fixtureUnfocusable: true, fixtureFullContext: true },
+            { hudShowStateLabels: true, hudShowElapsed: false, hudShowContextUsage: true, fixtureUnfocusable: true, fixtureFullContext: true },
           ] : []),
         ]) {
           const snapshot = snapshotFor(language, flags);
+          const hasTaggedFallback = hasTaggedFallbackRow(snapshot.sessions);
           win.setContentSize(computeHudOuterWidth(getHudWidth(flags.hudShowElapsed, flags.hudShowStateLabels,
-            flags.hudShowContextUsage, hasTaggedFallbackRow(snapshot.sessions)), scale, getHudWidthScale(scale)), 160);
+            flags.hudShowContextUsage, hasTaggedFallback), scale, getHudWidthScale(scale, hasTaggedFallback)), 160);
           applyZoomToWindow(win, scale);
           await win.webContents.__clawdTextZoomQueue;
           const rows = await win.webContents.executeJavaScript(`(async () => {
@@ -106,7 +122,19 @@ async function main() {
             return { cssZoom: Number.parseFloat(getComputedStyle(document.documentElement).zoom),
               rows: [...document.querySelectorAll(".row")].map(row => {
               const rect = selector => row.querySelector(selector)?.getBoundingClientRect().toJSON();
+              const label = row.querySelector(".title-fallback-label");
+              const tag = row.querySelector(".title-fallback-tag");
+              const labelRange = document.createRange();
+              labelRange.selectNodeContents(label);
+              const separatorRange = document.createRange();
+              separatorRange.setStart(tag.firstChild, 1);
+              separatorRange.setEnd(tag.firstChild, 2);
               return { title: rect(".title"), tag: rect(".title-fallback-tag"), left: rect(".left"),
+                labelGlyphs: labelRange.getBoundingClientRect().toJSON(),
+                labelClipped: label.scrollWidth > label.clientWidth,
+                label: rect(".title-fallback-label"),
+                labelFontSize: Number.parseFloat(getComputedStyle(label).fontSize),
+                separator: separatorRange.getBoundingClientRect().toJSON(),
                 right: rect(".right"), row: row.getBoundingClientRect().toJSON(),
                 contentRight: row.getBoundingClientRect().right - Number.parseFloat(getComputedStyle(row).paddingRight)
                   * Number.parseFloat(getComputedStyle(document.documentElement).zoom),
@@ -136,6 +164,14 @@ async function main() {
               assert.ok(row.glyphs.right <= row.tag.right + 0.5 && row.glyphs.left >= row.tag.left - 0.5,
                 "tag glyphs overflow their own span");
               assert.ok(row.tagScrollWidth <= row.tagClientWidth + 1, "tag text is internally clipped");
+              assert.ok(row.separator.left > row.tag.left + 0.5 * scale,
+                "the leading separator space must remain visible");
+              if (flags.fixtureFolder && !row.labelClipped) {
+                assert.ok(Math.abs(row.tag.left - row.labelGlyphs.right) <= 0.5,
+                  "a short folder label must remain adjacent to the suffix");
+              }
+              if (row.labelClipped) assert.ok(row.label.width >= row.labelFontSize * scale - 0.5,
+                "a truncated folder label must have room for its ellipsis");
               assert.ok(row.title.right <= row.left.right + 0.5, "title overflows the left flex item");
               if (row.right) assert.ok(row.left.right <= row.right.left + 0.5, "title and secondary information overlap");
               assert.ok(row.tag.right <= row.contentRight + 0.5, "tag leaves the visible row content");

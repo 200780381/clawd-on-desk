@@ -141,6 +141,9 @@ HUD/Dashboard；不创建会话、不改变状态/活跃时间/完成提醒/小�
 标签复用 canonical session id 的 10 位哈希，不写入 `sessionTitle`，Dashboard / 菜单
 复用同一 `displayTitle`。HUD 为分隔符和完整标签预留最小宽度；这类行的右侧信息
 用独立网格列保留状态/上下文及操作按钮，时间列先省略，且使用紧凑间距避免高字号裁切。
+短项目名与分隔符紧排，不将多余宽度塞进两者之间；带此类标签的 HUD 宽度随字号同比
+缩放，容纳完整标签、长状态文案、100% 上下文及操作按钮，并为长项目名保留省略号空间。
+不含此类标签的 HUD 保持既有紧凑宽度缩放。
 用户别名、索引标题和已有标题继续优先；CWD 和文件夹操作原样保留。CLI / 未知
 originator、headless（含已分类 child）、显式 CLI / exec / internal / subagent source、
 remote / WSL 不使用该 Desktop fallback。该标签不判断会话是否为用户侧聊或后台

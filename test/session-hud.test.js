@@ -97,6 +97,18 @@ describe("session HUD geometry", () => {
     assert.strictEqual(getHudWidth(false, true, false, false), getHudWidth(false, true, false));
   });
 
+  it("preserves the tagged row's CSS viewport when text grows", () => {
+    const width = getHudWidth(false, true, true, true);
+    for (const scale of [0.8, 1, 1.6]) {
+      const outer = computeHudOuterWidth(width, scale, getHudWidthScale(scale, true));
+      const shell = Math.round(constants.HUD_WINDOW_SHELL.left * scale)
+        + Math.round(constants.HUD_WINDOW_SHELL.right * scale);
+      assert.ok(Math.abs((outer - shell) / scale - width) <= 1,
+        "large text must not squeeze the fixed tag/chip/action columns");
+    }
+    assert.strictEqual(getHudWidthScale(1.6), 1.24, "ordinary rows retain compact width growth");
+  });
+
   // Every session carries a displaySessionTag (the Telegram/Slack-style #tag),
   // so the width predicate must use the same untitled-local-Codex rule the
   // renderer renders the fallback row with — not bare tag presence. Otherwise
