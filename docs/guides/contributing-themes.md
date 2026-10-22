@@ -8,7 +8,7 @@ We welcome theme proposals and finished submissions for Clawd. Contribution guid
 
 You can open a submission issue now, or package and share a theme independently for installation via **Settings → Theme → Import Clawd theme package (.zip)** (see [Independent sharing](#independent-sharing-and-updates)).
 
-Community themes cannot enter the download list with the current publishing tools. Maintainers will enable that step when the first community theme passes review; until then, acceptance does not mean immediate listing.
+Community submissions use the review and publishing process below. Inclusion still requires a reviewed package, a public release, and a catalog update; acceptance alone does not make a theme immediately available. Applications with community attribution support display a separate **Community themes** group and author credit. Older releases may label these downloads **Official**.
 
 **Start with a [theme submission issue](https://github.com/rullerzhou-afk/clawd-on-desk/issues/new?template=theme-submission.yml).** English and Chinese are both welcome. If you only have an idea, include sketches or references and describe what you plan to make. An idea is a proposal, not an installable theme or a commitment by maintainers to produce it.
 
@@ -89,11 +89,11 @@ themes/<theme-id>/
   manifest.json
 ```
 
-`manifest.json` records distribution metadata; it is separate from the runtime `theme.json`. Its version, source, license, and asset count must match the theme. Initial proposals do not need a manifest. If you are unfamiliar with Git, provide the materials in the issue and agree with maintainers on how to submit these files.
+`manifest.json` records distribution metadata; it is separate from the runtime `theme.json`. Its version, source, license, and asset count must match the theme. Community entries include `category: "community"` and the author credit in both the manifest and catalog. Maintainers retain the reviewed source in a public repository under `rullerzhou-afk`, pinned to a commit; authors keep their credits and license. A separate showcase website is optional. Initial proposals do not need a manifest. If you are unfamiliar with Git, provide the materials in the issue and agree with maintainers on how to submit these files.
 
 Use a WebP preview no larger than 1 MiB. Keep large animations in the source repository and releases. Theme IDs use 1–64 lowercase letters, digits, and hyphens, starting with a letter or digit. Versions use three numbers, such as `1.0.0`.
 
-**Do not edit `catalog-v1.json` or add unpublished download URLs in an initial submission.** Maintainers handle release and catalog changes using the [publishing checks](../project/theme-publishing.md) (Chinese). Please provide the real source and see [Current status](#current-status) for availability of community publishing.
+**Do not edit `catalog-v1.json` or add unpublished download URLs in an initial submission.** Maintainers handle release and catalog changes using the [publishing checks](../project/theme-publishing.md) (Chinese). Please provide the real source; maintainers confirm the required publishing-tool support before release.
 
 ## Independent sharing and updates
 

@@ -2563,6 +2563,14 @@ html, body {
   white-space: nowrap;
   min-width: 0;
 }
+.theme-card-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
 .theme-card-description {
   display: -webkit-box;
   overflow: hidden;

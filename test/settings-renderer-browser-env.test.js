@@ -14240,6 +14240,35 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(commands, []);
   });
 
+  it("separates community themes, renders author credit as text, and keeps managed install controls", async () => {
+    const author = '<img src=x onerror="alert(1)"> / 画师';
+    const installs = [];
+    const { content } = loadThemeTabForTest({
+      settingsAPI: { installOfficialTheme: (id) => { installs.push(id); return new Promise(() => {}); } },
+      themes: [{ id: "clawd", name: "Clawd", builtin: true, active: true }],
+      officialThemes: [
+        { id: "hash-sage", name: "Hash Sage", officialTheme: true, officialThemeState: "available" },
+        { id: "community-cat", name: "Community Cat", officialTheme: true, officialThemeCategory: "community",
+          officialThemeAuthor: author, officialThemeState: "available", officialThemeBytes: 1024 },
+      ],
+    });
+    const sections = content.querySelectorAll(".theme-section");
+    const community = sections.find((section) => section.querySelector(".theme-section-title").textContent === "Community themes");
+    const official = sections.find((section) => section.querySelector(".theme-section-title").textContent === "Official themes");
+    assert.strictEqual(community.querySelectorAll(".theme-card").length, 1);
+    assert.strictEqual(official.querySelectorAll(".theme-card").length, 1);
+    assert.strictEqual(community.querySelector(".theme-card-badge").textContent, "Community");
+    assert.strictEqual(community.querySelector(".theme-card-author").textContent, `By ${author}`);
+    assert.strictEqual(community.querySelector(".theme-card-author").children.length, 0);
+    assert.strictEqual(community.querySelector(".theme-card-author").title, `By ${author}`);
+    assert.strictEqual(official.querySelector(".theme-card-badge").textContent, "Official");
+    const install = community.querySelector(".theme-official-download-btn");
+    assert.ok(install);
+    install.dispatchEvent({ type: "click" });
+    await Promise.resolve();
+    assert.deepStrictEqual(installs, ["community-cat"]);
+  });
+
   it("renders official themes in their own section without duplicating an installed card", () => {
     const { content } = loadThemeTabForTest({
       themes: [
