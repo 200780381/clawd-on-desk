@@ -119,6 +119,7 @@ Claude Code 和 Codex CLI 首次启动即接入；其他集成在 **设置 → A
 | [自定义 HTTP agent](docs/guides/custom-agent-http.md) | 接入 Clawd 尚未集成的工具 |
 | [已知限制](docs/guides/known-limitations.zh-CN.md) | 各 agent 的功能差异 |
 | [主题创作](docs/guides/guide-theme-creation.md) | 制作并校验自己的主题 |
+| [贡献外部主题](docs/guides/contributing-themes.zh-CN.md) | 投稿、许可、审核收录与更新 |
 
 ## 社区
 
