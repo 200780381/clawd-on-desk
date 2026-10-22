@@ -80,7 +80,7 @@ Clawd 通过 hook、日志轮询、plugin 或 extension 感知 AI 编程工具�
 
 制作格式和本地校验见[主题制作指南](docs/guides/guide-theme-creation.md)。想投稿并申请在「设置 → 主题」中收录，请看[外部主题贡献指南](docs/guides/contributing-themes.zh-CN.md)，从主仓库的[主题投稿 Issue](https://github.com/rullerzhou-afk/clawd-on-desk/issues/new?template=theme-submission-zh.yml)开始。只有创意或美术也可以先提案，收录须经过审核。
 
-主题素材放在作者自己的仓库或 Release；审核通过后的主题包由 [`clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 分发，不需要合进应用仓库。贡献指南说明了交付材料、许可、实际体验检查和后续更新，也保留了无需收录即可独立分享的方式。
+主题素材放在作者自己的仓库或 Release；审核通过后的主题包由 [`clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes) 分发，不需要合进应用仓库；社区主题上架流程仍在准备中，见[当前状态](docs/guides/contributing-themes.zh-CN.md#当前状态)。贡献指南说明了交付材料、许可、实际体验检查和后续更新，也保留了无需收录即可独立分享的方式。
 
 三个内置主题（`clawd`、`calico`、`cloudling`）、官方可下载主题（`hash-sage`、`whale-chan`）、`template` 及目录中已有的 ID 不可用于新的投稿。外部主题使用自己的素材许可；请提供作者、来源与分发授权说明。内置素材改动仍按主仓库流程单独审核。
 

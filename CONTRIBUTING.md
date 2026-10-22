@@ -80,7 +80,7 @@ A new integration PR normally includes the adapter, the installer and uninstalle
 
 See the [theme creation guide](docs/guides/guide-theme-creation.md) for the format and local validation. To submit a theme for inclusion in **Settings → Theme**, read [Contributing external themes](docs/guides/contributing-themes.md) and open a [theme submission issue in this repository](https://github.com/rullerzhou-afk/clawd-on-desk/issues/new?template=theme-submission.yml). Ideas and artwork proposals are welcome; inclusion requires review.
 
-Keep artwork in the author's repository or releases. Accepted packages are distributed through [`clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes), without merging the assets into the application repository. The contribution guide covers deliverables, licenses, actual usability checks, updates, and independent sharing without catalog inclusion.
+Keep artwork in the author's repository or releases. Accepted packages are distributed through [`clawd-themes`](https://github.com/rullerzhou-afk/clawd-themes), without merging the assets into the application repository; community listing is still being prepared (see [Current status](docs/guides/contributing-themes.md#current-status)). The contribution guide covers deliverables, licenses, actual usability checks, updates, and independent sharing without catalog inclusion.
 
 The built-in IDs (`clawd`, `calico`, `cloudling`), official downloadable IDs (`hash-sage`, `whale-chan`), `template`, and existing catalog IDs are unavailable for new submissions. External themes retain their own artwork licenses; provide credits, sources, and distribution permissions. Built-in artwork changes remain subject to separate review in this repository.
 

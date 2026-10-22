@@ -2,7 +2,13 @@
 
 [中文版](contributing-themes.zh-CN.md)
 
-We welcome theme proposals and finished submissions for Clawd. Contribution guides, submission issues, and review discussions live in the `clawd-on-desk` application repository. After maintainer review and release checks, accepted themes can be downloaded through **Settings → Theme**. Their artwork stays outside the application installer.
+We welcome theme proposals and finished submissions for Clawd. Contribution guides, submission issues, and review discussions live in the `clawd-on-desk` application repository. This guide covers submission and review for themes distributed separately from the application installer.
+
+## Current status
+
+You can open a submission issue now, or package and share a theme independently for installation via **Settings → Theme → Import Clawd theme package (.zip)** (see [Independent sharing](#independent-sharing-and-updates)).
+
+Community themes cannot enter the download list with the current publishing tools. Maintainers will enable that step when the first community theme passes review; until then, acceptance does not mean immediate listing.
 
 **Start with a [theme submission issue](https://github.com/rullerzhou-afk/clawd-on-desk/issues/new?template=theme-submission.yml).** English and Chinese are both welcome. If you only have an idea, include sketches or references and describe what you plan to make. An idea is a proposal, not an installable theme or a commitment by maintainers to produce it.
 
@@ -20,7 +26,7 @@ cd clawd-on-desk
 node scripts/create-theme.js my-theme --name "My Theme" --author "Your Name"
 ```
 
-The script prints the new theme directory. Edit its `theme.json` and `assets/`. The scaffold contains example filenames, not a complete set of animations. Supply the assets, or remove unused optional mappings and disable those capabilities, before validating and trying the theme. Select it in **Settings → Theme**; restart Clawd if a newly created folder is not listed.
+The script prints the new theme directory. Edit its `theme.json` and `assets/`. The scaffold contains example filenames, not a complete set of animations. Supply the assets, or remove unused optional mappings and disable those capabilities, before validating and trying the theme. Select it in **Settings → Theme**. If a newly created folder is not listed, click **Refresh themes** there first; restart Clawd if it is still missing.
 
 - Supported artwork formats are SVG, GIF, APNG, WebP, PNG, JPG, and JPEG. Static themes are welcome; pixel art and any particular generation tool are optional. Convert MP4 videos to a supported image or animation format first.
 - `idle`, `thinking`, and `working` need real files; `sleeping` needs files or a valid `fallbackTo`. Completion, errors, and notifications should have understandable visuals or fallbacks.
@@ -38,7 +44,7 @@ Then try the theme in Clawd. Check transparent edges, readability at normal pet 
 
 ## What to submit
 
-Include these details in your issue:
+For an idea, provide its name and ID, design or preview, and credits and permissions, including any permission still to obtain. Working themes and updates should also include files, testing, and maintenance details:
 
 1. Theme name, proposed ID, author credit, and how it differs from existing themes.
 2. A clear preview image; for animated themes, recordings or animations showing representative actions.
@@ -87,7 +93,7 @@ themes/<theme-id>/
 
 Use a WebP preview no larger than 1 MiB. Keep large animations in the source repository and releases. Theme IDs use 1–64 lowercase letters, digits, and hyphens, starting with a letter or digit. Versions use three numbers, such as `1.0.0`.
 
-**Do not edit `catalog-v1.json` or add unpublished download URLs in an initial submission.** Maintainers handle release and catalog changes using the [publishing checks](../project/theme-publishing.md) (Chinese). The current verifier still has a historical source restriction: provide the real source, and maintainers must resolve that compatibility issue before publishing community artwork.
+**Do not edit `catalog-v1.json` or add unpublished download URLs in an initial submission.** Maintainers handle release and catalog changes using the [publishing checks](../project/theme-publishing.md) (Chinese). Please provide the real source and see [Current status](#current-status) for availability of community publishing.
 
 ## Independent sharing and updates
 
