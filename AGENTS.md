@@ -278,6 +278,8 @@ Copilot CLI 同步走 `<COPILOT_HOME 或 ~/.copilot>/hooks/hooks.json`，marker-
 - `src/renderer.js` 里给 `<img>` SVG 追加的 `?_t=` cache-bust query 不能删；Chromium 会复用同 URL SVG 的动画时间线，一次性动画会停在末帧
 - Windows 不要把完整主题配置塞进 renderer 进程命令行（命令行上限约 32,767 字符）；使用 `src/renderer-config-channel.js` 的同步 IPC，在创建窗口前设置，并在每次运行时 push 配置前也先 set
 
+- Codex official hook 的可选 `codex_client_ephemeral` 是导航约束，映射为 `codexClientEphemeral`，不是隐藏授权或审批决定。只接受本机 official Codex typed bool；省略不清旧 true，false 须有同线程有效 official transcript 证据。已知临时线程保留 HUD，禁止恢复 URI 与 queue；`codex-app` 只走 Windows/macOS 已验证源映像/GUI 父链的 app-only activation，未知布局和 Linux 不可用，不运行 CLI/CMD、不按目录/标题/缓存猜窗口。live 事实优先于旧 fallback，不能因 app-only target 放开 Desktop 自动粘贴。未知旧记录保留既有首次持久会话导航；没有 transcript 不足以在消费者侧自行推断。见 `src/codex-session-persistence.js` / `src/process-app-focus.js`。
+
 ## Do Not Revisit
 
 Language 子菜单底部截断是 Electron 透明窗口 + Windows DWM 的底层兼容问题。不要再尝试通过切换 `alwaysOnTop`、透明窗策略或 JS 菜单布局修它。
