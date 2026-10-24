@@ -1447,7 +1447,9 @@ function createCard(session, now) {
     const button = document.createElement("button");
     button.type = "button";
     const focusTargetType = session.focusTarget && session.focusTarget.type;
-    button.textContent = focusTargetType === "codex-thread"
+    button.textContent = focusTargetType === "codex-app"
+      ? t("dashboardOpenCodexApp")
+      : focusTargetType === "codex-thread"
       ? t("dashboardOpenCodexSession")
       : focusTargetType === "dsh-desktop"
         ? t("dashboardOpenDshDesktop")

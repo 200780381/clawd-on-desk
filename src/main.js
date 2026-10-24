@@ -204,6 +204,7 @@ const createMacHideController = require("./mac-hide");
 const {
   getFocusableLocalHudSessionIds: selectFocusableLocalHudSessionIds,
   getSessionFocusTarget,
+  mergeSessionFocusEntry,
 } = require("./session-focus");
 const { focusCodexThreadTarget, focusDshDesktopTarget } = require("./session-focus-handoff");
 const { isSessionInProgress } = require("./state-session-snapshot");
@@ -2697,6 +2698,7 @@ const {
   initFocusHelper,
   killFocusHelper,
   focusTerminalWindow,
+  focusProcessAppWindow,
   captureGhosttyTerminalId,
   clearMacFocusCooldownTimer,
 } = _focus;
@@ -2739,8 +2741,15 @@ function focusDashboardSession(sessionId, options = {}) {
     return false;
   }
 
-  const focusEntry = { ...(session || {}), ...(fallbackEntry || {}), id };
+  const focusEntry = mergeSessionFocusEntry(session, fallbackEntry, id);
   const focusTarget = getSessionFocusTarget(focusEntry, { osPlatform: process.platform });
+  if (focusTarget.type === "codex-app") {
+    // Existing local process activation only: no protocol, resume or launcher.
+    Promise.resolve(focusProcessAppWindow({ sourcePid: focusEntry.sourcePid }))
+      .then(result => focusLog(`focus result branch=codex-app reason=${result.reason || "unknown"} source=${requestSource} sid=${id}`))
+      .catch(() => focusLog(`focus result branch=codex-app reason=process-focus-failed source=${requestSource} sid=${id}`));
+    return true;
+  }
   if (focusTarget.type === "codex-thread" && focusTarget.url) {
     focusCodexThreadTarget({
       shell,
