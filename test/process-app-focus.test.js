@@ -138,3 +138,40 @@ it("Windows generated script accepts the observed Desktop install chain and reje
   const replacement = { ...windowsRows()[0], CreationDate: "2026-10-24T12:03:00Z" };
   assert.equal(runWindowsFixture(windowsRows(), replacement).confirmed, false, "source instance changed during the walk");
 });
+
+// Fixture encoder only: production parsing delegates to CommandLineToArgvW.
+const quoteWindowsArg = value => '"' + String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"';
+
+it("Windows Desktop app-server recognizes argv after global config flags without trusting prompt/config substrings", { skip: process.platform !== "win32" }, () => {
+  const executable = quoteWindowsArg(serverImage);
+  const quotedConfig = quoteWindowsArg('model="fixture model"');
+  const escapedConfig = quoteWindowsArg('fixture="quoted \\"app-server\\" and C:\\fixture path\\"');
+  const accepted = [
+    `${executable} -c model=fixture app-server --stdio`,
+    `${executable} -c ${quotedConfig} app-server --stdio`,
+    `${executable} --config ${escapedConfig} app-server`,
+    `${executable} -c ${quotedConfig} --config ${quoteWindowsArg('fixture="app-server"')} app-server`,
+    `${executable} ${quoteWindowsArg('--config=model="fixture model"')} app-server`,
+  ];
+  for (const commandLine of accepted) {
+    const rows = windowsRows(); rows[0].CommandLine = commandLine;
+    assert.equal(runWindowsFixture(rows).confirmed, true, "valid global config prefix must preserve app-server routing");
+  }
+  const rejected = [
+    `${executable} exec ${quoteWindowsArg('app-server')}`,
+    `${executable} -c ${quotedConfig} exec ${quoteWindowsArg('pretend this is app-server')}`,
+    `${executable} -c ${quoteWindowsArg('fixture="app-server"')}`,
+    `${executable} -c app-server`,
+    `${executable} --config=app-server`,
+    `${executable} -c`,
+    `${executable} --config= app-server`,
+    `${executable} -c "" app-server`,
+    `${executable} --unknown app-server`,
+    `${executable} -c ${quotedConfig} app-server-decoy`,
+    `${executable}suffix app-server`,
+  ];
+  for (const commandLine of rejected) {
+    const rows = windowsRows(); rows[0].CommandLine = commandLine;
+    assert.equal(runWindowsFixture(rows).confirmed, false, "only the first subcommand after complete known global config flags can authorize activation");
+  }
+});

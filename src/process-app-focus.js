@@ -12,20 +12,59 @@ function windowsProcessAppScript(sourcePid) {
 $sourcePid = ${source}
 $target = [IntPtr]::Zero
 $reason = 'unverified-codex-process'
+# Parse the existing command line without evaluating it or starting a shell.
+# Keep this type separate from WinFocus: these APIs only split/free argv.
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class CodexFocusCommandLine {
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern IntPtr CommandLineToArgvW(string commandLine, out int count);
+  [DllImport("kernel32.dll")]
+  private static extern IntPtr LocalFree(IntPtr memory);
+  public static string[] Parse(string commandLine) {
+    if (String.IsNullOrWhiteSpace(commandLine) || commandLine.Length > 32767) return new string[0];
+    int count;
+    IntPtr memory = CommandLineToArgvW(commandLine, out count);
+    if (memory == IntPtr.Zero) return new string[0];
+    try {
+      var result = new string[count];
+      for (int i = 0; i < count; i++) result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size));
+      return result;
+    } finally { LocalFree(memory); }
+  }
+}
+'@
 function Read-CodexProcess([int]$processId) {
   Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -OperationTimeoutSec 1 -ErrorAction SilentlyContinue
 }
 function Test-CommandImage($proc) {
   if (-not $proc.ExecutablePath -or -not $proc.CommandLine) { return $false }
-  $image = [regex]::Escape($proc.ExecutablePath)
-  return $proc.CommandLine -imatch ('^(?:"' + $image + '"|' + $image + ')(?:\s|$)')
+  $commandArgs = [CodexFocusCommandLine]::Parse($proc.CommandLine)
+  return $commandArgs.Count -gt 0 -and [string]::Equals($commandArgs[0], $proc.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)
 }
 function Test-CodexServer($proc) {
   if (-not $env:LOCALAPPDATA -or -not (Test-CommandImage $proc)) { return $false }
   $root = [regex]::Escape((Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'))
-  $image = [regex]::Escape($proc.ExecutablePath)
-  return $proc.ExecutablePath -imatch ('^' + $root + '\\[0-9a-f]{16}\\codex\.exe$') -and
-    $proc.CommandLine -imatch ('^(?:"' + $image + '"|' + $image + ')\s+app-server(?:\s|$)')
+  if ($proc.ExecutablePath -inotmatch ('^' + $root + '\\[0-9a-f]{16}\\codex\.exe$')) { return $false }
+  $commandArgs = [CodexFocusCommandLine]::Parse($proc.CommandLine)
+  $index = 1
+  while ($index -lt $commandArgs.Count) {
+    # Config values can themselves contain spaces, quotes, or "app-server".
+    # Only consume explicit global config flags; never search for a substring.
+    if ($commandArgs[$index] -ceq '-c' -or $commandArgs[$index] -ceq '--config') {
+      if ($index + 1 -ge $commandArgs.Count -or [string]::IsNullOrEmpty($commandArgs[$index + 1])) { return $false }
+      $index += 2
+      continue
+    }
+    if ($commandArgs[$index].StartsWith('--config=', [StringComparison]::Ordinal)) {
+      if ($commandArgs[$index].Length -eq 9) { return $false }
+      $index++
+      continue
+    }
+    return $commandArgs[$index] -ceq 'app-server'
+  }
+  return $false
 }
 function Test-CodexGuiImage($proc) {
   if (-not $env:ProgramFiles -or -not (Test-CommandImage $proc)) { return $false }
