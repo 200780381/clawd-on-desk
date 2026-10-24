@@ -1379,6 +1379,7 @@ let claudeQuotaCollectionEnabled = _settingsController.get("claudeQuotaCollectio
 let kimiQuotaCollectionEnabled = _settingsController.get("kimiQuotaCollectionEnabled");
 let quotaMergeSources = _settingsController.get("quotaMergeSources");
 let sessionHudCleanupDetached = _settingsController.get("sessionHudCleanupDetached");
+let sessionHudHideCompletedCodexEphemeral = _settingsController.get("sessionHudHideCompletedCodexEphemeral");
 let sessionHudPinned = _settingsController.get("sessionHudPinned");
 let sessionStaleMs = _settingsController.get("sessionStaleMs");
 let workingStaleMs = _settingsController.get("workingStaleMs");
@@ -2080,7 +2081,17 @@ const _runtimeAgentGate = createRuntimeAgentGate({
   // but only a clean load after restart can re-open agent paths.
   isAuthoritative: () => !_initialPrefsRecovered && !_settingsController.hasReadFailure(),
 });
+let codexEphemeralHudRefreshQueued = false;
 const _permCtx = {
+  onPermissionsChanged: () => {
+    if (!sessionHudHideCompletedCodexEphemeral || codexEphemeralHudRefreshQueued) return;
+    codexEphemeralHudRefreshQueued = true;
+    queueMicrotask(() => {
+      codexEphemeralHudRefreshQueued = false;
+      try { _state.emitSessionSnapshot(); }
+      catch (err) { console.warn("Clawd: Codex ephemeral HUD permission refresh failed:", err); }
+    });
+  },
   get win() { return win; },
   get lang() { return lang; },
   get sessions() { return sessions; },
@@ -2468,6 +2479,7 @@ const _stateCtx = {
     return !!(entry && entry.disabled === true);
   },
   get sessionHudCleanupDetached() { return sessionHudCleanupDetached; },
+  get sessionHudHideCompletedCodexEphemeral() { return sessionHudHideCompletedCodexEphemeral; },
   getStaleConfig: () => ({
     sessionStaleMs,
     workingStaleMs,
@@ -4783,6 +4795,7 @@ const SETTINGS_MIRROR_SETTERS = {
   kimiQuotaCollectionEnabled: (v) => { kimiQuotaCollectionEnabled = v; },
   quotaMergeSources: (v) => { quotaMergeSources = v; },
   sessionHudCleanupDetached: (v) => { sessionHudCleanupDetached = v; },
+  sessionHudHideCompletedCodexEphemeral: (v) => { sessionHudHideCompletedCodexEphemeral = v; },
   sessionHudPinned: (v) => { sessionHudPinned = v; },
   sessionStaleMs: (v) => { sessionStaleMs = v; }, workingStaleMs: (v) => { workingStaleMs = v; },
   codexWorkingStaleMs: (v) => { codexWorkingStaleMs = v; },

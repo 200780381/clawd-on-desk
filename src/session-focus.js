@@ -156,7 +156,7 @@ function isFocusableLocalHudSession(entry, options = {}) {
 function getFocusableLocalHudSessionIds(snapshot, options = {}) {
   const sessions = Array.isArray(snapshot && snapshot.sessions) ? snapshot.sessions : [];
   return sessions
-    .filter((entry) => isFocusableLocalHudSession(entry, options))
+    .filter((entry) => isFocusableLocalHudSession(entry, options) && !entry.hudHiddenByPreference)
     .map((entry) => entry.id);
 }
 

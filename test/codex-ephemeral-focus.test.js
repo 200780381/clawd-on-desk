@@ -23,11 +23,12 @@ function harness(t) {
   themeLoader.init(path.join(__dirname, "../src"));
   const theme = JSON.parse(JSON.stringify(themeLoader.loadTheme("clawd"))); theme.timings.minDisplay = {};
   const noop = () => {};
-  const state = initState({ theme, lang: "en", pendingPermissions: [], doNotDisturb: false,
+  const ctx = { theme, lang: "en", pendingPermissions: [], doNotDisturb: false,
     processKill: () => true, focusHostPlatform: "win32", getCursorScreenPoint: () => ({ x: 0, y: 0 }),
     playSound: noop, sendToRenderer: noop, broadcastSessionSnapshot: noop, syncHitWin: noop,
     sendToHitWin: noop, buildContextMenu: noop, buildTrayMenu: noop, getSessionAliases: () => ({}),
-  });
+  };
+  const state = initState(ctx);
   t.after(() => state.cleanup());
   async function send(body, routeOptions = {}) {
     const req = new EventEmitter(); req.headers = {};
@@ -42,8 +43,32 @@ function harness(t) {
     });
     return response;
   }
-  return { state, send, home };
+  return { state, send, home, ctx };
 }
+
+it("HUD preference follows real state completion, pending response-less questions and subsequent activity", async t => {
+  const h = harness(t); h.ctx.sessionHudHideCompletedCodexEphemeral = true;
+  const opts = { agentId: "codex", hookSource: "codex-official", rawSessionId: raw,
+    sourcePid: 731, agentPid: 732, codexOriginator: "Codex Desktop", codexClientEphemeral: true };
+  h.state.updateSession(id, "thinking", "UserPromptSubmit", opts);
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 1);
+  h.state.updateSession(id, "attention", "Stop", opts);
+  const completed = h.state.sessions.get(id), activity = completed.updatedAt;
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 0);
+  h.ctx.pendingPermissions.push({ agentId: "codex", sessionId: id, res: null, isCodexUserInputNotify: true });
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 1);
+  h.ctx.pendingPermissions.push({ agentId: "codex", sessionId: id, res: {} });
+  h.ctx.pendingPermissions.shift();
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 1, "another request still protects the row");
+  h.ctx.pendingPermissions.length = 0;
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 0);
+  h.ctx.sessionHudHideCompletedCodexEphemeral = false;
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 1);
+  assert.equal(h.state.sessions.get(id), completed); assert.equal(completed.updatedAt, activity);
+  h.ctx.sessionHudHideCompletedCodexEphemeral = true;
+  h.state.updateSession(id, "working", "PreToolUse", opts);
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 1);
+});
 
 it("official client-ephemeral metadata reaches a visible HUD row and selects process-only app focus", async t => {
   const h = harness(t);

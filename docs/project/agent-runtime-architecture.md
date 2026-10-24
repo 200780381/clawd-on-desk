@@ -177,6 +177,15 @@ snapshot 签名包含它；旧审批/通知 fallback 不能覆盖 live 会话的
 激活应用不证明选择了具体侧边聊天，也不允许自动粘贴；已确认临时线程拒绝 queue，
 Direct Send 保持原生手动粘贴边界。未知的旧会话和持久化会话保留既有首次 URI 聚焦。
 
+`sessionHudHideCompletedCodexEphemeral` 默认关闭，是用户可切换的 HUD 显示偏好，并不识别后台来源。
+启用后，仅本机、明确 `codexClientEphemeral=true`、无 transcript、idle 且最新事件为完成的行，
+在无同会话 pending permission / 原生问题 / 通知卡时带 `hudHiddenByPreference=true`。
+这也会收起已完成的普通侧边聊天；未知、持久化、工作/清扫、取消/失败及等待输入的行不按此规则收起。
+HUD 原生几何、renderer、HUD 快捷导航和 HUD 统计统一消费该独立字段；不复用 `hiddenFromHud`，
+不删除或改变 canonical 会话，不影响 Dashboard、Telegram、Discord、额度、审批、完成确认和活动时间。
+开关变化经 controller/effect router 重发 snapshot，pending 卡增删经合并微任务重算；关闭立即恢复仍存活的行，
+下一条真实工作事件也立即恢复 HUD。老 hook 没有临时线程标记时维持原显示，不能仅按无 rollout 猜测。
+
 本机 Codex 会话标题：现有 JSONL monitor 每轮为已观察到生命周期的会话合并读取一次
 `session_index.jsonl`（沿用 512 KiB tail 上限）。新标题/改名以 `session_index:title`
 送入 `updateSessionMetadata(expectedAgentId: "codex")`，即使 rollout 未增长也刷新
