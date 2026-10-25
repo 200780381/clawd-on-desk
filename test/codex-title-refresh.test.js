@@ -4,6 +4,7 @@ const { runCodexHook } = require("../hooks/codex-hook");
 const {
   CODEX_INTERNAL_THREAD_TITLE_REFRESH,
   isCodexTitleRefreshPrompt,
+  isCodexClientEphemeralPayload,
 } = require("../hooks/codex-internal-worker");
 
 // Audited Desktop 26.1016 adaptive-title caller, with synthetic titles only.
@@ -14,6 +15,12 @@ function titleRefresh(title) {
 }
 
 describe("Codex Desktop title-refresh classification", () => {
+  it("does not treat an explicit CLI environment originator as Desktop identity", () => {
+    for (const origin of ["codex-tui", "codex_cli_rs"]) {
+      assert.equal(isCodexClientEphemeralPayload({}, { env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: origin } }), false);
+    }
+    assert.equal(isCodexClientEphemeralPayload({}, { env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" } }), true);
+  });
   for (const title of ["Analysis", "分析", "", 'quoted "title"\\line\nnext', "💡".repeat(30)]) {
     it(`recognizes the complete template with a canonical JSON title ${JSON.stringify(title)}`, () => {
       assert.equal(isCodexTitleRefreshPrompt(titleRefresh(title)), true);
@@ -72,6 +79,29 @@ describe("Codex Desktop title-refresh classification", () => {
   it("keeps an ephemeral CLI request without the client environment marker", async () => {
     const body = await submit({}, {});
     assert.equal(body.codex_internal_thread, undefined);
+  });
+
+  for (const identity of [
+    { originator: "codex-tui" }, { originator: "codex_cli_rs" },
+    { source: "cli" }, { source: "exec" }, { source: "mcp" },
+  ]) {
+    it(`keeps an explicitly identified CLI request despite inherited Desktop environment (${JSON.stringify(identity)})`, async () => {
+      const body = await submit(identity);
+      assert.equal(body.codex_internal_thread, undefined);
+      assert.equal(body.state, "thinking");
+    });
+  }
+
+  it("posts an explicitly CLI SessionStart instead of suppressing it as a Desktop ephemeral initialization", async () => {
+    const posted = [];
+    await runCodexHook({ hook_event_name: "SessionStart", session_id: "explicit-cli-start-fixture", originator: "codex-tui", source: "startup" }, {
+      env: clientEnv, platform: "linux", resolvePid,
+      postState(body, _options, callback) { posted.push(JSON.parse(body)); callback(true, 23333); },
+      async runAutoStart() { throw new Error("unexpected auto-start"); },
+    });
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].event, "SessionStart");
+    assert.equal(posted[0].codex_internal_thread, undefined);
   });
 
   it("keeps a normal no-tool side chat with an ordinary user prompt", async () => {

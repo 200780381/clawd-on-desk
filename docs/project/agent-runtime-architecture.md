@@ -109,7 +109,9 @@ resolveDisplayState 恢复真实显示。手动拖拽、设置预览、DND 与 M
 Codex 桌面端 app-server 下的临时线程（无 transcript 且 hook 环境有非空
 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`）既包含隐藏的「智能建议」后台线程，也包含
 用户自己的侧边聊天，两者 hook 字段完全相同；终端里直接跑的 `codex exec --ephemeral`
-没有该变量，不受影响。`hooks/codex-internal-worker.js` 保留前提判定
+通常没有该变量；从 Desktop 拉起的 CLI 可能继承它，所以明确的 CLI originator 或
+`source=cli/exec/mcp` 优先，不进入客户端临时线程过滤、标题标记或 SessionStart 静默预热。
+`hooks/codex-internal-worker.js` 保留前提判定
 `isCodexClientEphemeralPayload`，并只按两个固定提示词开头认智能建议
 （`isCodexAmbientSuggestionPrompt`）。此外，`isCodexTitleRefreshPrompt` 精确匹配
 Desktop 26.1016 的自适应标题刷新三行模板（旧标题须为 `JSON.stringify` 编码的字符串，

@@ -1,6 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { isCodexCliOriginator } = require("./codex-originator");
 
 // Codex memory consolidation runs in an internal, ephemeral thread
 // (`SessionSource::Internal(MemoryConsolidation)`) whose cwd is pinned to
@@ -8,8 +9,8 @@ const path = require("path");
 // payload has no transcript_path, and openai/codex#40587 stopped forwarding
 // its Stop to user-level hooks. The payload carries no thread_source /
 // session source / thread_id either, which leaves "cwd under CODEX_HOME plus
-// an empty transcript" as the only usable identity. Keep this helper
-// dependency-free: codex-hook.js is deployed to dep-free remote hosts.
+// an empty transcript" as the only usable identity. Keep this helper free of
+// npm dependencies: codex-hook.js is deployed to dep-free remote hosts.
 //
 // This detector must never swallow a real session: a missed worker (a ghost
 // row that lingers) is far cheaper than dropping live events, so the rules
@@ -162,6 +163,11 @@ function isCodexMemoryWorkerPayload(payload, options = {}) {
 function isCodexClientEphemeralPayload(payload, options = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
 
+  // A CLI launched by Desktop can inherit its environment. Explicit CLI
+  // identity remains authoritative even when it has no persistent rollout.
+  const source = typeof payload.source === "string" ? payload.source.trim().toLowerCase() : "";
+  if (isCodexCliOriginator(payload.originator) || ["cli", "exec", "mcp"].includes(source)) return false;
+
   // An ephemeral thread never writes a rollout. A non-empty string, or any
   // other non-null value, means this is not one and must be left alone.
   const transcriptPath = payload.transcript_path;
@@ -171,7 +177,7 @@ function isCodexClientEphemeralPayload(payload, options = {}) {
 
   const env = options.env || process.env;
   const originator = env && env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
-  return typeof originator === "string" && originator.trim() !== "";
+  return typeof originator === "string" && originator.trim() !== "" && !isCodexCliOriginator(originator);
 }
 
 // Wire value the hook tags a recognized ambient-suggestion UserPromptSubmit
