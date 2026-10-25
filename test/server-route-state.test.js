@@ -184,6 +184,43 @@ function callStatePost(body, overrides = {}) {
   });
 }
 
+describe("Codex official plan progress", () => {
+  const raw = "codex:official-plan";
+  const body = (extra = {}) => JSON.stringify({
+    state: "working", event: "PostToolUse", agent_id: "codex", hook_source: "codex-official",
+    session_id: raw, turn_id: "turn-A", tool_name: "update_plan",
+    plan_progress: { completed: 1, total: 3, percent: 999, steps: ["private"] }, ...extra,
+  });
+
+  it("accepts completed local plan calls as turn-scoped official metadata", async () => {
+    const result = await callStatePost(body());
+    const opts = result.calls.updateSession[0][3];
+    assert.deepStrictEqual(opts.planProgress, { completed: 1, total: 3, percent: 33 });
+    assert.equal(opts.planProgressTurnId, "turn-A");
+    assert.equal(opts.planProgressSource, "codex-official");
+    assert.doesNotMatch(JSON.stringify(opts.planProgress), /private|steps/);
+    const invalid = await callStatePost(body({ plan_progress: { completed: 4, total: 3 } }));
+    assert.equal(invalid.calls.updateSession[0][3].planProgress, null);
+  });
+
+  it("rejects plans from unrelated tools, lifecycle events, remote/WSL, child and wrong-owner rows", async () => {
+    for (const extra of [{ agent_id: "claude-code" }, { hook_source: "unverified" },
+      { event: "PreToolUse" }, { event: "PermissionRequest" }, { tool_name: "Bash" },
+      { turn_id: undefined }, { headless: true }, { host: "remote" },
+      { wsl_distro: "Ubuntu" }, { wsl_sourced: true }, { metadata_only: true }]) {
+      const res = await callStatePost(body(extra));
+      assert.equal(res.calls.updateSession[0]?.[3].planProgress, undefined, JSON.stringify(extra));
+    }
+    const remote = await callStatePost(body(), { options: { remoteProfile: { profileId: "remote-one", displayHost: "remote" } } });
+    assert.equal(remote.calls.updateSession[0]?.[3].planProgress, undefined);
+    for (const stored of [{ agentId: "claude-code" }, { agentId: "codex", host: "remote" },
+      { agentId: "codex", wslDistro: "Ubuntu" }, { agentId: "codex", headless: true }]) {
+      const res = await callStatePost(body(), { ctx: { sessions: new Map([[localSessionKey(raw), stored]]) } });
+      assert.equal(res.calls.updateSession[0]?.[3].planProgress, undefined, JSON.stringify(stored));
+    }
+  });
+});
+
 describe("OpenCode serve attach metadata", () => {
   const raw = "opencode:ses_attach123";
   const body = (extra = {}) => JSON.stringify({

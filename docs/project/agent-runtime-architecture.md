@@ -187,6 +187,17 @@ monitor 当前标题与索引不一致时也会重发，覆盖索引恢复场景
 标题通道跳过带 host 或 WSL 标记的会话；刷新覆盖仍在活动或退休记录中的会话
 （最多 50 个活动、100 个退休 rollout）。超出后与既有行为相同，标题等下一次快照广播或生命周期事件更新。
 
+本机 Codex 的 `update_plan` 优先由 official `PostToolUse` 的结构化 `tool_input` 提取为
+`planProgress`（completed / total / percent），包括 Code Mode 内调用；hook 只传计数，不传步骤文本。
+JSONL monitor 仍兼容直接 `function_call`，不解析或执行 Code Mode 脚本。同回合收到 official 计划后，
+缓存的 JSONL 计划（包括 null）不能覆盖它；新回合清空来源标记后恢复 fallback。
+HUD 在标题行下方显示进度条，Dashboard 使用独立可换行的进度行；没有有效计划时不显示。
+进度属于具体回合：`state.js` 私有 Map 保存 turn owner，原始 turn ID 不进入 session 或共享快照；
+新回合清空旧计划，同回合晚于 Stop 到达的进度只更新元数据，不重开回合、不延长活跃时间。
+PermissionRequest 更新聚焦信息时保留已接受的计划，不从审批事件接收新计划或改变 turn owner。
+启动恢复的待回答问题可在本机会话创建后补回同回合计划；普通元数据和问题恢复两条路径均
+检查本机来源，不能将本机 JSONL 计划写进同 key 的 WSL / remote 会话。
+
 Codex 压缩开始通过 official `PreCompact` hook 触发既有 `sweeping` 动画，
 同时覆盖 `manual` / `auto` trigger。`state.js` 按 conversation ID 保留私有显示持有记录，
 压缩持有只在没有其他对话工作/思考时选择清扫；完成、错误和审批提示仍正常播放，

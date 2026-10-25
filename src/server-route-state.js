@@ -48,6 +48,7 @@ const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
 const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 const { extractPermissionToolInput } = require("../hooks/kimi-hook");
 const { normalizeCodexUserInputWire } = require("../hooks/codex-user-input");
+const { isCodexPlanTool, normalizePlanProgress } = require("../hooks/codex-plan-progress");
 const { sanitizeShadowRecord } = require("./windows-process-chain-shadow-log");
 
 const NATIVE_TERMINAL_ANSWER_OPTIONS = Object.freeze({
@@ -1149,6 +1150,14 @@ function handleStatePost(req, res, options) {
             sessionTitle,
             sessionTitleFromPrompt,
             ...attachMetadata,
+            ...(agentId === "codex" && hookSource === "codex-official"
+              && event === "PostToolUse" && isCodexPlanTool(toolName) && codexHookState.turnId
+              && trustedProfileId === "local" && !effHost && !effWslDistro && data.wsl_sourced !== true && !effHeadless
+              && (!existingSession || existingSession.agentId === "codex")
+              && Object.hasOwn(data, "plan_progress")
+              ? { planProgress: normalizePlanProgress(data.plan_progress),
+                planProgressTurnId: codexHookState.turnId, planProgressSource: "codex-official" }
+              : {}),
             contextUsage,
             contextUsageOrigin: resolveStateContextUsageOrigin(agentId, contextUsage),
             assistantLastOutput,
