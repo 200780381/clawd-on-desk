@@ -52,6 +52,8 @@ const MAX_POLL_TOTAL_REQUEST_BYTES = 16 * 1024 * 1024;
 const MAX_POLL_FILE_ATTEMPTS = 64;
 const MAX_ACTIVE_DIR_DISCOVERY_ATTEMPTS_PER_POLL = 16;
 const MAX_STARTUP_RECOVERY_DISCOVERY_OPERATIONS_PER_POLL = 16;
+const MAX_OBSERVED_GROWTH_FILES = 2048;
+const MAX_GROWTH_RECOVERIES_PER_POLL = 2;
 const MAX_REPLAY_WORK_ITEMS = 40;
 const MAX_BACKGROUND_REPLAY_WORK_ITEMS = 32;
 const MAX_DEFERRED_RECENT_PATHS = 192;
@@ -195,6 +197,9 @@ class CodexLogMonitor {
     // LRUs. A long-running monitor may see more than their combined capacity;
     // forgetting the byte offset would replay that rollout when it next grows.
     this._readPositions = new Map();
+    // Stat-only discovery catches Windows append handles whose LastWriteTime
+    // stays frozen. First sight is just a baseline, never activity evidence.
+    this._observedFileGrowth = new Map();
     this._replayWork = new Map();
     this._deferredRecent = new Map();
     this._deferredBackground = new Map();
@@ -261,6 +266,7 @@ class CodexLogMonitor {
     this._tracked.clear();
     this._retiredTracked.clear();
     this._readPositions.clear();
+    this._observedFileGrowth.clear();
     this._replayWork.clear();
     this._deferredRecent.clear();
     this._deferredBackground.clear();
@@ -277,6 +283,7 @@ class CodexLogMonitor {
     const context = {
       remainingAttempts: MAX_POLL_FILE_ATTEMPTS,
       remainingRequestBytes: MAX_POLL_TOTAL_REQUEST_BYTES,
+      remainingGrowthRecoveries: MAX_GROWTH_RECOVERIES_PER_POLL,
     };
     const dirs = this._getSessionDirs(context);
     const startupObserved = !this._didInitialRecoveryScan
@@ -330,15 +337,18 @@ class CodexLogMonitor {
         }
         const observedByStartup = startupObserved.has(candidate.filePath);
         let stat = observedByStartup ? startupObserved.get(candidate.filePath) : null;
+        let statError = null;
         if (!observedByStartup) {
           context.remainingAttempts -= 1;
           try {
             stat = fs.statSync(candidate.filePath);
-          } catch {
+          } catch (error) {
+            statError = error;
             stat = null;
           }
         }
         if (!stat) {
+          if (["ENOENT", "ENOTDIR"].includes(statError?.code)) this._observedFileGrowth.delete(candidate.filePath);
           if (deferred) {
             this._backoffDeferredStatFailure(deferred);
           } else {
@@ -352,8 +362,19 @@ class CodexLogMonitor {
           && !this._tracked.has(candidate.filePath)
           && Date.now() - stat.mtimeMs > ACTIVE_SESSION_WINDOW_MS
         ) {
-          processed += 1;
-          continue;
+          const growth = this._observeFileGrowth(candidate.filePath, stat);
+          if (!growth || !growth.pendingGrowth) {
+            processed += 1;
+            continue;
+          }
+          const retired = this._retiredTracked.get(candidate.filePath);
+          const position = this._readPositions.get(candidate.filePath);
+          if (!retired?.delegatedChild || position?.identity !== this._getFileIdentity(stat)
+            || stat.size < retired.offset) {
+            this._recoverGrownDelegatedFile(candidate, stat, context, growth);
+            processed += 1;
+            continue;
+          }
         }
         const result = this._pollFile(candidate.filePath, candidate.fileName, {
           preStat: stat,
@@ -361,6 +382,10 @@ class CodexLogMonitor {
           set remainingRequestBytes(value) { context.remainingRequestBytes = value; },
         });
         if (result && result.kind === "budget") break;
+        if (this._tracked.has(candidate.filePath)) {
+          const growth = this._observedFileGrowth.get(candidate.filePath);
+          if (growth) growth.pendingGrowth = false;
+        }
         processed += 1;
       }
       this._pollCursor = (start + Math.max(1, processed)) % unique.length;
@@ -371,6 +396,79 @@ class CodexLogMonitor {
     }
     this._pruneTrackedFilesIfNeeded();
     this._refreshSessionTitles();
+  }
+
+  _observeFileGrowth(filePath, stat) {
+    const identity = this._getFileIdentity(stat);
+    const size = Number(stat && stat.size);
+    if (!Number.isSafeInteger(size) || size < 0) return null;
+    const previous = this._observedFileGrowth.get(filePath);
+    if (previous && identity !== null && previous.identity === identity && size >= previous.size) {
+      previous.observations = 2;
+      if (size > previous.size) { previous.retryAt = 0; previous.retryLevel = 0; }
+      previous.pendingGrowth ||= size > previous.size;
+      previous.size = size;
+      return previous;
+    }
+    if (!previous && this._observedFileGrowth.size >= MAX_OBSERVED_GROWTH_FILES) {
+      // Retain a baseline through its second observation. A plain LRU would
+      // churn every entry before comparison when a directory exceeds the cap.
+      let evicted = false;
+      for (const [oldPath, entry] of this._observedFileGrowth) {
+        if (!entry.pendingGrowth && (entry.observations >= 2
+          || Date.now() - entry.firstSeenAt > ACTIVE_SESSION_WINDOW_MS)) {
+          this._observedFileGrowth.delete(oldPath); evicted = true; break;
+        }
+      }
+      if (!evicted) return null;
+    }
+    const baseline = { identity, size, observations: 1, firstSeenAt: Date.now(), pendingGrowth: false };
+    this._observedFileGrowth.set(filePath, baseline);
+    return baseline;
+  }
+
+  _recoverGrownDelegatedFile(candidate, stat, context, growth) {
+    const cost = recoveryReadBudgetCost(stat.size);
+    if (Date.now() < (growth.retryAt || 0) || context.remainingAttempts <= 0 || context.remainingGrowthRecoveries <= 0
+      || context.remainingRequestBytes < cost) return;
+    context.remainingAttempts -= 1;
+    context.remainingGrowthRecoveries -= 1;
+    context.remainingRequestBytes -= cost;
+    const recoveryEvidence = { settled: false };
+    const recovered = this._recoverStalePendingUserInput(candidate.filePath, candidate.fileName, stat,
+      { deferSideEffects: true, requireDelegatedChild: true, recoveryEvidence });
+    let postStat = null;
+    try { postStat = fs.statSync(candidate.filePath); } catch (error) {
+      if (["ENOENT", "ENOTDIR"].includes(error?.code)) this._observedFileGrowth.delete(candidate.filePath);
+      else this._backoffFileGrowthRecovery(growth);
+      return;
+    }
+    const status = this._recoverySnapshotStatus(stat, postStat);
+    if (status === "missing") { this._observedFileGrowth.delete(candidate.filePath); return; }
+    if (status === "changed") {
+      // Replacement/truncation is a new baseline, not append evidence.
+      this._observedFileGrowth.delete(candidate.filePath);
+      this._observeFileGrowth(candidate.filePath, postStat);
+      return;
+    }
+    if (!recovered) {
+      if (status !== "grew" && recoveryEvidence.settled) growth.pendingGrowth = false;
+      else this._backoffFileGrowthRecovery(growth);
+      return;
+    }
+    if (this._tracked.size >= MAX_TRACKED_FILES) this._pruneTrackedFilesIfNeeded(MAX_TRACKED_FILES - 1);
+    if (this._tracked.size >= MAX_TRACKED_FILES) return;
+    this._finalizeRecoveredTracker(recovered);
+    this._tracked.set(candidate.filePath, recovered);
+    this._readPositions.set(candidate.filePath, { offset: recovered.offset, identity: recovered.fileIdentity });
+    this._emitPendingUserInputRequests(recovered);
+    growth.pendingGrowth = false;
+  }
+
+  _backoffFileGrowthRecovery(growth) {
+    growth.retryLevel = Math.min(5, (growth.retryLevel || 0) + 1);
+    growth.retryAt = Date.now() + Math.min(REPLAY_RETRY_MAX_BACKOFF_MS,
+      REPLAY_RETRY_BASE_BACKOFF_MS * (2 ** (growth.retryLevel - 1)));
   }
 
   _refreshSessionTitles() {
@@ -743,6 +841,7 @@ class CodexLogMonitor {
   // earlier open request is moot even without a matching function_call_output
   // (Codex killed mid-turn, terminal closed, etc. leave exactly this shape).
   _recoverStalePendingUserInput(filePath, fileName, recoveryStat = null, options = {}) {
+    const settled = () => { if (options.recoveryEvidence) options.recoveryEvidence.settled = true; };
     let stat = recoveryStat;
     if (!stat) {
       try {
@@ -755,7 +854,7 @@ class CodexLogMonitor {
     const nowMs = Date.now();
     const tooOldForPendingRecovery = nowMs - stat.mtimeMs > RECOVERY_MAX_AGE_MS;
     const sessionId = this._extractSessionId(fileName);
-    if (!sessionId) return null;
+    if (!sessionId) { settled(); return null; }
 
     // Head: session_meta (cwd + subagent role) is always Codex's first
     // record. Fail closed (skip this file entirely) if we can't read a
@@ -768,12 +867,16 @@ class CodexLogMonitor {
     try {
       sessionMeta = JSON.parse(firstLine);
     } catch {
+      settled();
       return null;
     }
     if (sessionMeta.type !== "session_meta" || !sessionMeta.payload || typeof sessionMeta.payload !== "object") {
+      settled();
       return null;
     }
-    if (!matchesSessionMetaIdentity(sessionMeta.payload, `codex:${sessionId}`)) return null;
+    if (!matchesSessionMetaIdentity(sessionMeta.payload, `codex:${sessionId}`)) { settled(); return null; }
+    if (options.requireDelegatedChild === true
+      && !readDelegatedParent(sessionMeta.payload, `codex:${sessionId}`)) { settled(); return null; }
     const cwd = sessionMeta.payload.cwd || "";
     // classifySessionMeta legitimately returns "unknown" for a normal root
     // session — most session_meta records carry no explicit "I am root"
@@ -802,6 +905,7 @@ class CodexLogMonitor {
     } catch {}
     const readSnapshotStatus = this._recoverySnapshotStatus(stat, readPostStat);
     if (readSnapshotStatus === "missing" || readSnapshotStatus === "changed") return null;
+    settled();
     const tailBuf = tailRead.buf;
     // Find the last complete (newline-terminated) record in RAW BYTE space —
     // 0x0A can never appear inside a multi-byte UTF-8 sequence, so this index
