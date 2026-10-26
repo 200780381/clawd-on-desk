@@ -1,7 +1,8 @@
 "use strict";
 const { it } = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
+const fs = require("node:fs"), path = require("node:path");
+const createPermissionPresentationRefresh = require("../src/permission-presentation-refresh");
 const { buildSessionSnapshot, buildSessionSnapshotEntry, sessionSnapshotSignature } = require("../src/state-session-snapshot");
 const { getFocusableLocalHudSessionIds, isFocusableLocalHudSession } = require("../src/session-focus");
 const raw = "codex:aaaaaaaa-1111-4111-8111-111111111111";
@@ -77,17 +78,24 @@ it("pending native question/approval entries protect a completed row until the l
 
 it("main permission changes coalesce a deferred snapshot refresh without resolving or cleaning sessions", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/main.js"), "utf8");
-  const begin = source.indexOf("let codexEphemeralHudRefreshQueued = false;");
-  const end = source.indexOf("  get win()", begin);
-  assert.ok(begin >= 0 && end > begin);
+  assert.match(source, /onPermissionsChanged: refreshPermissionPresentation/);
   const tasks = [], calls = [];
-  const context = { sessionHudHideCompletedCodexEphemeral: true, queueMicrotask: cb => tasks.push(cb),
-    _state: { emitSessionSnapshot: () => calls.push("snapshot") }, console: { warn: () => calls.push("warning") } };
-  vm.createContext(context);
-  vm.runInContext(source.slice(begin, end) + "}; globalThis.changed = _permCtx.onPermissionsChanged;", context);
-  context.changed("added"); context.changed("removed");
+  let state = { emitSessionSnapshot: () => calls.push("snapshot") };
+  const changed = createPermissionPresentationRefresh({ getStateRuntime: () => state, schedule: cb => tasks.push(cb) });
+  changed("added"); changed("removed");
   assert.equal(tasks.length, 1); assert.deepEqual(calls, []);
   tasks.shift()(); assert.deepEqual(calls, ["snapshot"]);
-  context.sessionHudHideCompletedCodexEphemeral = false; context.changed("added");
-  assert.equal(tasks.length, 0);
+  state = { refreshCodexPendingAttention: () => calls.push("presentation"),
+    emitSessionSnapshot: () => { throw new Error("presentation method owns its snapshot"); } };
+  changed("resolved"); tasks.shift()(); assert.deepEqual(calls, ["snapshot", "presentation"]);
+});
+
+it("permission presentation refresh tolerates disposal and can recover from a failed refresh", () => {
+  const tasks = [], errors = []; let disposed = false, fail = true, refreshed = 0;
+  const changed = createPermissionPresentationRefresh({ schedule: cb => tasks.push(cb), isDisposed: () => disposed,
+    getStateRuntime: () => ({ emitSessionSnapshot() { if (fail) throw new Error("fixture failure"); refreshed++; } }),
+    onError: error => errors.push(error.message) });
+  changed(); tasks.shift()(); assert.deepEqual(errors, ["fixture failure"]);
+  fail = false; changed(); tasks.shift()(); assert.equal(refreshed, 1);
+  changed(); disposed = true; tasks.shift()(); assert.equal(refreshed, 1);
 });

@@ -2081,17 +2081,12 @@ const _runtimeAgentGate = createRuntimeAgentGate({
   // but only a clean load after restart can re-open agent paths.
   isAuthoritative: () => !_initialPrefsRecovered && !_settingsController.hasReadFailure(),
 });
-let codexEphemeralHudRefreshQueued = false;
+const refreshPermissionPresentation = require("./permission-presentation-refresh")({
+  getStateRuntime: () => _state,
+  isDisposed: () => isQuitting,
+});
 const _permCtx = {
-  onPermissionsChanged: () => {
-    if (!sessionHudHideCompletedCodexEphemeral || codexEphemeralHudRefreshQueued) return;
-    codexEphemeralHudRefreshQueued = true;
-    queueMicrotask(() => {
-      codexEphemeralHudRefreshQueued = false;
-      try { _state.emitSessionSnapshot(); }
-      catch (err) { console.warn("Clawd: Codex ephemeral HUD permission refresh failed:", err); }
-    });
-  },
+  onPermissionsChanged: refreshPermissionPresentation,
   get win() { return win; },
   get lang() { return lang; },
   get sessions() { return sessions; },
