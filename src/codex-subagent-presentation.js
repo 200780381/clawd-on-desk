@@ -4,6 +4,11 @@ const { normalizeDelegatedThread } = require("../agents/codex-delegated-child");
 const { normalizeCodexTurnId } = require("./codex-turn-id");
 const { CODEX_LOCAL_WORKING_STALE_FLOOR_MS: TTL } = require("./state-stale-cleanup");
 
+// Only objects built from admitted child activity may bypass process dedupe in
+// visual selection. This identity cannot arrive through JSON/session metadata
+// and does not change the canonical session or its focus eligibility.
+const verifiedChildProjections = new WeakSet();
+
 function isLocalParent(session) {
   return session && session.agentId === "codex" && !session.headless
     && session.state !== "sleeping" && !session.host && !session.wslDistro
@@ -82,10 +87,16 @@ function createCodexSubagentPresentation(sessions, now = Date.now) {
     const projected = new Map(sessions);
     for (const id of new Set([...parents.keys(), ...pendingAttentionIds])) {
       const parent = sessions.get(id);
-      if (!isLocalParent(parent) || ["notification", "sweeping", "error"].includes(parent.state)) continue;
+      if (!isLocalParent(parent)) continue;
       const children = parents.get(id);
-      projected.set(id, { ...parent, state: pendingAttentionIds.has(id) ? "notification" : "juggling", displayHint: null,
-        ...(children ? { subagentTracker: { confirmedIds: new Set(children.keys()), legacyFloor: false, recoveredFloor: false } } : {}) });
+      const preserveStrongState = ["notification", "sweeping", "error"].includes(parent.state);
+      if (preserveStrongState && !children?.size) continue;
+      const presentation = { ...parent,
+        state: preserveStrongState ? parent.state : pendingAttentionIds.has(id) ? "notification" : "juggling",
+        displayHint: preserveStrongState ? parent.displayHint : null,
+        ...(children ? { subagentTracker: { confirmedIds: new Set(children.keys()), legacyFloor: false, recoveredFloor: false } } : {}) };
+      if (children?.size) verifiedChildProjections.add(presentation);
+      projected.set(id, presentation);
     }
     return projected;
   }
@@ -120,3 +131,4 @@ function createCodexSubagentPresentation(sessions, now = Date.now) {
 }
 
 module.exports = createCodexSubagentPresentation;
+module.exports.isVerifiedChildProjection = session => verifiedChildProjections.has(session);

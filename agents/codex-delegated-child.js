@@ -34,9 +34,12 @@ function closeTurn(child, turnId) {
   while (child.closed.size > MAX_CLOSED_TURNS) child.closed.delete(child.closed.values().next().value);
 }
 
-function observeDelegatedChild(child, event, turnId, occurredAt) {
+function observeDelegatedChild(child, event, turnId, occurredAt, now = Date.now()) {
   const turn = normalizeCodexTurnId(turnId);
-  if (!child || child.invalid || !turn || !Number.isSafeInteger(occurredAt)) return null;
+  // Reject clock-skewed records before they can close an accepted turn or
+  // advance its ordering fence. A publish-only guard would be too late.
+  if (!child || child.invalid || !turn || !Number.isSafeInteger(occurredAt)
+    || !Number.isSafeInteger(now) || occurredAt > now + 1500) return null;
   if (event === "event_msg:task_started") {
     if (child.parentEndedAt && occurredAt <= child.parentEndedAt) return null;
     if (child.closed.has(turn) || occurredAt < (child.latestStartAt || 0)) return null;

@@ -32,7 +32,17 @@ const {
 const { parseCodexUserInputRecord } = require("../hooks/codex-user-input");
 const { getCodexLogEventKey } = require("../hooks/codex-log-event");
 const { normalizeCodexTurnId } = require("../src/codex-turn-id");
+const { normalizeCodexThreadId } = require("../src/codex-thread-id");
 const { planProgressFromCall } = require("../hooks/codex-plan-progress");
+
+function matchesSessionMetaIdentity(payload, sessionId) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  // Older Codex records omitted id. Keep that established metadata contract,
+  // but an explicitly identified inherited header belongs to its own thread.
+  if (!Object.prototype.hasOwnProperty.call(payload, "id")) return true;
+  const id = normalizeCodexThreadId(payload.id);
+  return !!id && id === normalizeCodexThreadId(sessionId);
+}
 
 const MAX_TRACKED_FILES = 50;
 const MAX_RETIRED_TRACKED_FILES = 100;
@@ -163,6 +173,7 @@ class CodexLogMonitor {
     this._config = agentConfig;
     this._onStateChange = onStateChange;
     this._onSubagentActivity = typeof options.onSubagentActivity === "function" ? options.onSubagentActivity : null;
+    this._delegatedNow = typeof options.now === "function" ? options.now : Date.now;
     this._publishedChildren = new Set();
     this._delegatedChildren = new Map();
     this._delegatedParentEnds = new Map();
@@ -762,6 +773,7 @@ class CodexLogMonitor {
     if (sessionMeta.type !== "session_meta" || !sessionMeta.payload || typeof sessionMeta.payload !== "object") {
       return null;
     }
+    if (!matchesSessionMetaIdentity(sessionMeta.payload, `codex:${sessionId}`)) return null;
     const cwd = sessionMeta.payload.cwd || "";
     // classifySessionMeta legitimately returns "unknown" for a normal root
     // session — most session_meta records carry no explicit "I am root"
@@ -916,6 +928,7 @@ class CodexLogMonitor {
     };
     if (deferSideEffects) {
       recovered._recoverySessionMeta = sessionMeta.payload;
+      recovered._recoverySessionMetaAt = Date.parse(sessionMeta.timestamp);
       if (recentlyActive) {
         recovered._recoveryRawLines = rawLines;
         recovered._recoveryTailIncludesHead = tailStart === 0;
@@ -923,7 +936,7 @@ class CodexLogMonitor {
       return recovered;
     }
     if (!recentlyActive) {
-      this._applySessionMeta(sessionMeta.payload, recovered);
+      this._applySessionMeta(sessionMeta.payload, recovered, Date.parse(sessionMeta.timestamp));
       return recovered;
     }
 
@@ -931,7 +944,7 @@ class CodexLogMonitor {
     // lifecycle events stay silent, while fresh token_count captures seed
     // the session-independent quota store. Head metadata was read separately
     // above so subagent/cwd classification does not depend on the tail window.
-    if (tailStart !== 0) this._applySessionMeta(sessionMeta.payload, recovered);
+    if (tailStart !== 0) this._applySessionMeta(sessionMeta.payload, recovered, Date.parse(sessionMeta.timestamp));
     for (const line of rawLines) {
       if (!line.trim()) continue;
       this._processLine(line, recovered);
@@ -961,16 +974,18 @@ class CodexLogMonitor {
 
   _finalizeRecoveredTracker(recovered) {
     const sessionMeta = recovered._recoverySessionMeta;
+    const sessionMetaAt = recovered._recoverySessionMetaAt;
     const rawLines = recovered._recoveryRawLines;
     const tailIncludesHead = recovered._recoveryTailIncludesHead === true;
     delete recovered._recoverySessionMeta;
+    delete recovered._recoverySessionMetaAt;
     delete recovered._recoveryRawLines;
     delete recovered._recoveryTailIncludesHead;
     if (!Array.isArray(rawLines)) {
-      this._applySessionMeta(sessionMeta, recovered);
+      this._applySessionMeta(sessionMeta, recovered, sessionMetaAt);
       return;
     }
-    if (!tailIncludesHead) this._applySessionMeta(sessionMeta, recovered);
+    if (!tailIncludesHead) this._applySessionMeta(sessionMeta, recovered, sessionMetaAt);
     for (const line of rawLines) {
       if (!line.trim()) continue;
       this._processLine(line, recovered);
@@ -1641,6 +1656,19 @@ class CodexLogMonitor {
     } catch {
       return; // corrupted line, skip
     }
+    if (obj.type === "session_meta" && !matchesSessionMetaIdentity(obj.payload, tracked.sessionId)) return;
+    const parsedOccurredAt = obj && typeof obj.timestamp === "string"
+      ? Date.parse(obj.timestamp)
+      : NaN;
+    const delegated = tracked.delegatedChild;
+    // Proven delegated files may embed parent history after their own header.
+    // Do not let that history seed the child's ordinary turn/question/plan
+    // bookkeeping either. Roots and legacy headers without a birth stay on
+    // their established replay path; no wall-clock birth is invented.
+    if (obj.type !== "session_meta" && delegated && !delegated.invalid
+      && Number.isSafeInteger(parsedOccurredAt)
+      && ((Number.isSafeInteger(delegated.bornAt) && parsedOccurredAt < delegated.bornAt)
+        || parsedOccurredAt > this._delegatedNow() + 1500)) return;
     if (tracked.delegatedChild && !tracked.delegatedChild.invalid) tracked.delegatedChild.owners.add(tracked);
 
     const type = obj.type;
@@ -1667,9 +1695,6 @@ class CodexLogMonitor {
       tracked.activeTurnId = null;
       tracked.turnBoundaryOpen = false;
     };
-    const parsedOccurredAt = obj && typeof obj.timestamp === "string"
-      ? Date.parse(obj.timestamp)
-      : NaN;
     const rawToolUseId = payload && typeof payload === "object"
       ? (payload.call_id || payload.tool_use_id || payload.id)
       : null;
@@ -1685,7 +1710,7 @@ class CodexLogMonitor {
     // Metadata is needed for future live writes even when the session_meta
     // record itself predates monitor start.
     if (type === "session_meta") {
-      this._applySessionMeta(payload, tracked);
+      this._applySessionMeta(payload, tracked, parsedOccurredAt);
     }
     if (type === "turn_context" && payload && typeof payload === "object") {
       const providerHint = resolveCodexModelQuotaProvider(payload.model);
@@ -1713,7 +1738,7 @@ class CodexLogMonitor {
     // A separate child-own fence. Never send a child's turn id through the
     // parent's ordinary state callback/official-hook arbitration.
     const child = tracked.delegatedChild;
-    const childPhase = observeDelegatedChild(child, key, recordTurnId || child?.turnId, parsedOccurredAt);
+    const childPhase = observeDelegatedChild(child, key, recordTurnId || child?.turnId, parsedOccurredAt, this._delegatedNow());
     if (childPhase && !tracked.backfilling) this._publishDelegatedChild(child, childPhase, parsedOccurredAt);
 
     // A new turn invalidates the previous checklist. A terminal response does
@@ -1869,8 +1894,8 @@ class CodexLogMonitor {
     finishTurnTerminal();
   }
 
-  _applySessionMeta(payload, tracked) {
-    if (!payload || typeof payload !== "object") return;
+  _applySessionMeta(payload, tracked, occurredAt = NaN) {
+    if (!matchesSessionMetaIdentity(payload, tracked.sessionId)) return;
     tracked.cwd = payload.cwd || "";
     const childId = normalizeDelegatedThread(tracked.sessionId);
     let parentId = readDelegatedParent(payload, tracked.sessionId);
@@ -1913,6 +1938,14 @@ class CodexLogMonitor {
       tracked.delegatedChild = child;
     }
     if (tracked.delegatedChild) tracked.delegatedChild.owners.add(tracked);
+    if (tracked.delegatedChild && Object.prototype.hasOwnProperty.call(payload, "id")
+      && Number.isSafeInteger(occurredAt) && occurredAt <= this._delegatedNow() + 1500) {
+      // A fork can embed its parent's entire rollout after its own header.
+      // Only the child's identified header establishes the delegated cutoff;
+      // missing/invalid timestamps retain legacy behavior without a fake now.
+      const child = tracked.delegatedChild;
+      child.bornAt = Number.isSafeInteger(child.bornAt) ? Math.min(child.bornAt, occurredAt) : occurredAt;
+    }
     tracked.codexOriginator = typeof payload.originator === "string" && payload.originator.trim()
       ? payload.originator.trim()
       : tracked.codexOriginator;
@@ -2073,7 +2106,7 @@ class CodexLogMonitor {
   _emitBackfillSnapshot(tracked) {
     const child = tracked.delegatedChild;
     if (child && child.turnId
-      && Date.now() - child.lastActivityAt <= CHILD_ACTIVITY_TTL_MS) {
+      && this._delegatedNow() - child.lastActivityAt <= CHILD_ACTIVITY_TTL_MS) {
       this._publishDelegatedChild(child, "start", child.lastActivityAt);
     }
     // The backfill snapshot is the one non-capture emission that carries the
@@ -2276,14 +2309,17 @@ class CodexLogMonitor {
     if (!child) return;
     // SessionEnd is authoritative across all duplicate file owners. Retirement
     // is only the loss of one tracker and must not end another live owner.
-    if (child.turnId) observeDelegatedChild(child, "event_msg:task_complete", child.turnId, Date.now());
+    if (child.turnId) {
+      const now = this._delegatedNow();
+      observeDelegatedChild(child, "event_msg:task_complete", child.turnId, now, now);
+    }
     this._releaseDelegatedChild(child);
   }
 
   endSubagentsOfParent(rawThreadId) {
     const parentId = normalizeDelegatedThread(rawThreadId);
     if (!parentId) return;
-    const endedAt = Date.now();
+    const endedAt = this._delegatedNow();
     // Survives monitor disable/re-enable. A later-discovered historical child
     // cannot reopen the ended generation after the visible parent reappears.
     this._delegatedParentEnds.delete(parentId);
@@ -2299,10 +2335,11 @@ class CodexLogMonitor {
   _publishDelegatedChild(child, phase, occurredAt) {
     if (!child || !this._onSubagentActivity) return;
     const turnId = phase === "stop" ? child.publishedTurnId : child.turnId;
-    if (!turnId || occurredAt > Date.now() + 1500) return;
+    const now = this._delegatedNow();
+    if (!turnId || occurredAt > now + 1500) return;
     if (phase === "start" && child.publishedTurnId === turnId) return;
     if (phase === "activity" && child.publishedTurnId !== turnId) {
-      if (Date.now() - occurredAt > CHILD_ACTIVITY_TTL_MS) return;
+      if (now - occurredAt > CHILD_ACTIVITY_TTL_MS) return;
       // Only a real, replay-accepted event in an open, non-closed child turn
       // reaches here. It can recover a last-owner LRU retirement. SessionEnd
       // closes the turn above, so old activity cannot take this path.
@@ -2321,7 +2358,7 @@ class CodexLogMonitor {
   }
 
   _releaseDelegatedChild(child) {
-    if (child && child.publishedTurnId) this._publishDelegatedChild(child, "stop", Date.now());
+    if (child && child.publishedTurnId) this._publishDelegatedChild(child, "stop", this._delegatedNow());
   }
 
   _emitStateChange(tracked, state, event, extra = null) {

@@ -185,12 +185,14 @@ describe("Codex delegated child presentation", () => {
 });
 
 describe("Codex monitor delegated lifecycle", () => {
-  let dir, monitor, events, tracked;
+  let dir, monitor, events, tracked, nowMs;
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-child-"));
     events = [];
+    nowMs = null;
     monitor = new CodexLogMonitor({ ...codex, logConfig: { ...codex.logConfig, sessionDir: dir } }, () => {}, {
       onSubagentActivity: (parentId, event) => events.push({ parentId, ...event }),
+      now: () => nowMs ?? Date.now(),
     });
     monitor._findCodexWriterPid = () => null;
     tracked = { sessionId: raw("child"), filePath: path.join(dir, "child.jsonl"), lastState: "idle",
@@ -237,6 +239,140 @@ describe("Codex monitor delegated lifecycle", () => {
     stop("turn-b", "turn_aborted");
     assert.equal(events.at(-1).phase, "stop");
     start("turn-a"); assert.equal(events.at(-1).phase, "stop");
+  });
+
+  it("rejects future records before they alter child turns or block later valid work", () => {
+    nowMs = Date.now();
+    header();
+    feed("event_msg", { type: "task_started", turn_id: "accepted" }, nowMs);
+    const child = tracked.delegatedChild;
+    for (const [type, turn] of [["task_started", "future"], ["task_complete", "accepted"], ["turn_aborted", "accepted"]]) {
+      feed("event_msg", { type, turn_id: turn }, nowMs + 1501);
+    }
+    feed("response_item", { type: "function_call", turn_id: "accepted", name: "exec_command" }, nowMs + 60000);
+    assert.equal(child.turnId, "accepted");
+    assert.equal(child.latestStartAt, nowMs);
+    assert.equal(child.lastActivityAt, nowMs);
+    assert.deepEqual([...child.closed], []);
+    assert.deepEqual(events.map(e => [e.phase, e.turnId]), [["start", "accepted"]]);
+    feed("event_msg", { type: "task_complete", turn_id: "accepted" }, nowMs + 1);
+    feed("event_msg", { type: "task_started", turn_id: "next-valid" }, nowMs + 2);
+    assert.deepEqual(events.map(e => [e.phase, e.turnId]), [
+      ["start", "accepted"], ["stop", "accepted"], ["start", "next-valid"],
+    ]);
+    feed("event_msg", { type: "task_complete", turn_id: "next-valid" }, nowMs + 1500);
+    assert.equal(events.at(-1).phase, "stop", "the allowed skew boundary remains accepted");
+  });
+
+  it("replays a fork without inheriting its parent's header, open turn, question, plan or title", () => {
+    nowMs = Date.now();
+    const source = { subagent: { thread_spawn: { parent_thread_id: native("parent") } } };
+    tracked.backfilling = true;
+    feed("session_meta", { id: native("child"), cwd: "/fixture/child", originator: "Codex Desktop", source }, nowMs);
+    const child = tracked.delegatedChild;
+    feed("session_meta", { id: native("parent"), cwd: "/fixture/parent", originator: "codex-cli", source: "cli" }, nowMs - 10000);
+    feed("event_msg", { type: "task_started", turn_id: "inherited-open" }, nowMs - 9000);
+    feed("response_item", { type: "function_call", name: "request_user_input", call_id: "parent-question",
+      arguments: JSON.stringify({ questions: [{ id: "choice", question: "Fixture?", options: [] }] }) }, nowMs - 8000);
+    feed("response_item", { type: "function_call", name: "update_plan",
+      arguments: JSON.stringify({ plan: [{ step: "Fixture", status: "in_progress" }] }) }, nowMs - 7000);
+    feed("turn_context", { summary: "Inherited title" }, nowMs - 6000);
+    feed("event_msg", { type: "agent_message", message: "Inherited output" }, nowMs - 5000);
+    feed("event_msg", { type: "task_complete", turn_id: "inherited-closed" }, nowMs - 4000);
+    assert.equal(tracked.delegatedChild, child);
+    assert.equal(monitor._isTrackedSubagent(tracked), true);
+    assert.equal(tracked.cwd, "/fixture/child");
+    assert.equal(tracked.codexOriginator, "Codex Desktop");
+    assert.equal(tracked.activeTurnId ?? null, null);
+    assert.equal(tracked.turnBoundaryOpen, false);
+    assert.equal(tracked.pendingUserInputs.size, 0);
+    assert.equal(tracked.planProgress ?? null, null);
+    assert.equal(tracked.sessionTitle ?? null, null);
+    assert.equal(tracked.assistantLastOutput ?? null, null);
+    assert.equal(child.turnId, null);
+    assert.deepEqual([...child.closed], []);
+    assert.deepEqual(events, []);
+    // A genuine same-thread metadata update remains supported, but cannot
+    // advance birth past the real start that follows in the file.
+    feed("session_meta", { id: native("child"), cwd: "/fixture/updated-child", source }, nowMs + 100);
+    assert.equal(child.bornAt, nowMs);
+    assert.equal(tracked.cwd, "/fixture/updated-child");
+    feed("event_msg", { type: "task_started", turn_id: "child-own" }, nowMs);
+    tracked.backfilling = false; monitor._emitBackfillSnapshot(tracked);
+    assert.deepEqual(events.map(e => [e.phase, e.turnId]), [["start", "child-own"]]);
+    feed("event_msg", { type: "task_complete", turn_id: "child-own" }, nowMs + 101);
+    assert.equal(events.at(-1).phase, "stop");
+    assert.equal(tracked.turnBoundaryOpen, false);
+  });
+
+  it("isolates malformed and foreign metadata while retaining root updates and missing-id legacy records", () => {
+    nowMs = Date.now();
+    const source = { subagent: { thread_spawn: { parent_thread_id: native("parent") } } };
+    feed("session_meta", { id: native("child"), source, cwd: "/fixture/child" }, nowMs);
+    const child = tracked.delegatedChild;
+    for (const id of [null, "", 12, {}, "malformed", native("parent")]) {
+      feed("session_meta", { id, source: "cli", cwd: "/fixture/wrong" }, nowMs);
+    }
+    assert.equal(tracked.delegatedChild, child);
+    assert.equal(tracked.cwd, "/fixture/child");
+    assert.equal(monitor._isTrackedSubagent(tracked), true);
+    // A known guardian must not become delegated through an inherited child header.
+    tracked = { sessionId: raw("guardian"), filePath: path.join(dir, "guardian.jsonl"), lastState: "idle",
+      pendingUserInputs: new Map(), turnBoundaryOpen: false, backfilling: true };
+    feed("session_meta", { id: native("guardian"), source: { subagent: { other: "guardian" } } }, nowMs);
+    feed("session_meta", { id: native("child"), source }, nowMs);
+    feed("event_msg", { type: "task_started", turn_id: "guardian-turn" }, nowMs);
+    monitor._emitBackfillSnapshot(tracked);
+    assert.equal(tracked.delegatedChild, undefined);
+    assert.equal(monitor._isTrackedSubagent(tracked), true);
+    assert.deepEqual(events, []);
+    // Root metadata with its own ID and legacy headers with no ID still update.
+    tracked = { sessionId: raw("parent"), filePath: path.join(dir, "root.jsonl"), lastState: "idle",
+      pendingUserInputs: new Map(), turnBoundaryOpen: false, backfilling: true };
+    feed("session_meta", { id: native("parent"), source: "cli", cwd: "/fixture/root" }, nowMs);
+    feed("session_meta", { id: native("parent"), source: "cli", cwd: "/fixture/root-updated" }, nowMs + 1);
+    feed("session_meta", { source: "cli", cwd: "/fixture/legacy-updated" }, nowMs + 2);
+    feed("event_msg", { type: "task_started", turn_id: "root-old" }, nowMs - 1000);
+    assert.equal(tracked.cwd, "/fixture/legacy-updated");
+    assert.equal(tracked.activeTurnId, "root-old", "root replay does not acquire a child birth cutoff");
+    assert.equal(monitor._isTrackedSubagent(tracked), false);
+    assert.equal(tracked.delegatedChild, undefined);
+  });
+
+  it("does not invent a child birth when an own header omits its timestamp", () => {
+    nowMs = Date.now();
+    tracked.backfilling = true;
+    monitor._processLine(JSON.stringify({ type: "session_meta", payload: { id: native("child"), source: {
+      subagent: { thread_spawn: { parent_thread_id: native("parent") } },
+    } } }), tracked);
+    assert.equal(tracked.delegatedChild.bornAt, undefined);
+    feed("event_msg", { type: "task_started", turn_id: "legacy" }, nowMs - 1000);
+    tracked.backfilling = false; monitor._emitBackfillSnapshot(tracked);
+    assert.equal(events.at(-1).phase, "start");
+  });
+
+  it("preserves the identified child birth across cold head/tail recovery and deferred finalization", () => {
+    nowMs = Date.now();
+    const filename = `rollout-2026-10-26T00-00-00-${native("child")}.jsonl`;
+    const file = path.join(dir, filename);
+    const line = (type, payload, at) => JSON.stringify({ type, payload, timestamp: new Date(at).toISOString() });
+    fs.writeFileSync(file, [
+      line("session_meta", { id: native("child"), source: {
+        subagent: { thread_spawn: { parent_thread_id: native("parent") } },
+      } }, nowMs - 1000),
+      JSON.stringify({ type: "fixture-padding", padding: "x".repeat(1100000) }),
+      line("session_meta", { id: native("parent"), source: "cli" }, nowMs - 5000),
+      line("event_msg", { type: "task_started", turn_id: "inherited" }, nowMs - 4000),
+      line("event_msg", { type: "task_started", turn_id: "own" }, nowMs - 500),
+    ].join("\n") + "\n");
+    const recovered = monitor._recoverStalePendingUserInput(file, filename, null, { deferSideEffects: true });
+    assert.ok(recovered);
+    assert.deepEqual(events, []);
+    monitor._finalizeRecoveredTracker(recovered);
+    assert.equal(recovered.delegatedChild.bornAt, nowMs - 1000);
+    assert.equal(recovered.delegatedChild.turnId, "own");
+    assert.deepEqual([...recovered.delegatedChild.closed], []);
+    assert.deepEqual(events.map(e => [e.phase, e.turnId]), [["start", "own"]]);
   });
 
   it("backfill emits only a fresh active final snapshot, never finished or ancient turns", () => {
