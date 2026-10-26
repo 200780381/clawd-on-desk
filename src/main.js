@@ -2079,7 +2079,12 @@ const _runtimeAgentGate = createRuntimeAgentGate({
   // but only a clean load after restart can re-open agent paths.
   isAuthoritative: () => !_initialPrefsRecovered && !_settingsController.hasReadFailure(),
 });
+const refreshPermissionPresentation = require("./permission-presentation-refresh")({
+  getStateRuntime: () => _state,
+  isDisposed: () => isQuitting,
+});
 const _permCtx = {
+  onPermissionsChanged: refreshPermissionPresentation,
   get win() { return win; },
   get lang() { return lang; },
   get sessions() { return sessions; },
@@ -2614,6 +2619,7 @@ sessionAutomationCoordinator = createSessionAutomationCoordinator({
 // (kept as a pure helper so the semantics are unit-tested).
 let powerSaveBlockerId = null;
 function anySessionInProgress() {
+  if (_state.hasActiveCodexSubagents()) return true;
   for (const [, s] of sessions) {
     if (isSessionInProgress(s)) return true;
   }

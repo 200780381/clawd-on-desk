@@ -384,12 +384,25 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
   const agentId = (session && session.agentId) || null;
   const planProgress = agentId === "codex" ? normalizePlanProgress(session && session.planProgress) : null;
   const state = (session && session.state) || "idle";
+  const presentation = agentId === "codex" && !session.headless && !session.host && !session.wslDistro
+    && session.platform !== "wsl"
+    && (session.profileId || "local") === "local" && typeof options.getSessionPresentation === "function"
+    ? options.getSessionPresentation(id) : null;
+  const activeSubagentCount = Number.isSafeInteger(presentation?.activeSubagentCount)
+    && presentation.activeSubagentCount > 0 && presentation.activeSubagentCount <= 200
+    ? presentation.activeSubagentCount : 0;
+  const pendingAttention = presentation?.pendingAttention === true;
+  const effectiveState = pendingAttention ? "notification"
+    : activeSubagentCount > 0 && presentation.effectiveState === "juggling" ? "juggling" : state;
   // Existing hidden reasons also disable focus (there is nothing to jump to).
   // The awaiting-activity marker is different: it only hides the HUD row, so the
   // Dashboard can still list the conversation and open it on demand.
   const hiddenByExistingReason = shouldAutoClearDetachedSession(session, badge, options)
     || isSupersededLocalCodexProcessSession(id, session, options.latestLocalCodexProcessIds);
-  const hiddenFromHud = hiddenByExistingReason || isSessionAwaitingActivity(session);
+  // Positive delegated-work / pending-attention facts keep the parent visible,
+  // but do not prove a focus target or change the shared process dedupe policy.
+  const hiddenFromHud = (hiddenByExistingReason && activeSubagentCount === 0 && !pendingAttention)
+    || isSessionAwaitingActivity(session);
   const startupRecovered = !!(session && session.startupRecovered === true);
   const focusTarget = session && !session.headless && !startupRecovered && state !== "sleeping" && !hiddenByExistingReason
     ? getSessionFocusTarget({ ...(session || {}), id }, {
@@ -417,6 +430,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
     agentName: resolveAgentDisplayName(agentId),
     iconUrl: getAgentIconUrl(agentId),
     state,
+    ...(presentation ? { effectiveState, activeSubagentCount, pendingAttention } : {}),
     startupRecovered,
     badge,
     hiddenFromHud,
@@ -478,6 +492,9 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
             ? automationIdentity.reason
             : "identity-not-verified"
         ),
+    // Keep this final so a HUD-only preference field added by another feature
+    // cannot overwrite the verified activity/attention visibility veto.
+    ...(activeSubagentCount > 0 || pendingAttention ? { hudHiddenByPreference: false } : {}),
   };
 }
 
@@ -669,6 +686,9 @@ function sessionSnapshotSignature(snapshot) {
       rawSessionId: entry.rawSessionId,
       displaySessionTag: entry.displaySessionTag,
       state: entry.state,
+      effectiveState: entry.effectiveState,
+      activeSubagentCount: entry.activeSubagentCount,
+      pendingAttention: entry.pendingAttention,
       startupRecovered: !!entry.startupRecovered,
       badge: entry.badge,
       hasAlias: entry.hasAlias,

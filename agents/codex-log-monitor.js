@@ -18,6 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const CodexSubagentClassifier = require("./codex-subagent-classifier");
+const { normalizeDelegatedThread, readDelegatedParent, observeDelegatedChild, CHILD_ACTIVITY_TTL_MS } = require("./codex-delegated-child");
 const { bareCodexSessionId, readCodexThreadName, readCodexThreadNames } = require("../hooks/codex-session-index");
 const {
   clampAssistantOutputText,
@@ -161,6 +162,10 @@ class CodexLogMonitor {
   constructor(agentConfig, onStateChange, options = {}) {
     this._config = agentConfig;
     this._onStateChange = onStateChange;
+    this._onSubagentActivity = typeof options.onSubagentActivity === "function" ? options.onSubagentActivity : null;
+    this._publishedChildren = new Set();
+    this._delegatedChildren = new Map();
+    this._delegatedParentEnds = new Map();
     this._onActivity = typeof options.onActivity === "function" ? options.onActivity : null;
     this._classifier = options.classifier || new CodexSubagentClassifier();
     this._onUserInputRequest = typeof options.onUserInputRequest === "function"
@@ -236,6 +241,8 @@ class CodexLogMonitor {
   }
 
   stop() {
+    for (const child of [...this._publishedChildren]) this._releaseDelegatedChild(child);
+    this._delegatedChildren.clear();
     if (this._interval) {
       clearInterval(this._interval);
       this._interval = null;
@@ -1253,6 +1260,7 @@ class CodexLogMonitor {
         hasEmittedState: retired ? retired.hasEmittedState === true : false,
         hadToolUse: retired ? retired.hadToolUse === true : false,
         isSubagent: retired ? retired.isSubagent === true : false,
+        delegatedChild: retired ? retired.delegatedChild || null : null,
         agentPid: retired ? retired.agentPid : null,
         assistantLastOutput: retired ? retired.assistantLastOutput || null : null,
         assistantLastOutputTruncated: retired ? retired.assistantLastOutputTruncated === true : false,
@@ -1293,6 +1301,7 @@ class CodexLogMonitor {
       this._readPositions.set(filePath, { offset: resumeOffset, identity: fileIdentity });
     } else if (this._isReplayActive(tracked) && !this._replayWork.has(filePath)) {
       if (!this._admitReplayWork(filePath, fileName, tracked, stat)) {
+        this._detachDelegatedChildOwner(tracked);
         this._tracked.delete(filePath);
         return { kind: "deferred", requestedBytes: 0, bytesRead: 0 };
       }
@@ -1534,6 +1543,7 @@ class CodexLogMonitor {
     );
     if (!item.hasValidatedSnapshot) {
       this._clearUnpublishedReplayState(tracked);
+      this._detachDelegatedChildOwner(tracked);
       this._tracked.delete(filePath);
       this._replayWork.delete(filePath);
       // This attach never reached an authoritative opened snapshot. Keeping
@@ -1563,6 +1573,11 @@ class CodexLogMonitor {
 
   _clearUnpublishedReplayState(tracked) {
     if (!tracked) return;
+    if (tracked.backfilling && tracked.delegatedChild) {
+      // A discarded replay has not earned a parent projection. Do not reset a
+      // shared child's newer live turn learned from another rollout file.
+      if (!tracked.delegatedChild.publishedTurnId && tracked.delegatedChild.owners.size <= 1) tracked.delegatedChild.turnId = null;
+    }
     if (tracked.initializingUserInputs && tracked.pendingUserInputs instanceof Map) {
       tracked.pendingUserInputs.clear();
     }
@@ -1626,6 +1641,7 @@ class CodexLogMonitor {
     } catch {
       return; // corrupted line, skip
     }
+    if (tracked.delegatedChild && !tracked.delegatedChild.invalid) tracked.delegatedChild.owners.add(tracked);
 
     const type = obj.type;
     const payload = obj.payload;
@@ -1693,6 +1709,12 @@ class CodexLogMonitor {
         return;
       }
     }
+
+    // A separate child-own fence. Never send a child's turn id through the
+    // parent's ordinary state callback/official-hook arbitration.
+    const child = tracked.delegatedChild;
+    const childPhase = observeDelegatedChild(child, key, recordTurnId || child?.turnId, parsedOccurredAt);
+    if (childPhase && !tracked.backfilling) this._publishDelegatedChild(child, childPhase, parsedOccurredAt);
 
     // A new turn invalidates the previous checklist. A terminal response does
     // not imply that every declared plan step completed.
@@ -1850,6 +1872,47 @@ class CodexLogMonitor {
   _applySessionMeta(payload, tracked) {
     if (!payload || typeof payload !== "object") return;
     tracked.cwd = payload.cwd || "";
+    const childId = normalizeDelegatedThread(tracked.sessionId);
+    let parentId = readDelegatedParent(payload, tracked.sessionId);
+    const ancestors = new Set([childId]);
+    let ancestor = parentId;
+    while (ancestor) {
+      if (ancestors.has(ancestor)) {
+        for (const id of ancestors) {
+          const member = this._delegatedChildren.get(id);
+          if (member) { this._releaseDelegatedChild(member); member.invalid = true; }
+        }
+        parentId = null;
+        break;
+      }
+      ancestors.add(ancestor);
+      ancestor = this._delegatedChildren.get(ancestor)?.parentId;
+    }
+    if (tracked.delegatedChild && tracked.delegatedChild.parentId !== parentId) {
+      this._detachDelegatedChildOwner(tracked);
+      tracked.delegatedChild = null;
+    }
+    if (parentId && !tracked.delegatedChild) {
+      let child = this._delegatedChildren.get(childId);
+      if (child && child.parentId !== parentId) {
+        this._releaseDelegatedChild(child);
+        child.invalid = true; // Conflicting ownership for one immutable thread.
+      }
+      if (!child) {
+        if (this._delegatedChildren.size >= 200) {
+          const [id, oldest] = this._delegatedChildren.entries().next().value;
+          this._releaseDelegatedChild(oldest);
+          oldest.invalid = true;
+          this._delegatedChildren.delete(id);
+        }
+        child = { parentId, childId, turnId: null, publishedTurnId: null,
+          parentEndedAt: this._delegatedParentEnds.get(parentId) || null,
+          lastActivityAt: 0, closed: new Set(), owners: new Set() };
+        this._delegatedChildren.set(childId, child);
+      }
+      tracked.delegatedChild = child;
+    }
+    if (tracked.delegatedChild) tracked.delegatedChild.owners.add(tracked);
     tracked.codexOriginator = typeof payload.originator === "string" && payload.originator.trim()
       ? payload.originator.trim()
       : tracked.codexOriginator;
@@ -1970,6 +2033,7 @@ class CodexLogMonitor {
     if (this._replayWork.has(filePath)) return;
     this._tracked.delete(filePath);
     if (!filePath || !tracked) return;
+    this._detachDelegatedChildOwner(tracked);
     this._retiredTracked.delete(filePath);
     this._retiredTracked.set(filePath, {
       sessionId: tracked.sessionId,
@@ -1985,6 +2049,7 @@ class CodexLogMonitor {
       hasEmittedState: tracked.hasEmittedState === true,
       hadToolUse: tracked.hadToolUse === true,
       isSubagent: tracked.isSubagent === true,
+      delegatedChild: tracked.delegatedChild || null,
       agentPid: tracked.agentPid || null,
       assistantLastOutput: tracked.assistantLastOutput || null,
       assistantLastOutputTruncated: tracked.assistantLastOutputTruncated === true,
@@ -2006,6 +2071,11 @@ class CodexLogMonitor {
   }
 
   _emitBackfillSnapshot(tracked) {
+    const child = tracked.delegatedChild;
+    if (child && child.turnId
+      && Date.now() - child.lastActivityAt <= CHILD_ACTIVITY_TTL_MS) {
+      this._publishDelegatedChild(child, "start", child.lastActivityAt);
+    }
     // The backfill snapshot is the one non-capture emission that carries the
     // cached quota: it is how a restart re-seeds the account store with the
     // last-known (still freshness-gated) numbers parsed from history.
@@ -2192,6 +2262,66 @@ class CodexLogMonitor {
       return false;
     }
     return tracked.isSubagent === true;
+  }
+
+  _detachDelegatedChildOwner(tracked) {
+    const child = tracked && tracked.delegatedChild;
+    if (!child) return;
+    child.owners.delete(tracked);
+    if (!child.owners.size) this._releaseDelegatedChild(child);
+  }
+
+  endSubagent(rawThreadId) {
+    const child = this._delegatedChildren.get(normalizeDelegatedThread(rawThreadId));
+    if (!child) return;
+    // SessionEnd is authoritative across all duplicate file owners. Retirement
+    // is only the loss of one tracker and must not end another live owner.
+    if (child.turnId) observeDelegatedChild(child, "event_msg:task_complete", child.turnId, Date.now());
+    this._releaseDelegatedChild(child);
+  }
+
+  endSubagentsOfParent(rawThreadId) {
+    const parentId = normalizeDelegatedThread(rawThreadId);
+    if (!parentId) return;
+    const endedAt = Date.now();
+    // Survives monitor disable/re-enable. A later-discovered historical child
+    // cannot reopen the ended generation after the visible parent reappears.
+    this._delegatedParentEnds.delete(parentId);
+    this._delegatedParentEnds.set(parentId, endedAt);
+    while (this._delegatedParentEnds.size > 200) this._delegatedParentEnds.delete(this._delegatedParentEnds.keys().next().value);
+    for (const child of this._delegatedChildren.values()) {
+      if (child.parentId !== parentId) continue;
+      child.parentEndedAt = endedAt;
+      this.endSubagent(child.childId);
+    }
+  }
+
+  _publishDelegatedChild(child, phase, occurredAt) {
+    if (!child || !this._onSubagentActivity) return;
+    const turnId = phase === "stop" ? child.publishedTurnId : child.turnId;
+    if (!turnId || occurredAt > Date.now() + 1500) return;
+    if (phase === "start" && child.publishedTurnId === turnId) return;
+    if (phase === "activity" && child.publishedTurnId !== turnId) {
+      if (Date.now() - occurredAt > CHILD_ACTIVITY_TTL_MS) return;
+      // Only a real, replay-accepted event in an open, non-closed child turn
+      // reaches here. It can recover a last-owner LRU retirement. SessionEnd
+      // closes the turn above, so old activity cannot take this path.
+      phase = "start";
+    }
+    if (phase === "start") {
+      if (child.publishedTurnId) this._releaseDelegatedChild(child);
+      child.publishedTurnId = turnId;
+      this._publishedChildren.add(child);
+    }
+    this._onSubagentActivity(child.parentId, { childId: child.childId, turnId, phase, occurredAt });
+    if (phase === "stop") {
+      child.publishedTurnId = null;
+      this._publishedChildren.delete(child);
+    }
+  }
+
+  _releaseDelegatedChild(child) {
+    if (child && child.publishedTurnId) this._publishDelegatedChild(child, "stop", Date.now());
   }
 
   _emitStateChange(tracked, state, event, extra = null) {
