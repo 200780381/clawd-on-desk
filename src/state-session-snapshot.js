@@ -369,11 +369,17 @@ function isSessionAwaitingActivity(session) {
 // An opt-in HUD presentation preference, not internal-source classification or
 // session retirement. Keep every canonical entry available to other consumers.
 function shouldHideCompletedCodexEphemeralFromHud(id, session, badge, options) {
+  const originator = session && (session.codexOriginator || session.originator);
+  const source = typeof session?.codexSource === "string" ? session.codexSource.trim().toLowerCase() : "";
   if (options.sessionHudHideCompletedCodexEphemeral !== true || !session
       || session.agentId !== "codex" || session.codexClientEphemeral !== true
-      || !isCodexDesktopOriginator(session.codexOriginator || session.originator)
+      // Native macOS hooks can report typed ephemeral without an originator.
+      // This display fact must not manufacture Desktop dedupe/automation identity.
+      || (originator && !isCodexDesktopOriginator(originator))
+      || ["cli", "exec", "mcp", "internal", "subagent", "agent-subagent"].includes(source)
       || (session.profileId || "local") !== "local" || session.host
       || session.wslDistro || session.platform === "wsl" || session.headless
+      || session.subagentId || session.subagentType || session.recapIsSubagent
       || session.state !== "idle" || badge !== "done") return false;
   if (session.transcriptPath != null
       && (typeof session.transcriptPath !== "string" || session.transcriptPath.trim())) return false;

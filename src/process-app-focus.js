@@ -152,8 +152,14 @@ function focusProcessAppWindow(request, { execFile, platform, windowsActivationC
   if (platform !== "darwin") return Promise.resolve({ confirmed: false, reason: "unsupported-platform" });
   return run("ps", ["-ww", "-axo", "pid=,ppid=,lstart=,comm="], { timeout: 1000, env: { ...process.env, LC_ALL: "C" } }).then(async result => {
     if (result.error) return { confirmed: false, reason: "process-query-failed" };
-    const proof = macCodexProcessTarget(source, result.stdout);
-    if (!proof) return { confirmed: false, reason: "unverified-codex-process" };
+    // Darwin's ordinary resolver anchors sourcePid at the GUI, while agentPid
+    // identifies its app-server. Keep those metadata semantics unchanged and
+    // verify both ends here. Older entries may carry the server as sourcePid.
+    const server = pid(request && request.agentPid) || source;
+    const proof = macCodexProcessTarget(server, result.stdout);
+    if (!proof || (source !== server && source !== proof.target.pid)) {
+      return { confirmed: false, reason: "unverified-codex-process" };
+    }
     // Recheck process birth times and images immediately before activation.
     const script = `if (do shell script "LC_ALL=C /bin/ps -ww -p ${proof.source.pid} -o lstart=,comm=") is not ${appleString(proof.source.identity)} then return "process-changed"
 if (do shell script "LC_ALL=C /bin/ps -ww -p ${proof.target.pid} -o lstart=,comm=") is not ${appleString(proof.target.identity)} then return "process-changed"

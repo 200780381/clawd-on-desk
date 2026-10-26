@@ -2757,7 +2757,7 @@ function focusDashboardSession(sessionId, options = {}) {
   const focusTarget = getSessionFocusTarget(focusEntry, { osPlatform: process.platform });
   if (focusTarget.type === "codex-app") {
     // Existing local process activation only: no protocol, resume or launcher.
-    Promise.resolve(focusProcessAppWindow({ sourcePid: focusEntry.sourcePid }))
+    Promise.resolve(focusProcessAppWindow({ sourcePid: focusEntry.sourcePid, agentPid: focusEntry.agentPid }))
       .then(result => focusLog(`focus result branch=codex-app reason=${result.reason || "unknown"} source=${requestSource} sid=${id}`))
       .catch(() => focusLog(`focus result branch=codex-app reason=process-focus-failed source=${requestSource} sid=${id}`));
     return true;

@@ -43,6 +43,52 @@ it("macOS activates only the same verified bundle's existing GUI process and rec
   assert.equal(calls[1][1][1].includes("999"), false); assert.equal(calls[1][1][1].includes("activate"), true);
 });
 
+it("macOS validates the real hook's GUI source and server agent pair without accepting unrelated PID hints", async () => {
+  for (const request of [
+    { sourcePid: 732, agentPid: 731 }, // Native hook's GUI anchor + app-server.
+    { sourcePid: 731, agentPid: 731 }, // Explicit Desktop provenance.
+    { sourcePid: 731 }, // Older entry with only the server anchor.
+  ]) {
+    const calls = [];
+    const result = await focusProcessAppWindow(request, { platform: "darwin",
+      execFile(bin, args, _options, done) { calls.push([bin, args]); done(null, bin === "ps" ? macRows() : "activated\n"); },
+    });
+    assert.equal(result.submitted, true);
+    assert.deepEqual(calls.map(call => call[0]), ["ps", "osascript"]);
+  }
+  for (const request of [
+    { sourcePid: 999, agentPid: 731 }, // Valid server cannot authorize an unrelated source.
+    { sourcePid: 731, agentPid: 999 }, // Wrong/dead agent cannot fall back to a different PID.
+    { sourcePid: 732, agentPid: 732 }, // GUI is not an app-server.
+    { sourcePid: 732 }, // Missing agent on a GUI anchor is not enough proof.
+  ]) {
+    const calls = [];
+    const result = await focusProcessAppWindow(request, { platform: "darwin",
+      execFile(bin, _args, _options, done) { calls.push(bin); done(null, macRows()); },
+    });
+    assert.equal(result.reason, "unverified-codex-process");
+    assert.deepEqual(calls, ["ps"]);
+  }
+});
+
+it("macOS birth-identity recheck cannot report activation after the server or GUI PID changes", async () => {
+  for (const changedPid of [731, 732]) {
+    const calls = [];
+    const result = await focusProcessAppWindow({ sourcePid: 732, agentPid: 731 }, { platform: "darwin",
+      execFile(bin, args, _options, done) {
+        calls.push([bin, args]);
+        if (bin === "ps") return done(null, macRows());
+        // Emulate the generated AppleScript guard result, without launching a real app.
+        assert.match(args[1], new RegExp(`/bin/ps -ww -p ${changedPid} -o lstart=,comm=`));
+        assert.match(args[1], /then return "process-changed"/);
+        done(null, "process-changed\n");
+      },
+    });
+    assert.equal(result.submitted, false); assert.equal(result.confirmed, false);
+    assert.equal(result.reason, "process-changed"); assert.equal(calls.length, 2);
+  }
+});
+
 it("macOS reused PIDs, CLI binaries, other bundles, terminals, and younger parents cannot activate", async () => {
   for (const rows of [
     macRows("/usr/local/bin/codex"),

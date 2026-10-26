@@ -3,7 +3,11 @@ const { it } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { EventEmitter } = require("node:events");
-const { buildStateBody } = require("../hooks/codex-hook");
+const vm = require("node:vm");
+const { createRequire } = require("node:module");
+const { buildStateBody, runCodexHook } = require("../hooks/codex-hook");
+const createAgentRuntimeMain = require("../src/agent-runtime-main");
+const { focusProcessAppWindow } = require("../src/process-app-focus");
 const { handleStatePost } = require("../src/server-route-state");
 const { getSessionFocusTarget, getCodexThreadUrl, getDirectSendFocusTarget, mergeSessionFocusEntry } = require("../src/session-focus");
 const { isCodexQueueTarget } = require("../src/codex-thread-id");
@@ -16,7 +20,7 @@ const raw = "codex:aaaaaaaa-1111-4111-8111-111111111111";
 const id = makeSessionKey({ profileId: "local", rawSessionId: raw });
 const desktop = { id, agentId: "codex", codexOriginator: "Codex Desktop", state: "thinking" };
 
-function harness(t) {
+function harness(t, { platform = "win32", throughRuntime = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-ephemeral-focus-"));
   const prior = process.env.CODEX_HOME; process.env.CODEX_HOME = home;
   t.after(() => { if (prior === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prior; fs.rmSync(home, { recursive: true, force: true }); });
@@ -24,20 +28,25 @@ function harness(t) {
   const theme = JSON.parse(JSON.stringify(themeLoader.loadTheme("clawd"))); theme.timings.minDisplay = {};
   const noop = () => {};
   const ctx = { theme, lang: "en", pendingPermissions: [], doNotDisturb: false,
-    processKill: () => true, focusHostPlatform: "win32", getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+    processKill: () => true, focusHostPlatform: platform, getCursorScreenPoint: () => ({ x: 0, y: 0 }),
     playSound: noop, sendToRenderer: noop, broadcastSessionSnapshot: noop, syncHitWin: noop,
     sendToHitWin: noop, buildContextMenu: noop, buildTrayMenu: noop, getSessionAliases: () => ({}),
   };
   const state = initState(ctx);
   t.after(() => state.cleanup());
+  const runtime = throughRuntime ? createAgentRuntimeMain({ getStateRuntime: () => state,
+    updateSession: (...args) => state.updateSession(...args) }) : null;
+  if (runtime) t.after(() => runtime.cleanup());
+  const officialTurns = new Map();
   async function send(body, routeOptions = {}) {
     const req = new EventEmitter(); req.headers = {};
     const response = await new Promise(resolve => {
       const res = { writeHead(code) { this.statusCode = code; }, end() { resolve(this); } };
       handleStatePost(req, res, { ctx: { STATE_SVGS: { idle: "idle.svg", thinking: "thinking.svg", working: "working.svg" },
         pendingPermissions: [], sessions: state.sessions, isAgentEnabled: () => true,
-        updateSession: state.updateSession, setState: noop, permLog: noop },
-        shouldDropForDnd: () => false, codexOfficialTurns: new Map(),
+        codexSubagentClassifier: runtime?.getCodexSubagentClassifier(),
+        updateSession: runtime ? runtime.updateSessionFromServer : state.updateSession, setState: noop, permLog: noop },
+        shouldDropForDnd: () => false, codexOfficialTurns: officialTurns,
         createRequestHookRecorder: () => ({ acceptedUnlessDnd: noop, droppedByDisabled: noop, droppedByDnd: noop }), ...routeOptions });
       req.emit("data", Buffer.from(JSON.stringify(body))); req.emit("end");
     });
@@ -45,6 +54,155 @@ function harness(t) {
   }
   return { state, send, home, ctx };
 }
+
+it("actual Darwin env-only hooks preserve metadata through runtime and dispatch verified app focus and completed HUD filtering", async t => {
+  const h = harness(t, { platform: "darwin", throughRuntime: true });
+  const deliveries = [];
+  // createPidResolver reads process.platform and requires child_process itself;
+  // getPlatformConfig's platform option alone cannot select its Darwin walk on
+  // Windows. Load the unchanged module in an isolated Darwin VM, replacing only
+  // process observations. Never mutate the host platform or execute a real ps.
+  const sharedPath = require.resolve("../hooks/shared-process");
+  const sharedRequire = createRequire(sharedPath);
+  const observations = new Map([
+    [730, { ppid: 731, comm: "/bin/zsh", command: "/bin/zsh -c hook" }],
+    [731, { ppid: 732, comm: "/Applications/Codex.app/Contents/Resources/codex",
+      command: "/Applications/Codex.app/Contents/Resources/codex app-server --stdio" }],
+    [732, { ppid: 1, comm: "/Applications/Codex.app/Contents/MacOS/Codex",
+      command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
+    [1, { ppid: 0, comm: "/sbin/launchd", command: "/sbin/launchd" }],
+  ]);
+  const queries = [], metadata = [], sharedModule = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(sharedPath, "utf8"), {
+    module: sharedModule, exports: sharedModule.exports,
+    process: { platform: "darwin", ppid: 730, env: {} },
+    require(name) {
+      if (name !== "child_process") return sharedRequire(name);
+      return { execFileSync(bin, args) {
+        assert.equal(bin, "ps"); assert.equal(args[0], "-o"); assert.equal(args[2], "-p");
+        const observed = observations.get(Number(args[3]));
+        assert.ok(observed, `unexpected process query: ${args.join(" ")}`);
+        queries.push(args.join(" "));
+        const field = { "ppid=": "ppid", "comm=": "comm", "command=": "command" }[args[1]];
+        assert.ok(field, `unexpected ps field: ${args[1]}`);
+        return `${observed[field]}\n`;
+      } };
+    },
+  }, { filename: sharedPath });
+  const shared = sharedModule.exports;
+  const hookOptions = { platform: "darwin", argv: [],
+    env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "codex_work_desktop" }, resolveWslDistro: () => null,
+    createPidResolver(base) {
+      const resolve = shared.createPidResolver({ ...base, startPid: 730,
+        platformConfig: shared.getPlatformConfig({ platform: "darwin" }) });
+      return context => { const result = resolve(context); metadata.push(result); return result; };
+    },
+    postState(body, _options, done) {
+      const wire = JSON.parse(body); deliveries.push(wire);
+      h.send(wire).then(response => done(response.statusCode === 200, 23333));
+    },
+    readCodexAutoStartGate() { throw new Error("no cold start"); },
+    runAutoStart() { throw new Error("no cold start"); },
+  };
+  const run = (event, extra = {}) => runCodexHook({ hook_event_name: event, session_id: raw,
+    cwd: "/Users/fixture/project", turn_id: "darwin-turn", ...extra }, hookOptions);
+  assert.equal((await run("SessionStart", { source: "startup" })).body, null);
+  assert.equal(deliveries.length, 0);
+  assert.equal(metadata[0].stablePid, 732);
+  assert.equal(metadata[0].agentPid, 731);
+  assert.equal(metadata[0].terminalPid, null, "the GUI is the last verified non-terminal ancestor");
+  assert.deepEqual(Array.from(metadata[0].pidChain), [730, 731, 732]);
+  assert.deepEqual(queries, ["-o ppid= -p 730", "-o comm= -p 730", "-o ppid= -p 731",
+    "-o comm= -p 731", "-o command= -p 731", "-o ppid= -p 732", "-o comm= -p 732"]);
+  assert.equal((await run("UserPromptSubmit", { prompt: "ordinary side chat" })).posted, true);
+  assert.equal(deliveries[0].source_pid, 732, "Darwin preserves its ordinary GUI resolver anchor");
+  assert.equal(deliveries[0].agent_pid, 731);
+  assert.equal(deliveries[0].codex_originator, undefined, "do not change Desktop dedupe or automation identity");
+  assert.equal(deliveries[0].codex_source, undefined);
+  assert.equal(deliveries[0].transcript_path, undefined);
+  const row = () => h.state.buildSessionSnapshot().sessions.find(row => row.id === id);
+  assert.equal(row().codexClientEphemeral, true);
+  assert.equal(row().focusTarget.type, "codex-app");
+  assert.equal(row().focusTarget.url, null);
+  assert.equal(row().hudHiddenByPreference, false);
+  assert.equal(getDirectSendFocusTarget(row()).canFocus, false);
+  assert.equal(isCodexQueueTarget({ ...row(), codexHome: "/Users/fixture/.codex" }), false);
+
+  // Exercise main's actual dispatch body, replacing every OS effect with a fixture.
+  const main = fs.readFileSync(path.join(__dirname, "../src/main.js"), "utf8");
+  const begin = main.indexOf("function focusDashboardSession(");
+  const end = main.indexOf("function hideDashboardSession(", begin);
+  assert.ok(begin >= 0 && end > begin);
+  const requests = [], calls = [], pending = [];
+  const context = { sessions: h.state.sessions, process: { platform: "darwin" },
+    mergeSessionFocusEntry, getSessionFocusTarget, focusLog: () => {},
+    focusTerminalSession: () => { throw new Error("not a terminal"); },
+    focusCodexThreadTarget: () => { throw new Error("no URI restoration"); },
+    focusProcessAppWindow(request) {
+      requests.push(request);
+      const result = focusProcessAppWindow(request, { platform: "darwin", execFile(bin, args, _options, done) {
+        calls.push([bin, args]);
+        done(null, bin === "ps"
+          ? "731 732 Sat Oct 24 12:01:00 2026 /Applications/Codex.app/Contents/Resources/codex\n732 1 Sat Oct 24 12:00:00 2026 /Applications/Codex.app/Contents/MacOS/Codex\n"
+          : "activated\n");
+      } });
+      pending.push(result); return result;
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(main.slice(begin, end), context);
+  assert.equal(context.focusDashboardSession(id), true);
+  assert.equal((await Promise.all(pending))[0].submitted, true);
+  assert.equal(requests[0].sourcePid, 732); assert.equal(requests[0].agentPid, 731);
+  assert.deepEqual(calls.map(call => call[0]), ["ps", "osascript"]);
+  assert.match(calls[1][1][1], /unix id is 732/);
+  assert.match(calls[1][1][1], /\/bin\/ps -ww -p 731 -o lstart=,comm=/);
+  assert.match(calls[1][1][1], /\/bin\/ps -ww -p 732 -o lstart=,comm=/);
+
+  await run("PostToolUse", { tool_name: "update_plan", tool_input: { plan: [
+    { step: "first", status: "completed" }, { step: "second", status: "in_progress" },
+  ] } });
+  assert.equal(row().codexClientEphemeral, true);
+  assert.deepEqual(row().planProgress, { completed: 1, total: 2, percent: 50 });
+  h.ctx.sessionHudHideCompletedCodexEphemeral = true;
+  assert.equal(row().hudHiddenByPreference, false, "active plan remains visible");
+  await run("Stop");
+  assert.equal(row().hudHiddenByPreference, true, "typed completion needs no manufactured originator");
+  assert.equal(h.state.buildSessionSnapshot().hudTotalNonIdle, 0);
+  assert.equal(row().focusTarget.type, "codex-app", "Dashboard keeps the live entry");
+  h.ctx.pendingPermissions.push({ agentId: "codex", sessionId: id, res: null, isCodexUserInputNotify: true });
+  assert.equal(row().hudHiddenByPreference, false);
+  h.ctx.pendingPermissions.length = 0;
+  h.ctx.sessionHudHideCompletedCodexEphemeral = false;
+  assert.equal(row().hudHiddenByPreference, false);
+  h.ctx.sessionHudHideCompletedCodexEphemeral = true;
+  await runCodexHook({ hook_event_name: "UserPromptSubmit", session_id: raw, cwd: "/Users/fixture/project",
+    turn_id: "darwin-next", prompt: "next question" }, hookOptions);
+  assert.equal(row().hudHiddenByPreference, false);
+});
+
+it("Darwin inherited Desktop env does not let explicit CLI, unknown clients or child completions match the HUD preference", async t => {
+  const h = harness(t, { platform: "darwin", throughRuntime: true });
+  h.ctx.sessionHudHideCompletedCodexEphemeral = true;
+  const cases = [{ originator: "codex-tui" }, { originator: "unknown-client" },
+    { source: "cli" }, { source: "exec" }, { source: "mcp" },
+    { headless: true }, { codex_session_role: "subagent" }];
+  for (const [index, provenance] of cases.entries()) {
+    const sid = `codex:${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`;
+    const result = await runCodexHook({ hook_event_name: "Stop", session_id: sid,
+      cwd: "/Users/fixture/project", ...provenance }, {
+      platform: "darwin", argv: [], env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "codex_work_desktop" },
+      resolveWslDistro: () => null,
+      resolvePid: () => ({ stablePid: 732, agentPid: 731, headless: provenance.headless === true }),
+      postState(body, _options, done) { h.send(JSON.parse(body)).then(response => done(response.statusCode === 200, 23333)); },
+    });
+    assert.equal(result.posted, true);
+    const row = h.state.buildSessionSnapshot().sessions.find(row => row.rawSessionId === sid);
+    assert.ok(row, JSON.stringify(provenance));
+    assert.equal(row.hudHiddenByPreference, false, JSON.stringify(provenance));
+    if (provenance.codex_session_role === "subagent") assert.equal(row.headless, true);
+  }
+});
 
 it("HUD preference follows real state completion, pending response-less questions and subsequent activity", async t => {
   const h = harness(t); h.ctx.sessionHudHideCompletedCodexEphemeral = true;

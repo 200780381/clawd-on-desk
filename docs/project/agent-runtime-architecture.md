@@ -174,12 +174,18 @@ snapshot 签名包含它；旧审批/通知 fallback 不能覆盖 live 会话的
 只激活经 OS 映像、真实父链和启动时间核验的现有 Codex GUI，不运行 resume / CLI / CMD、
 不按目录/标题/历史窗口缓存猜测。Windows 支持已验证的版本化 app-server → MSIX Codex GUI
 布局，macOS 仅明确的同 bundle 直接父进程布局；未知布局和 Linux 新路径不可聚焦。
+macOS 无 transcript 的真实 hook 可以只带 typed 临时标记而没有 originator；保留其
+`sourcePid=GUI` / `agentPid=app-server`，聚焦时用 agentPid 核验 server 映像与 GUI 直接父链，
+并要求 sourcePid 等于该 server 或核验出的 GUI。只有旧 sourcePid 已指向 server 时可缺 agentPid；
+不为导航改写 originator，因此不扩大 Desktop 去重或自动化身份。
 激活应用不证明选择了具体侧边聊天，也不允许自动粘贴；已确认临时线程拒绝 queue，
 Direct Send 保持原生手动粘贴边界。未知的旧会话和持久化会话保留既有首次 URI 聚焦。
 
 `sessionHudHideCompletedCodexEphemeral` 默认关闭，是用户可切换的 HUD 显示偏好，并不识别后台来源。
 启用后，仅本机、明确 `codexClientEphemeral=true`、无 transcript、idle 且最新事件为完成的行，
 在无同会话 pending permission / 原生问题 / 通知卡时带 `hudHiddenByPreference=true`。
+typed 标记已足够支持缺省 originator 的 macOS 完成行；显式 CLI / unknown originator、
+CLI / exec / mcp / internal / subagent 来源、headless 与非本机会话仍不按此偏好收起。
 这也会收起已完成的普通侧边聊天；未知、持久化、工作/清扫、取消/失败及等待输入的行不按此规则收起。
 HUD 原生几何、renderer、HUD 快捷导航和 HUD 统计统一消费该独立字段；不复用 `hiddenFromHud`，
 不删除或改变 canonical 会话，不影响 Dashboard、Telegram、Discord、额度、审批、完成确认和活动时间。

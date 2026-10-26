@@ -33,6 +33,9 @@ it("busy, unknown, persisted, interrupted and nonlocal sessions cannot match the
     { state: "thinking" }, { state: "working" }, { state: "sweeping" }, { state: "notification" },
     { codexClientEphemeral: undefined }, { codexClientEphemeral: false }, { codexClientEphemeral: "true" },
     { codexOriginator: "codex-tui" }, { codexOriginator: "unknown-client" },
+    ...["cli", "exec", "mcp", "internal", "subagent", "agent-subagent"].map(codexSource => ({ codexOriginator: null, codexSource })),
+    { codexOriginator: null, subagentId: "child" }, { codexOriginator: null, subagentType: "explorer" },
+    { codexOriginator: null, recapIsSubagent: true },
     { agentId: "workbuddy" }, { host: "remote" }, { wslDistro: "Ubuntu" }, { platform: "wsl" },
     { profileId: "other" }, { headless: true }, { transcriptPath: "/sessions/rollout-fixture.jsonl" },
     { transcriptPath: 1 }, { recentEvents: [] },
@@ -48,6 +51,17 @@ it("busy, unknown, persisted, interrupted and nonlocal sessions cannot match the
   for (const enabled of [undefined, false, "true", 1]) {
     assert.equal(buildSessionSnapshotEntry(raw, done(), {}, { ...options, sessionHudHideCompletedCodexEphemeral: enabled }).hudHiddenByPreference, false);
   }
+});
+
+it("typed ephemeral completion without Darwin originator is sufficient only for the HUD display preference", () => {
+  const session = { ...done(), codexOriginator: null, agentPid: 731, sourcePid: 732 };
+  const snapshot = buildSessionSnapshot(new Map([[raw, session]]), { ...options, focusHostPlatform: "darwin" });
+  assert.equal(snapshot.hudTotalNonIdle, 0);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].hudHiddenByPreference, true);
+  assert.equal(snapshot.sessions[0].codexOriginator, null);
+  assert.equal(snapshot.sessions[0].focusTarget.type, "codex-app");
+  assert.equal(session.codexOriginator, null, "presentation cannot change canonical identity");
 });
 
 it("pending native question/approval entries protect a completed row until the last matching prompt leaves", () => {
