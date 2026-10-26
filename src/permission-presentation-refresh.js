@@ -11,7 +11,14 @@ module.exports = function createPermissionPresentationRefresh(options = {}) {
     schedule(() => {
       queued = false;
       if (options.isDisposed?.()) return;
-      options.getStateRuntime?.()?.refreshCodexPendingAttention?.();
+      try {
+        const state = options.getStateRuntime?.();
+        if (typeof state?.refreshCodexPendingAttention === "function") state.refreshCodexPendingAttention();
+        else state?.emitSessionSnapshot?.();
+      } catch (error) {
+        if (typeof options.onError === "function") options.onError(error);
+        else console.warn("Clawd: permission presentation refresh failed:", error);
+      }
     });
   };
 };
