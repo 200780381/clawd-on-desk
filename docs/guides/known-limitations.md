@@ -1,5 +1,7 @@
 # Known Limitations
 
+Claude Code's **Handling tools** state is a tool-call hint, not an OS execution monitor. `PreToolUse` runs before permission checks; denial and interruption can omit result hooks. Clawd conservatively drops the hint on an ordinary result or a denied/undecided approval returned through its normal resolution flow. Hiding approval bubbles through DND or Settings does not itself invalidate this hint; conversely, duplicate starts or cleanup after a native-terminal answer can temporarily suppress it. An older accepted batch can release suppression before a later denied call's delayed start arrives, because the approval result has no reliable tool identity. It cannot infer continuous execution from missing parallel results, and a cancellation that emits no observable event can leave the hint until later activity or the configured stale cleanup (five minutes by default; users can change or disable it). Background commands may outlive the foreground tool call. The first version covers local interactive main sessions; remote/WSL/headless and other agents keep existing states. Built-in themes reuse working art unless a theme explicitly provides an executing animation.
+
 [Back to README](../../README.md)
 
 | Limitation | Details |

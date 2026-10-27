@@ -3110,7 +3110,7 @@ function notifyPermissionsChanged(reason) {
   }
 }
 
-function notifyPermissionResolved(permEntry, reason) {
+function notifyPermissionResolved(permEntry, reason, behavior = "no-decision") {
   if (!permEntry || isPassiveNotifyEntry(permEntry)) return;
   if (typeof ctx.onPermissionResolved !== "function") return;
   const hasPendingForSession = pendingPermissions.some((entry) =>
@@ -3122,6 +3122,7 @@ function notifyPermissionResolved(permEntry, reason) {
     ctx.onPermissionResolved(permEntry, {
       reason: reason || "resolved",
       hasPendingForSession,
+      behavior: behavior === "allow" || behavior === "deny" ? behavior : "no-decision",
     });
   } catch (err) {
     permLog(`onPermissionResolved failed: ${err && err.message ? err.message : err}`);
@@ -4316,7 +4317,7 @@ function applyPermissionSuggestion(perm, index, options = {}) {
     permEntry,
     observationDisposition(disposition.reason, disposition.decided, "resolved")
   )) return;
-  notifyPermissionResolved(permEntry, "resolved");
+  notifyPermissionResolved(permEntry, "resolved", behavior);
 
   if (permEntry.autoCloseTimer) {
     clearTimeout(permEntry.autoCloseTimer);

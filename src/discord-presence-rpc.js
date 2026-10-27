@@ -103,7 +103,7 @@ const MIN_SEND_INTERVAL_MS = 5000;
 function toCoarseState(state) {
   const s = String(state || "").replace(/^mini-/, "");
   if (s === "thinking") return "thinking";
-  if (s === "working" || s === "juggling" || s === "carrying" || s === "sweeping") return "working";
+  if (s === "working" || s === "executing" || s === "juggling" || s === "carrying" || s === "sweeping") return "working";
   if (s === "notification" || s === "attention" || s === "error") return "waiting";
   return "idle";
 }
@@ -118,7 +118,7 @@ function resolvePresenceState(session) {
   const s = String(session.state || "").replace(/^mini-/, "");
   if (s === "thinking") return "thinking";
   if (s === "juggling") return "juggling";
-  if (s === "working" || s === "carrying" || s === "sweeping") return "working";
+  if (s === "working" || s === "executing" || s === "carrying" || s === "sweeping") return "working";
   if (session.badge === "interrupted") return "error";
   if (session.badge === "done" || session.requiresCompletionAck === true) return "attention";
   if (s === "sleeping") return "sleeping";

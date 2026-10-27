@@ -757,6 +757,9 @@ function handleStatePost(req, res, options) {
           return;
         }
       }
+      // executing is a server-derived Claude hint, never an inbound claim.
+      // Keep this independent of whether the current theme supplies its art.
+      if (state === "executing") state = "working";
       if (ctx.STATE_SVGS[state]) {
         const sid = session_id || "default";
         const codexHookState = resolveCodexOfficialHookState(

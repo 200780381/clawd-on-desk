@@ -2183,7 +2183,14 @@ const _permCtx = {
   },
   onPermissionResolved: (permEntry, options = {}) => {
     if (!_state || typeof _state.clearPermissionNotification !== "function") return;
-    _state.clearPermissionNotification(permEntry && permEntry.sessionId, options);
+    _state.clearPermissionNotification(permEntry && permEntry.sessionId, {
+      ...options,
+      permissionSource: permEntry && {
+        agentId: permEntry.agentId, profileId: permEntry.profileId,
+        host: permEntry.host, wslDistro: permEntry.wslDistro,
+        headless: permEntry.headless, subagentId: permEntry.subagentId,
+      },
+    });
   },
   // Best-effort, read-only "permission needed" heads-up to Slack. Slack cannot
   // resolve the approval in this build (webhook is one-way), so this only

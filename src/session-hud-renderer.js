@@ -111,6 +111,7 @@ function orderedHudSessions(currentSnapshot) {
 const STATE_CHIP_MAP = {
   thinking: { key: "sessionThinking", cls: "chip-thinking" },
   working: { key: "sessionWorking", cls: "chip-working" },
+  executing: { key: "sessionExecuting", cls: "chip-working" },
   juggling: { key: "sessionJuggling", cls: "chip-juggling" },
 };
 
