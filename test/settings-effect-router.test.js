@@ -92,11 +92,15 @@ function makeWindow(name, calls, options = {}) {
 describe("settings-effect-router", () => {
   it("refreshes HUD preference changes in both directions without lifecycle cleanup or permission decisions", () => {
     const { calls, emit } = createHarness();
-    for (const value of [true, false]) {
+    for (const changes of [
+      { sessionHudHideCompletedCodexEphemeral: true }, { sessionHudHideCompletedCodexEphemeral: false },
+      { sessionHudHideActiveCodexEphemeral: true }, { sessionHudHideActiveCodexEphemeral: false },
+      { sessionHudHideCompletedCodexEphemeral: true, sessionHudHideActiveCodexEphemeral: true },
+    ]) {
       calls.length = 0;
-      emit({ sessionHudHideCompletedCodexEphemeral: value });
+      emit(changes);
       assert.deepStrictEqual(calls, [
-        ["updateMirrors", { sessionHudHideCompletedCodexEphemeral: value }],
+        ["updateMirrors", changes],
         ["emitSessionSnapshot", { force: true }],
       ]);
     }

@@ -427,6 +427,7 @@ const updateRegistry = {
   sessionHudShowElapsed: requireBoolean("sessionHudShowElapsed"),
   sessionHudShowContextUsage: requireBoolean("sessionHudShowContextUsage"),
   sessionHudHideCompletedCodexEphemeral: requireBoolean("sessionHudHideCompletedCodexEphemeral"),
+  sessionHudHideActiveCodexEphemeral: requireBoolean("sessionHudHideActiveCodexEphemeral"),
   sessionHudShowQuota: requireBoolean("sessionHudShowQuota"),
   quotaRingDisplayMode: requireEnum("quotaRingDisplayMode", ["used", "remaining"]),
   quotaAlertsEnabled: requireBoolean("quotaAlertsEnabled"),

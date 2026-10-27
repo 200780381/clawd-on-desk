@@ -12,6 +12,31 @@ const { createSettingsController } = require("../src/settings-controller");
 const KEY = "sessionHudHideCompletedCodexEphemeral";
 const LABEL = "rowSessionHudHideCompletedCodexEphemeral";
 const DESC = `${LABEL}Desc`;
+const ACTIVE_KEY = "sessionHudHideActiveCodexEphemeral";
+const ACTIVE_LABEL = "rowSessionHudHideActiveCodexEphemeral";
+const ACTIVE_DESC = `${ACTIVE_LABEL}Desc`;
+
+test("active collapse defaults off for older completion-only preferences and validates independently", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-active-ephemeral-hud-settings-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const prefsPath = path.join(dir, "prefs.json");
+  const olderPreferences = { ...prefs.getDefaults(), [KEY]: true };
+  delete olderPreferences[ACTIVE_KEY];
+  fs.writeFileSync(prefsPath, JSON.stringify(olderPreferences));
+  const controller = createSettingsController({ prefsPath });
+  assert.equal(controller.get(KEY), true);
+  assert.equal(controller.get(ACTIVE_KEY), false);
+  for (const value of [true, false]) {
+    assert.equal((await controller.applyUpdate(ACTIVE_KEY, value)).status, "ok");
+    const restored = createSettingsController({ prefsPath });
+    assert.equal(restored.get(ACTIVE_KEY), value);
+    assert.equal(restored.get(KEY), true);
+  }
+  for (const value of [undefined, "true", 1, null, {}, []]) {
+    assert.equal(prefs.validate({ ...prefs.getDefaults(), [ACTIVE_KEY]: value })[ACTIVE_KEY], false);
+    assert.equal((await controller.applyUpdate(ACTIVE_KEY, value)).status, "error");
+  }
+});
 
 test("completed temporary Codex HUD preference defaults off and persists only boolean controller updates", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-ephemeral-hud-settings-"));
@@ -161,5 +186,43 @@ test("all seven settings locales disclose the completed side-chat tradeoff and D
     assert.equal(typeof strings[lang][LABEL], "string", lang);
     assert.ok(strings[lang][LABEL].length > 0, lang);
     for (const phrase of required) assert.ok(strings[lang][DESC].includes(phrase), `${lang}: ${phrase}`);
+  }
+});
+
+test("active collapse switch mounts, disables with HUD and patches independently", () => {
+  const { core, sections, configs } = createSessionsHarness(false);
+  const meta = core.state.mountedControls.generalSwitches.get(ACTIVE_KEY);
+  assert.equal(sections.find(section => section.title === "sectionSessionHud").element.contains(meta.element), true);
+  assert.equal(configs.get(ACTIVE_KEY).labelKey, ACTIVE_LABEL);
+  assert.equal(configs.get(ACTIVE_KEY).descKey, ACTIVE_DESC);
+  assert.equal(meta.visual.disabled, true);
+  core.state.snapshot.sessionHudEnabled = true;
+  assert.equal(core.tabs.sessions.patchInPlace({ sessionHudEnabled: true }), true);
+  assert.equal(meta.visual.disabled, false);
+  for (const enabled of [true, false]) {
+    core.state.snapshot[ACTIVE_KEY] = enabled;
+    assert.equal(core.tabs.sessions.patchInPlace({ [ACTIVE_KEY]: enabled }), true);
+    assert.equal(meta.visual.checked, enabled);
+    assert.equal(core.state.snapshot[KEY], false);
+  }
+  core.state.mountedControls.generalSwitches.delete(ACTIVE_KEY);
+  assert.equal(core.tabs.sessions.patchInPlace({ sessionHudEnabled: false }), false);
+});
+
+test("seven active-collapse locales disclose active side chats, continuing tasks and Dashboard access", () => {
+  const context = vm.createContext({});
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/settings-i18n.js"), "utf8"), context);
+  const phrases = {
+    en: ["active side chats", "does not end tasks", "Dashboard"],
+    zh: ["活动侧边聊天", "不结束任务", "会话面板"],
+    "zh-TW": ["活動側邊聊天", "不會結束任務", "工作階段面板"],
+    ko: ["진행 중인 사이드 채팅", "작업을 종료하지 않습니다", "대시보드"],
+    ja: ["進行中のサイドチャット", "タスクは終了しません", "ダッシュボード"],
+    "pt-BR": ["chats laterais ativos", "não encerra tarefas", "Dashboard"],
+    es: ["chats laterales activos", "no termina las tareas", "Dashboard"],
+  };
+  for (const [lang, required] of Object.entries(phrases)) {
+    assert.ok(context.ClawdSettingsI18n.STRINGS[lang][ACTIVE_LABEL].length > 0, lang);
+    for (const phrase of required) assert.ok(context.ClawdSettingsI18n.STRINGS[lang][ACTIVE_DESC].includes(phrase), `${lang}: ${phrase}`);
   }
 });

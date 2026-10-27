@@ -201,6 +201,9 @@ const SCHEMA = {
   // Display-only and opt-in: completed ordinary ephemeral side chats are also
   // collapsed; the Dashboard remains the complete session list.
   sessionHudHideCompletedCodexEphemeral: { type: "boolean", default: false },
+  // Independent opt-in: active temporary side chats are also collapsed, without
+  // changing execution, canonical sessions or pending-attention visibility.
+  sessionHudHideActiveCodexEphemeral: { type: "boolean", default: false },
   sessionHudShowQuota: { type: "boolean", default: true },
   // Preserve the historical used-percentage presentation for existing users;
   // remaining is a display-only choice and never changes stored quota data.

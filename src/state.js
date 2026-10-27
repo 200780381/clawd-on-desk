@@ -1254,6 +1254,7 @@ function buildSessionSnapshot() {
     statePriority: STATE_PRIORITY,
     sessionHudCleanupDetached: ctx.sessionHudCleanupDetached === true,
     sessionHudHideCompletedCodexEphemeral: ctx.sessionHudHideCompletedCodexEphemeral === true,
+    sessionHudHideActiveCodexEphemeral: ctx.sessionHudHideActiveCodexEphemeral === true,
     pendingPermissionSessionIds: new Set((ctx.pendingPermissions || [])
       .filter(Boolean).map((entry) => entry.sessionId)),
     focusHostPlatform: ctx.focusHostPlatform || process.platform,

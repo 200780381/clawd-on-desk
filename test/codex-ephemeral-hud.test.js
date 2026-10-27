@@ -11,6 +11,51 @@ const done = () => ({ agentId: "codex", rawSessionId: raw, codexClientEphemeral:
   updatedAt: 1234, recentEvents: [{ event: "Stop", at: 1234 }] });
 const options = { sessionHudHideCompletedCodexEphemeral: true, focusHostPlatform: "win32", readCodexThreadName: () => null };
 
+it("active temporary chats collapse only with their independent strict opt-in and restore without mutation", () => {
+  for (const state of ["thinking", "working"]) {
+    const session = { ...done(), state, recentEvents: [{ event: state === "thinking" ? "UserPromptSubmit" : "PreToolUse" }] };
+    const sessions = new Map([[raw, session]]), original = JSON.stringify([...sessions]);
+    const activeOptions = { ...options, sessionHudHideCompletedCodexEphemeral: false, sessionHudHideActiveCodexEphemeral: true };
+    const hidden = buildSessionSnapshot(sessions, activeOptions);
+    const visible = buildSessionSnapshot(sessions, { ...activeOptions, sessionHudHideActiveCodexEphemeral: false });
+    assert.equal(hidden.hudTotalNonIdle, 0); assert.equal(hidden.sessions.length, 1);
+    assert.equal(hidden.sessions[0].hudHiddenByPreference, true);
+    assert.equal(hidden.sessions[0].hiddenFromHud, false);
+    assert.deepEqual(hidden.sessions[0].focusTarget, visible.sessions[0].focusTarget);
+    assert.notEqual(sessionSnapshotSignature(hidden), sessionSnapshotSignature(visible));
+    for (const value of [undefined, false, "true", 1]) {
+      assert.equal(buildSessionSnapshot(sessions, { ...activeOptions, sessionHudHideActiveCodexEphemeral: value }).hudTotalNonIdle, 1);
+    }
+    assert.equal(buildSessionSnapshot(sessions, options).hudTotalNonIdle, 1, "existing completion preference cannot hide activity");
+    assert.equal(JSON.stringify([...sessions]), original);
+  }
+  assert.equal(buildSessionSnapshotEntry(raw, done(), {}, { sessionHudHideActiveCodexEphemeral: true }).hudHiddenByPreference, false);
+});
+
+it("active collapse requires typed local ephemeral identity and keeps pending decisions visible", () => {
+  const activeOptions = { ...options, sessionHudHideActiveCodexEphemeral: true };
+  const active = { ...done(), state: "thinking", recentEvents: [{ event: "UserPromptSubmit" }] };
+  const protectedRows = [
+    ...[undefined, false, "true"].map(codexClientEphemeral => ({ codexClientEphemeral })),
+    { codexOriginator: "unknown-client" }, { codexOriginator: "codex-tui" },
+    ...["cli", "exec", "mcp", "internal", "subagent", "agent-subagent"].map(codexSource => ({ codexSource })),
+    { agentId: "workbuddy" }, { profileId: "remote" }, { host: "remote" }, { wslDistro: "Ubuntu" },
+    ...["wsl", "WSL", " wSl "].map(platform => ({ platform })),
+    { headless: true }, { subagentId: "child" }, { subagentType: "explorer" }, { recapIsSubagent: true },
+    { transcriptPath: "/sessions/rollout-fixture.jsonl" }, { transcriptPath: 1 },
+    ...["sweeping", "notification", "sleeping", "idle"].map(state => ({ state, recentEvents: [] })),
+    ...["PermissionRequest", "CodexUserInputRequest", "Elicitation"].map(event => ({ recentEvents: [{ event }] })),
+  ];
+  for (const overrides of protectedRows) {
+    assert.equal(buildSessionSnapshotEntry(raw, { ...active, ...overrides }, {}, activeOptions).hudHiddenByPreference, false, JSON.stringify(overrides));
+  }
+  const pendingPermissionSessionIds = new Set([raw]);
+  assert.equal(buildSessionSnapshotEntry(raw, active, {}, { ...activeOptions, pendingPermissionSessionIds }).hudHiddenByPreference, false);
+  pendingPermissionSessionIds.clear();
+  assert.equal(buildSessionSnapshotEntry(raw, active, {}, { ...activeOptions, pendingPermissionSessionIds }).hudHiddenByPreference, true);
+  assert.equal(buildSessionSnapshotEntry(raw, { ...active, codexOriginator: null }, {}, activeOptions).hudHiddenByPreference, true, "typed Darwin ephemeral remains a display fact only");
+});
+
 it("the default preserves completed side chats and the opt-in only changes HUD projection", () => {
   const sessions = new Map([[raw, done()]]), original = JSON.stringify([...sessions]);
   const visible = buildSessionSnapshot(sessions, { ...options, sessionHudHideCompletedCodexEphemeral: false });
@@ -37,7 +82,8 @@ it("busy, unknown, persisted, interrupted and nonlocal sessions cannot match the
     ...["cli", "exec", "mcp", "internal", "subagent", "agent-subagent"].map(codexSource => ({ codexOriginator: null, codexSource })),
     { codexOriginator: null, subagentId: "child" }, { codexOriginator: null, subagentType: "explorer" },
     { codexOriginator: null, recapIsSubagent: true },
-    { agentId: "workbuddy" }, { host: "remote" }, { wslDistro: "Ubuntu" }, { platform: "wsl" },
+    { agentId: "workbuddy" }, { host: "remote" }, { wslDistro: "Ubuntu" },
+    ...["wsl", "WSL", " wSl "].map(platform => ({ platform })),
     { profileId: "other" }, { headless: true }, { transcriptPath: "/sessions/rollout-fixture.jsonl" },
     { transcriptPath: 1 }, { recentEvents: [] },
     { recentEvents: [{ event: "SessionStart" }] }, { recentEvents: [{ event: "Interrupt" }] },
