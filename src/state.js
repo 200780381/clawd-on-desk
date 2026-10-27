@@ -213,6 +213,46 @@ const sessions = new Map();
 // The owner of a Codex plan belongs to the state runtime, not a session or
 // its snapshot. Clearing an evicted session also discards its turn ownership.
 const codexSessionTurnIds = new Map();
+// Only a process-exit sweep may leave a recoverable active row. This private,
+// bounded cache contains identity/display metadata, never transcript contents.
+const codexProcessExitRecovery = new Map();
+const CODEX_PROCESS_RECOVERY_TTL_MS = 10 * 60 * 1000;
+const CODEX_PROCESS_RECOVERY_LIMIT = 200;
+const CODEX_LIVE_PROCESS_FRESH_MS = 30000;
+
+function isLocalInteractiveCodex(session) {
+  return !!session && session.agentId === "codex"
+    && (session.profileId || "local") === "local"
+    && !session.host && !session.wslDistro
+    && String(session.platform || "").trim().toLowerCase() !== "wsl" && !session.headless;
+}
+
+function pruneCodexProcessExitRecovery() {
+  const cutoff = Date.now() - CODEX_PROCESS_RECOVERY_TTL_MS;
+  for (const [id, entry] of codexProcessExitRecovery) {
+    if (entry.retiredAt < cutoff) codexProcessExitRecovery.delete(id);
+  }
+}
+
+function rememberCodexProcessExit(sessionId, session) {
+  const turnId = codexSessionTurnIds.get(sessionId);
+  if (!isLocalInteractiveCodex(session) || !isWorkingLikeState(session.state)
+    || !turnId || !session.transcriptPath || session.requiresCompletionAck) return;
+  pruneCodexProcessExitRecovery();
+  const metadata = {};
+  for (const key of ["agentId", "profileId", "rawSessionId", "cwd", "transcriptPath",
+    "platform", "provider", "model", "codexOriginator", "codexSource", "codexClientEphemeral"]) {
+    if (session[key] !== undefined) metadata[key] = session[key];
+  }
+  if (session.sessionTitleFromPrompt !== true) metadata.sessionTitle = session.sessionTitle || null;
+  codexProcessExitRecovery.delete(sessionId);
+  codexProcessExitRecovery.set(sessionId, {
+    turnId, retiredAt: Date.now(), activityAt: session.updatedAt, metadata,
+  });
+  while (codexProcessExitRecovery.size > CODEX_PROCESS_RECOVERY_LIMIT) {
+    codexProcessExitRecovery.delete(codexProcessExitRecovery.keys().next().value);
+  }
+}
 const claudeToolPhases = createClaudeToolPhaseLedger();
 // Account-wide rate-limit quota, keyed by reporting source — deliberately
 // NOT session state (see src/state-account-quota.js). Persistence is
@@ -1647,12 +1687,81 @@ function updateSessionFocusMetadata(sessionId, opts = {}) {
   return true;
 }
 
+// Runtime-only entry point after the local transcript's open-turn fence. Fresh
+// thread evidence can detach disproven process identity or restore only a row
+// that this runtime's agent-exit sweep retired.
+function acceptCodexLiveProcessProgress(sessionId, opts = {}) {
+  if (opts.activityState !== "thinking" && opts.activityState !== "working") return false;
+  const occurredAt = opts.now;
+  const turnId = normalizeCodexTurnId(opts.turnId);
+  const transcriptPath = normalizeTranscriptPath(opts.transcriptPath);
+  if (!turnId || !transcriptPath || !Number.isSafeInteger(occurredAt)
+    || occurredAt < Date.now() - CODEX_LIVE_PROCESS_FRESH_MS
+    || occurredAt > Date.now() + 1500) return false;
+  pruneCodexProcessExitRecovery();
+  let session = sessions.get(sessionId);
+  let recovering = false;
+  if (!session) {
+    const retired = codexProcessExitRecovery.get(sessionId);
+    if (!retired || retired.turnId !== turnId
+      || retired.metadata.transcriptPath !== transcriptPath
+      || occurredAt < retired.activityAt) return false;
+    session = { ...retired.metadata, state: opts.activityState === "thinking" ? "thinking" : "working",
+      updatedAt: occurredAt, recentEvents: [], sourcePid: null, agentPid: null, pidReachable: false };
+    // A fresh record is evidence of this thread, but the configured inactivity
+    // window still decides whether that observation is recent enough to revive.
+    const decision = getStaleSessionDecision(session, {
+      now: Date.now(), isProcessAlive, deriveSessionBadge, shouldAutoClearDetachedSession,
+      staleConfig: typeof ctx.getStaleConfig === "function" ? ctx.getStaleConfig() : null,
+    });
+    if (decision.action) return false;
+    evictOldestSessionIfNeeded(sessionId);
+    sessions.set(sessionId, session);
+    codexSessionTurnIds.set(sessionId, turnId);
+    recovering = true;
+  }
+  if (!isLocalInteractiveCodex(session) || session.requiresCompletionAck
+    || codexSessionTurnIds.get(sessionId) !== turnId
+    || normalizeTranscriptPath(session.transcriptPath) !== transcriptPath) return false;
+  // A post-restart writer can continue the same rollout while the old Desktop
+  // app-server PID is dead. Drop only disproven identity; never bind all rows to
+  // whichever codex.exe happens to be alive on the host.
+  const agentDead = !!session.agentPid && !isProcessAlive(session.agentPid);
+  const sourceDead = !!session.sourcePid && !isProcessAlive(session.sourcePid);
+  if (agentDead || sourceDead) {
+    if (agentDead) session.agentPid = null;
+    // An old, still-live ancestor/terminal cannot establish which process now
+    // owns this rollout after its agent exited. A fresh hook may re-anchor it.
+    if (agentDead || sourceDead) session.sourcePid = null;
+    session.pidChain = null;
+    session.wtHwnd = null;
+    session.orcaPaneKey = null;
+    session.ghosttyTerminalId = null;
+    session.editor = null;
+    session.tmuxSocket = null;
+    session.tmuxClient = null;
+    session.herdrPaneId = null;
+    session.herdrSocket = null;
+    session.dshCarrier = null;
+    session.sessionAutomationIdentity = null;
+    session.pidReachable = resolvePidReachable(null, session.agentPid, session.sourcePid);
+    debugSession(`codex-live-process detach sid=${sessionId}`);
+  }
+  codexProcessExitRecovery.delete(sessionId);
+  const touched = touchSessionActivity(sessionId, {
+    agentId: "codex", profileId: "local", localOnly: true, reviveIdle: true,
+    activityState: opts.activityState, onlyWorkingTimeout: true, now: occurredAt,
+  });
+  if (recovering) {
+    const resolved = resolveDisplayState();
+    setState(resolved, getSvgOverride(resolved));
+    debugSession(`codex-live-process recover sid=${sessionId}`);
+  }
+  return touched;
+}
+
 // Refresh lifecycle liveness from a request-bound observer without inventing a
-// hook event. This deliberately sits between updateSessionFocusMetadata (which
-// owns focus-only fields) and updateSessionMetadata (which must never affect
-// staleness): a correlated request_user_input request/output is real turn
-// activity, but it must not create a ghost row, append recentEvents, fire a
-// sound, or manufacture a completion boundary.
+// hook event. This never creates a row, appends history or completes a turn.
 function touchSessionActivity(sessionId, opts = {}) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
@@ -1997,6 +2106,8 @@ function clearAllClaudeTranscriptCompletionProbes() {
 }
 
 function deleteSessionWithCompletionCleanup(sessionId, reason) {
+  if (reason === "stale-delete-agent-exit") rememberCodexProcessExit(sessionId, sessions.get(sessionId));
+  else codexProcessExitRecovery.delete(sessionId);
   releaseCodexCompaction(sessionId);
   codexCompactionCompletions.delete(sessionId);
   codexSessionTurnIds.delete(sessionId);
@@ -2285,6 +2396,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   // completion timers, acknowledgement, history or activity freshness.
   const phase = opts.claudeToolPhaseDecision || observeClaudeToolPhase(sessionId, event, opts);
   if (!phase.accept) return false;
+  codexProcessExitRecovery.delete(sessionId);
   if (phase.preservePhase && !phase.errorCue) {
     const existing = sessions.get(sessionId);
     const syntheticToolStart = event === "SubagentStart" && opts.subagentLifecycleSource === "synthetic-tool";
@@ -3625,6 +3737,7 @@ function disposeKimiSessionState(id, reason) {
 function dismissSession(sessionId) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
+  codexProcessExitRecovery.delete(id);
   const session = sessions.get(id);
   if (!session) return false;
   if (session.agentId === "codex") cancelCodexExitProbe(id, "session-hidden");
@@ -3688,6 +3801,7 @@ function clearPermissionNotification(sessionId, options = {}) {
 }
 
 function clearSessionsByAgent(agentId) {
+  if (agentId === "codex") codexProcessExitRecovery.clear();
   if (!agentId) return 0;
   if (agentId === "claude-code") claudeToolPhases.clear();
   let removed = 0;
@@ -4119,6 +4233,7 @@ function getCurrentHitBox() { return currentHitBox; }
 function getStartupRecoveryActive() { return startupRecoveryActive; }
 
 function cleanup() {
+  codexProcessExitRecovery.clear();
   for (const id of codexCompactionHolds.keys()) releaseCodexCompaction(id);
   codexCompactionCompletions.clear();
   codexSessionTurnIds.clear();
@@ -4162,6 +4277,7 @@ return {
   formatStdinDiag,
   updateSessionFocusMetadata,
   touchSessionActivity,
+  acceptCodexLiveProcessProgress,
   updateSessionMetadata,
   updateCodexInitializationMetadata,
   hasCodexCompactionHold,
