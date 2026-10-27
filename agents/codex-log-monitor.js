@@ -176,6 +176,7 @@ class CodexLogMonitor {
     this._onStateChange = onStateChange;
     this._onSubagentActivity = typeof options.onSubagentActivity === "function" ? options.onSubagentActivity : null;
     this._delegatedNow = typeof options.now === "function" ? options.now : Date.now;
+    this._bootTimeMs = Number.isFinite(options.bootTimeMs) ? options.bootTimeMs : null;
     this._publishedChildren = new Set();
     this._delegatedChildren = new Map();
     this._delegatedParentEnds = new Map();
@@ -2408,6 +2409,61 @@ class CodexLogMonitor {
     if (!child.owners.size) this._releaseDelegatedChild(child);
   }
 
+  _observePreBootDelegatedTurn(tracked, key, turnId, at) {
+    const child = tracked?.delegatedChild;
+    if (!Number.isFinite(this._bootTimeMs) || !Number.isSafeInteger(at) || at >= this._bootTimeMs
+      || !child || child.invalid || (Number.isSafeInteger(child.bornAt) && at < child.bornAt)
+      || !["event_msg:task_started", "event_msg:task_complete", "event_msg:turn_aborted"].includes(key)) return null;
+    // Only retain the child's own lifecycle ordering before the host boot
+    // boundary. This never publishes activity or grants postboot freshness;
+    // genuine new model/tool progress must still pass the normal live path.
+    return observeDelegatedChild(child, key, turnId || child.turnId, at, this._delegatedNow());
+  }
+
+  refreshSubagentsOfParent(rawThreadId) {
+    const parentId = normalizeDelegatedThread(rawThreadId);
+    if (!parentId || !this._onSubagentActivity) return 0;
+    const now = this._delegatedNow();
+    let refreshed = 0;
+    for (const child of this._delegatedChildren.values()) {
+      const at = child.lastActivityAt;
+      if (child.parentId !== parentId || child.invalid || !child.owners.size
+        || !child.turnId || child.closed.has(child.turnId)
+        || (child.parentEndedAt && child.latestStartAt <= child.parentEndedAt)
+        || !Number.isSafeInteger(at) || at > now + 1500 || now - at > CHILD_ACTIVITY_TTL_MS
+        || (Number.isFinite(this._bootTimeMs) && at < this._bootTimeMs)) continue;
+      // The parent row may have been recovered after state-side presentation
+      // was lost. Reassert only this proven open child generation, preserving
+      // its real activity time. Repeated starts are idempotent in presentation;
+      // no fake Stop, tool event or parent metadata change is needed.
+      child.publishedTurnId = child.turnId;
+      this._publishedChildren.add(child);
+      this._onSubagentActivity(parentId, {
+        childId: child.childId, turnId: child.turnId, phase: "start", occurredAt: at,
+      });
+      refreshed++;
+    }
+    return refreshed;
+  }
+
+  endSubagentTurn(rawThreadId, turnId) {
+    const child = this._delegatedChildren.get(normalizeDelegatedThread(rawThreadId));
+    const turn = normalizeCodexTurnId(turnId);
+    // A turn completion owns only this child's exact open generation. In
+    // particular, an id-less/late official Stop cannot end a newer child turn
+    // or any of the completing parent's independently running children.
+    if (!child || child.invalid || !turn || child.turnId !== turn || child.closed.has(turn)) return false;
+    const now = this._delegatedNow();
+    if (observeDelegatedChild(child, "event_msg:task_complete", turn, now, now) !== "stop") return false;
+    for (const owner of child.owners) {
+      if (owner.activeTurnId !== turn) continue;
+      owner.activeTurnId = null;
+      owner.turnBoundaryOpen = false;
+    }
+    this._releaseDelegatedChild(child);
+    return true;
+  }
+
   endSubagent(rawThreadId) {
     const child = this._delegatedChildren.get(normalizeDelegatedThread(rawThreadId));
     if (!child) return;
@@ -2441,6 +2497,7 @@ class CodexLogMonitor {
     const turnId = phase === "stop" ? child.publishedTurnId : child.turnId;
     const now = this._delegatedNow();
     if (!turnId || occurredAt > now + 1500) return;
+    if (Number.isFinite(this._bootTimeMs) && occurredAt < this._bootTimeMs) return;
     if (phase === "start" && child.publishedTurnId === turnId) return;
     if (phase === "activity" && child.publishedTurnId !== turnId) {
       if (now - occurredAt > CHILD_ACTIVITY_TTL_MS) return;

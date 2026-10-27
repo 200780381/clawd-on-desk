@@ -97,6 +97,19 @@ function createAgentRuntimeMain(options = {}) {
   // Keep only live, fenced starts; this ledger never creates a session.
   const pendingCodexChildren = new Map();
 
+  function dropClosedCodexChildActivity(activity) {
+    const childId = normalizeDelegatedThread(activity?.childId);
+    const turnId = normalizeCodexTurnId(activity?.turnId);
+    if (!childId || !turnId) return false;
+    const childKey = resolveSessionIdentity(childId, "local").sessionId;
+    if (!codexTurnFence.getSnapshot(childKey)?.closedTurnIds.includes(turnId)) return false;
+    // An official terminal may arrive before this rollout is discovered, or
+    // while its parent is still pending. Reuse the child's closed-turn fence;
+    // never compare its turn with the parent's independently owned turn.
+    codexMonitor?.endSubagentTurn?.(childId, turnId);
+    return true;
+  }
+
   function prunePendingCodexChildren() {
     for (const [parentId, children] of pendingCodexChildren) {
       for (const [childId, activity] of children) {
@@ -116,7 +129,9 @@ function createAgentRuntimeMain(options = {}) {
     const children = pendingCodexChildren.get(parentId);
     if (!children) return;
     pendingCodexChildren.delete(parentId);
-    for (const activity of children.values()) state.updateCodexSubagentActivity?.(parentId, activity);
+    for (const activity of children.values()) {
+      if (!dropClosedCodexChildActivity(activity)) state.updateCodexSubagentActivity?.(parentId, activity);
+    }
   }
 
   // ── Local WorkBuddy archive/delete retirement (#655) ────────────────────
@@ -581,7 +596,11 @@ function createAgentRuntimeMain(options = {}) {
       && opts.hookSource === "codex-official"
       && opts.profileId === "local"
       && !opts.host
-      && !opts.wslDistro);
+      && !opts.wslDistro
+      && String(opts.platform || "").trim().toLowerCase() !== "wsl");
+    const officialRawThreadId = normalizeDelegatedThread(opts.rawSessionId);
+    if (isLocalOfficialCodexEvent && officialRawThreadId
+      && resolveSessionIdentity(officialRawThreadId, "local").sessionId !== sessionId) return false;
     if (isLocalOfficialCodexEvent) {
       if (opts.codexInternalThread === CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS) {
         // Hidden ambient-suggestion work: remember the sid so later official
@@ -604,7 +623,7 @@ function createAgentRuntimeMain(options = {}) {
     }
     if (opts && opts.agentId === "codex" && opts.hookSource === "codex-official") {
       markCodexOfficialHookSession(sessionId, opts.turnId);
-      if (opts.profileId === "local") {
+      if (isLocalOfficialCodexEvent) {
         recordCodexTurnIdCapture(sessionId, "official", event, opts.turnId);
         const fenceDecision = codexTurnFence.observe({
           sessionId,
@@ -632,6 +651,9 @@ function createAgentRuntimeMain(options = {}) {
     }
     const stateRuntime = getStateRuntime();
     const sessions = stateRuntime && stateRuntime.sessions;
+    const officialChildTerminalId = isLocalOfficialCodexEvent && (event === "Stop" || event === "Interrupt")
+      ? normalizeDelegatedThread(opts.rawSessionId || sessions?.get(sessionId)?.rawSessionId)
+      : null;
     const sessionBeforeUpdate = event === "SessionEnd" && sessions && typeof sessions.get === "function"
       ? sessions.get(sessionId)
       : null;
@@ -644,6 +666,13 @@ function createAgentRuntimeMain(options = {}) {
     const result = preserveCodexInitialization
       ? stateRuntime.updateCodexInitializationMetadata(sessionId, opts)
       : updateSession(sessionId, state, event, opts);
+    if (officialChildTerminalId
+      && resolveSessionIdentity(officialChildTerminalId, "local").sessionId === sessionId) {
+      // The official turn fence above has accepted this terminal. The monitor
+      // also matches the child's own open turn before releasing its parent's
+      // projection; a parent's ordinary Stop never ends its running children.
+      codexMonitor?.endSubagentTurn?.(officialChildTerminalId, opts.turnId);
+    }
     if (opts.agentId === "codex" && (opts.profileId || "local") === "local" && !opts.host && !opts.wslDistro) {
       if (event === "SessionEnd") {
         pendingCodexChildren.delete(sessionId);
@@ -1077,6 +1106,7 @@ function createAgentRuntimeMain(options = {}) {
           // Teardown must release its previously admitted evidence even after
           // disable/dispose has closed the admission gate.
           if (!releasing && (disposed || !isAgentEnabled("codex") || codexAgent.capabilities?.subagent !== true)) return;
+          if (!releasing && dropClosedCodexChildActivity(activity)) return;
           const parent = resolveSessionIdentity(rawParentId, "local");
           const state = getStateRuntime();
           const session = state?.sessions?.get(parent.sessionId);

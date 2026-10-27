@@ -7,6 +7,7 @@ const { CODEX_LOCAL_WORKING_STALE_FLOOR_MS } = require("../src/state-stale-clean
 const MAX_CLOSED_TURNS = 64;
 const ACTIVE_EVENTS = new Set([
   "event_msg:task_started", "event_msg:user_message", "event_msg:agent_message",
+  "event_msg:agent_reasoning", "event_msg:agent_reasoning_raw_content", "response_item:reasoning",
   "response_item:function_call", "response_item:custom_tool_call", "response_item:web_search_call",
   "event_msg:exec_command_end", "event_msg:patch_apply_end", "event_msg:custom_tool_call_output",
 ]);
