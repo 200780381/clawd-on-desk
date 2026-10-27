@@ -82,6 +82,8 @@ test("v1.1 contributor email identities map to their reviewed pull request autho
   }
 });
 
-test("reviewed Aminorsh identity maps to the credited GitHub handle", () => {
+test("reviewed release identities map to their credited GitHub handles", () => {
   assert.strictEqual(githubHandleForIdentity("Aminorsh", "aminorsh@gmail.com"), "Aminorsh");
+  assert.strictEqual(githubHandleForIdentity("Jingxuan Dai", "daijx66@gmail.com"), "daijx-ai");
+  assert.strictEqual(githubHandleForIdentity("XYZliang", "59312540+XYZliang@users.noreply.github.com"), "XYZliang");
 });
