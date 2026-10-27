@@ -98,6 +98,52 @@ describe("local Codex process handoff needs current thread progress", () => {
     assert.doesNotMatch(JSON.stringify(state.buildSessionSnapshot()), /ProcessExitRecovery|private synthetic|private prompt/);
   });
 
+  for (const turnId of [null, "T1"]) {
+    it(`late ${turnId ? "identified" : "idless"} official initialization after agent exit waits for real progress`, () => {
+      start(); retire();
+      const ownerBefore = runtime.getCodexTurnFenceSnapshot(sid);
+      mock.timers.tick(1000);
+      official("idle", "SessionStart", { turnId, agentPid: 84, sourcePid: 84 });
+      assert.equal(state.sessions.has(sid), false, "initialization cannot replace the retired active turn with idle");
+      assert.equal(state.hasRecoverableCodexProcessExit(sid, { turnId: "T1", transcriptPath }), true);
+      assert.deepEqual(runtime.getCodexTurnFenceSnapshot(sid), ownerBefore, "initialization never advances the turn clock");
+      assert.deepEqual(refreshedParents, [], "initialization alone cannot re-admit children");
+      mock.timers.tick(1000); record();
+      assert.equal(state.sessions.get(sid).state, "thinking");
+      assert.equal(state.sessions.get(sid).updatedAt, 2000);
+      assert.deepEqual(refreshedParents, [raw]);
+    });
+  }
+
+  it("the recovery query is exact, private, and never extends the retention TTL", () => {
+    start(); retire();
+    assert.equal(state.hasRecoverableCodexProcessExit(sid, { turnId: "T2", transcriptPath }), false);
+    assert.equal(state.hasRecoverableCodexProcessExit(sid, { turnId: "T1", transcriptPath: transcriptPath + ".other" }), false);
+    assert.equal(state.hasRecoverableCodexProcessExit(sid, { turnId: "T1", transcriptPath }), true);
+    mock.timers.tick(599000);
+    official("idle", "SessionStart", { turnId: null, agentPid: 84, sourcePid: 84 });
+    assert.equal(state.sessions.has(sid), false);
+    mock.timers.tick(1001);
+    assert.equal(state.hasRecoverableCodexProcessExit(sid, { turnId: "T1", transcriptPath }), false);
+    assert.equal(state.sessions.has(sid), false);
+  });
+
+  for (const mismatch of ["wrong turn", "wrong path", "expired", "SessionEnd"]) {
+    it(`does not hold an ordinary initializer after ${mismatch} invalidates the recovery tuple`, () => {
+      start(); retire();
+      if (mismatch === "expired") mock.timers.tick(600001);
+      if (mismatch === "SessionEnd") official("sleeping", "SessionEnd", { agentPid: null, sourcePid: null });
+      official("idle", "SessionStart", { agentPid: 84, sourcePid: 84,
+        turnId: mismatch === "wrong turn" ? "T2" : null,
+        transcriptPath: mismatch === "wrong path" ? transcriptPath + ".other" : transcriptPath });
+      assert.equal(state.sessions.get(sid).state, "idle");
+      assert.equal(state.hasRecoverableCodexProcessExit(sid, { turnId: "T1", transcriptPath }), false);
+      record();
+      assert.equal(state.sessions.get(sid).state, "idle");
+      assert.deepEqual(refreshedParents, []);
+    });
+  }
+
   for (const terminal of ["Stop", "Interrupt", "SessionEnd"]) {
     it(`does not recover after accepted ${terminal}`, () => {
       start(); retire(); official(terminal === "SessionEnd" ? "sleeping" : "idle", terminal,
@@ -184,6 +230,17 @@ describe("local Codex process handoff needs current thread progress", () => {
     delete monitor.refreshSubagentsOfParent;
     start(); retire(); mock.timers.tick(1000); record();
     assert.equal(state.sessions.get(sid).state, "thinking");
+  });
+
+  it("a pathless late initializer cannot consume a known open recovery tuple, while recovery still needs its exact path", () => {
+    start(); retire(); mock.timers.tick(1000);
+    official("idle", "SessionStart", {turnId:null,transcriptPath:null,agentPid:84,sourcePid:84});
+    assert.equal(state.sessions.has(sid),false);
+    assert.equal(state.hasRecoverableCodexProcessExit(sid,{turnId:"T1",transcriptPath:null}),false);
+    assert.equal(state.acceptCodexLiveProcessProgress(sid,{turnId:"T1",transcriptPath:null,
+      now:Date.now(),activityState:"thinking"}),false);
+    record();
+    assert.equal(state.sessions.get(sid).state,"thinking");
   });
 
   for (const platform of ["wsl", "WSL", " wSl "]) {

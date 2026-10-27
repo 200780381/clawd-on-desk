@@ -234,6 +234,19 @@ function pruneCodexProcessExitRecovery() {
   }
 }
 
+// A late initializer may consult this tuple, but only genuine fenced progress
+// can consume it and restore a row. The query never extends its retention TTL.
+function hasRecoverableCodexProcessExit(sessionId, opts = {}) {
+  pruneCodexProcessExitRecovery();
+  const turnId = normalizeCodexTurnId(opts.turnId);
+  const transcriptPath = normalizeTranscriptPath(opts.transcriptPath);
+  const retired = codexProcessExitRecovery.get(sessionId);
+  const missingInitializerPath = opts.allowMissingInitializerPath === true
+    && (opts.transcriptPath == null || opts.transcriptPath === "");
+  return !sessions.has(sessionId) && !!turnId && !!retired && retired.turnId === turnId
+    && (missingInitializerPath || (!!transcriptPath && retired.metadata.transcriptPath === transcriptPath));
+}
+
 function rememberCodexProcessExit(sessionId, session) {
   const turnId = codexSessionTurnIds.get(sessionId);
   if (!isLocalInteractiveCodex(session) || !isWorkingLikeState(session.state)
@@ -1702,10 +1715,9 @@ function acceptCodexLiveProcessProgress(sessionId, opts = {}) {
   let session = sessions.get(sessionId);
   let recovering = false;
   if (!session) {
+    if (!hasRecoverableCodexProcessExit(sessionId, { turnId, transcriptPath })) return false;
     const retired = codexProcessExitRecovery.get(sessionId);
-    if (!retired || retired.turnId !== turnId
-      || retired.metadata.transcriptPath !== transcriptPath
-      || occurredAt < retired.activityAt) return false;
+    if (occurredAt < retired.activityAt) return false;
     session = { ...retired.metadata, state: opts.activityState === "thinking" ? "thinking" : "working",
       updatedAt: occurredAt, recentEvents: [], sourcePid: null, agentPid: null, pidReachable: false };
     // A fresh record is evidence of this thread, but the configured inactivity
@@ -4278,6 +4290,7 @@ return {
   updateSessionFocusMetadata,
   touchSessionActivity,
   acceptCodexLiveProcessProgress,
+  hasRecoverableCodexProcessExit,
   updateSessionMetadata,
   updateCodexInitializationMetadata,
   hasCodexCompactionHold,

@@ -609,6 +609,13 @@ function createAgentRuntimeMain(options = {}) {
     const sessionBeforeUpdate = event === "SessionEnd" && sessions && typeof sessions.get === "function"
       ? sessions.get(sessionId)
       : null;
+    if (isLocalOfficialCodexEvent && event === "SessionStart" && state === "idle"
+      && shouldHoldRetiredCodexInitialization(sessionId, opts, stateRuntime)) {
+      // agent-exit retired the row but not this open turn. Initialization is
+      // not new activity: retain its recovery tuple until real progress arrives.
+      debugLog(`codex-initialization defer-retired sid=${String(sessionId).replace(/[\r\n]/g, "_")}`);
+      return true;
+    }
     // Initialization can arrive after the fallback already accepted this turn.
     // Keep its real phase/clock; valid initialization metadata still belongs to
     // the conversation. New/closed owners and compaction keep their lifecycle path.
@@ -634,6 +641,19 @@ function createAgentRuntimeMain(options = {}) {
     enrichQoderSessionTitle(sessionId, event, opts);
     enrichWorkBuddySessionTitle(sessionId, event, opts);
     return result;
+  }
+
+  function shouldHoldRetiredCodexInitialization(sessionId, opts, stateRuntime) {
+    if (!isAgentEnabled("codex") || !stateRuntime
+      || typeof stateRuntime.hasRecoverableCodexProcessExit !== "function"
+      || stateRuntime.sessions?.has(sessionId)
+      || opts.headless || opts.subagentId || opts.subagentType || opts.recapIsSubagent) return false;
+    const owner = codexTurnFence.getSnapshot(sessionId);
+    const turnId = normalizeCodexTurnId(opts.turnId) || owner?.currentTurnId;
+    return !!owner && !owner.terminalLatch && !!turnId && owner.currentTurnId === turnId
+      && stateRuntime.hasRecoverableCodexProcessExit(sessionId, {
+        turnId, transcriptPath: opts.transcriptPath, allowMissingInitializerPath: true,
+      });
   }
 
   function shouldPreserveCodexInitialization(sessionId, opts, stateRuntime) {
