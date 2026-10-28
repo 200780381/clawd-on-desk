@@ -4,6 +4,7 @@
 // Codex Desktop GUI ancestor of its live app-server, never an arbitrary GUI.
 // This is app activation, not conversation selection or permission to paste.
 const pid = value => Number.isSafeInteger(Number(value)) && Number(value) > 1 ? Number(value) : null;
+const posix = require("node:path").posix;
 
 function windowsProcessAppScript(sourcePid) {
   const source = pid(sourcePid);
@@ -120,17 +121,27 @@ function macCodexProcessTarget(sourcePid, text) {
     processes.set(Number(match[1]), { pid: Number(match[1]), parent: Number(match[2]), identity: match[3], started, image: match[5] });
   }
   const source = processes.get(pid(sourcePid));
-  // Unknown/custom layouts fail closed. Inheriting the Desktop originator
-  // does not turn a CLI binary into a verified Desktop application.
-  const bundle = source && source.image.match(/^(\/.*\/Codex\.app)\/Contents\/Resources\/codex$/);
-  if (!bundle) return null;
-  const target = processes.get(source.parent);
-  if (!target || target.started > source.started
-      || ![`${bundle[1]}/Contents/MacOS/Codex`, `${bundle[1]}/Contents/MacOS/Electron`].includes(target.image)) return null;
-  return { source, target };
+  const target = source && processes.get(source.parent);
+  if (!target || target.pid === source.pid || target.started > source.started) return null;
+  // Use the GUI's outermost bundle, not the app-server's innermost helper.
+  // The GUI must be a direct Contents/MacOS executable of that outer bundle;
+  // a nested helper process cannot authorize activating a different ancestor.
+  const validImage = image => image.startsWith("/") && posix.normalize(image) === image
+    && !/[\0\r\n]/.test(image);
+  if (!validImage(source.image) || !validImage(target.image)) return null;
+  const bundleEnd = target.image.indexOf(".app/");
+  if (bundleEnd < 1) return null;
+  const bundlePath = target.image.slice(0, bundleEnd + 4);
+  const guiPrefix = `${bundlePath}/Contents/MacOS/`;
+  const guiExecutable = target.image.slice(guiPrefix.length);
+  if (!target.image.startsWith(guiPrefix) || !guiExecutable || guiExecutable.includes("/")) return null;
+  // Keep the bundled codex image requirement without hard-coding the app name
+  // or helper layout. Both Resources/codex and Resources/.../CodexCLI.app/
+  // Contents/MacOS/codex are valid; a CLI outside this bundle is not.
+  if (!source.image.startsWith(`${bundlePath}/Contents/Resources/`)
+      || posix.basename(source.image) !== "codex") return null;
+  return { source, target, bundlePath };
 }
-
-const appleString = value => '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
 
 function focusProcessAppWindow(request, { execFile, platform, windowsActivationCode = "" }) {
   const source = pid(request && request.sourcePid);
@@ -160,17 +171,20 @@ function focusProcessAppWindow(request, { execFile, platform, windowsActivationC
     if (!proof || (source !== server && source !== proof.target.pid)) {
       return { confirmed: false, reason: "unverified-codex-process" };
     }
-    // Recheck process birth times and images immediately before activation.
-    const script = `if (do shell script "LC_ALL=C /bin/ps -ww -p ${proof.source.pid} -o lstart=,comm=") is not ${appleString(proof.source.identity)} then return "process-changed"
-if (do shell script "LC_ALL=C /bin/ps -ww -p ${proof.target.pid} -o lstart=,comm=") is not ${appleString(proof.target.identity)} then return "process-changed"
-tell application "System Events"
-set matches to every application process whose unix id is ${proof.target.pid} and background only is false
-if (count of matches) is not 1 then return "no-process-window"
-set frontmost of item 1 of matches to true
-return "activated"
-end tell`;
-    const activated = await run("osascript", ["-e", script]);
-    return { confirmed: false, submitted: !activated.error && activated.stdout.trim() === "activated", reason: activated.error ? "process-focus-failed" : activated.stdout.trim() };
+    // Recheck birth identities, images and the direct parent relationship
+    // immediately before activation. Never turn a changed PID into a launcher.
+    const fresh = await run("ps", ["-ww", "-axo", "pid=,ppid=,lstart=,comm="], { timeout: 1000, env: { ...process.env, LC_ALL: "C" } });
+    if (fresh.error) return { confirmed: false, reason: "process-query-failed" };
+    const current = macCodexProcessTarget(server, fresh.stdout);
+    const same = (a, b) => a.pid === b.pid && a.parent === b.parent && a.identity === b.identity;
+    if (!current || !same(proof.source, current.source) || !same(proof.target, current.target)
+        || current.bundlePath !== proof.bundlePath) return { confirmed: false, reason: "process-changed" };
+    // LaunchServices restores minimized windows and avoids System Events'
+    // Automation consent requirement. Pass the verified absolute bundle as
+    // one argv value; no shell, application-name lookup, URI or paste fallback.
+    const activated = await run("/usr/bin/open", [current.bundlePath]);
+    return { confirmed: false, submitted: !activated.error,
+      reason: activated.error ? "process-focus-failed" : "app-activation-submitted" };
   });
 }
 

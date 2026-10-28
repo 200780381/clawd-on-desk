@@ -28,7 +28,7 @@ it("missing/dead app process returns failure without a launcher or a second atte
 const macRows = (source = "/Applications/Codex.app/Contents/Resources/codex", target = "/Applications/Codex.app/Contents/MacOS/Codex") =>
   `731 732 Sat Oct 24 12:01:00 2026 ${source}\n732 1 Sat Oct 24 12:00:00 2026 ${target}\n`;
 
-it("macOS activates only the same verified bundle's existing GUI process and rechecks birth identities", async () => {
+it("macOS activates the verified outer bundle through LaunchServices after rechecking both identities", async () => {
   const calls = [];
   const result = await focusProcessAppWindow({ sourcePid: 731, pidChain: [999], cwd: "/decoy" }, {
     platform: "darwin", execFile: (bin, args, options, done) => {
@@ -36,11 +36,11 @@ it("macOS activates only the same verified bundle's existing GUI process and rec
     },
   });
   assert.equal(result.submitted, true); assert.equal(result.confirmed, false, "no claim of exact composer or foreground confirmation");
-  assert.deepEqual(calls.map(x => x[0]), ["ps", "osascript"]);
-  assert.match(calls[1][1][1], /unix id is 732/);
-  assert.match(calls[1][1][1], /\/bin\/ps -ww -p 731 -o lstart=,comm=/);
-  assert.match(calls[1][1][1], /\/bin\/ps -ww -p 732 -o lstart=,comm=/);
-  assert.equal(calls[1][1][1].includes("999"), false); assert.equal(calls[1][1][1].includes("activate"), true);
+  assert.deepEqual(calls.map(x => x[0]), ["ps", "ps", "/usr/bin/open"]);
+  assert.deepEqual(calls[0][1], ["-ww", "-axo", "pid=,ppid=,lstart=,comm="]);
+  assert.deepEqual(calls[1][1], calls[0][1]);
+  assert.deepEqual(calls[2][1], ["/Applications/Codex.app"]);
+  assert.equal(result.reason, "app-activation-submitted");
 });
 
 it("macOS validates the real hook's GUI source and server agent pair without accepting unrelated PID hints", async () => {
@@ -54,7 +54,7 @@ it("macOS validates the real hook's GUI source and server agent pair without acc
       execFile(bin, args, _options, done) { calls.push([bin, args]); done(null, bin === "ps" ? macRows() : "activated\n"); },
     });
     assert.equal(result.submitted, true);
-    assert.deepEqual(calls.map(call => call[0]), ["ps", "osascript"]);
+    assert.deepEqual(calls.map(call => call[0]), ["ps", "ps", "/usr/bin/open"]);
   }
   for (const request of [
     { sourcePid: 999, agentPid: 731 }, // Valid server cannot authorize an unrelated source.
@@ -71,20 +71,24 @@ it("macOS validates the real hook's GUI source and server agent pair without acc
   }
 });
 
-it("macOS birth-identity recheck cannot report activation after the server or GUI PID changes", async () => {
-  for (const changedPid of [731, 732]) {
+it("macOS birth/image/parent recheck cannot activate after the server or GUI identity changes", async () => {
+  for (const changedRows of [
+    macRows().replace("12:01:00", "12:03:00"),
+    macRows().replace("12:00:00", "11:59:00"),
+    macRows().replace("731 732", "731 999"),
+    macRows().replace("732 1", "732 999"),
+    macRows().replaceAll("Codex.app", "Changed.app"),
+    macRows().split("\n")[0],
+  ]) {
     const calls = [];
     const result = await focusProcessAppWindow({ sourcePid: 732, agentPid: 731 }, { platform: "darwin",
       execFile(bin, args, _options, done) {
         calls.push([bin, args]);
-        if (bin === "ps") return done(null, macRows());
-        // Emulate the generated AppleScript guard result, without launching a real app.
-        assert.match(args[1], new RegExp(`/bin/ps -ww -p ${changedPid} -o lstart=,comm=`));
-        assert.match(args[1], /then return "process-changed"/);
-        done(null, "process-changed\n");
+        assert.equal(bin, "ps", "a changed process must never reach open");
+        done(null, calls.length === 1 ? macRows() : changedRows);
       },
     });
-    assert.equal(result.submitted, false); assert.equal(result.confirmed, false);
+    assert.notEqual(result.submitted, true); assert.equal(result.confirmed, false);
     assert.equal(result.reason, "process-changed"); assert.equal(calls.length, 2);
   }
 });
@@ -96,6 +100,11 @@ it("macOS reused PIDs, CLI binaries, other bundles, terminals, and younger paren
     macRows(undefined, "/Applications/Other/Codex.app/Contents/MacOS/Codex"),
     macRows(undefined, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
     macRows(undefined, "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
+    macRows("/Applications/Codex.app.evil/Contents/Resources/codex"),
+    macRows("/Applications/Codex.app/Contents/Resources/../../../../usr/local/bin/codex"),
+    macRows("/Applications/Codex.app/Contents/Resources/../codex"),
+    macRows(undefined, "/Applications/Codex.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"),
+    macRows(undefined, "/Applications/Codex.app/Contents/MacOS/helpers/GUI"),
     macRows().replace("12:00:00", "12:02:00"),
     "731 732\n732 1\n", "",
   ]) {
@@ -105,6 +114,37 @@ it("macOS reused PIDs, CLI binaries, other bundles, terminals, and younger paren
       platform: "darwin", execFile: (bin, _args, _options, done) => { calls.push(bin); done(null, rows); },
     });
     assert.equal(result.reason, "unverified-codex-process"); assert.deepEqual(calls, ["ps"]);
+  }
+});
+
+it("macOS accepts nested helpers and renamed outer bundles without activating the inner app", async () => {
+  for (const bundle of ["/Applications/ChatGPT.app", "/Users/fixture/Apps/Work Assistant.app", '/Applications/A "quoted" app.app']) {
+    const rows = macRows(`${bundle}/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, `${bundle}/Contents/MacOS/ChatGPT`);
+    assert.equal(macCodexProcessTarget(731, rows).bundlePath, bundle);
+    const calls = [];
+    const result = await focusProcessAppWindow({sourcePid:732,agentPid:731}, {platform:"darwin",
+      execFile(bin,args,opts,done) { calls.push({bin,args,opts}); done(null,bin === "ps" ? rows : ""); },
+    });
+    assert.equal(result.submitted,true);assert.equal(result.confirmed,false);
+    assert.deepEqual(calls.map(c=>c.bin),["ps","ps","/usr/bin/open"]);
+    assert.deepEqual(calls[2].args,[bundle],"absolute path is a single argv, not a script or innermost helper");
+    for (const call of calls.slice(0,2)) assert.equal(call.opts.env.LC_ALL,"C");
+    assert.equal(calls.some(c=>/osascript|System Events/.test(c.bin)),false);
+  }
+});
+
+it("macOS failed recheck or LaunchServices submission has no System Events, URI, CLI or other fallback", async () => {
+  for (const failAt of [1,2,3]) {
+    const calls = [];
+    const result = await focusProcessAppWindow({sourcePid:732,agentPid:731}, {platform:"darwin",
+      execFile(bin,args,_opts,done) {
+        calls.push({bin,args});
+        done(calls.length === failAt ? new Error("fixture failure") : null,bin === "ps" ? macRows() : "");
+      },
+    });
+    assert.equal(result.confirmed,false);assert.notEqual(result.submitted,true);
+    assert.equal(calls.length,failAt);
+    assert.equal(result.reason,failAt === 3 ? "process-focus-failed" : "process-query-failed");
   }
 });
 

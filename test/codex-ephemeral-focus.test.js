@@ -55,7 +55,10 @@ function harness(t, { platform = "win32", throughRuntime = false } = {}) {
   return { state, send, home, ctx };
 }
 
-it("actual Darwin env-only hooks preserve metadata through runtime and dispatch verified app focus and completed HUD filtering", async t => {
+for (const layout of [
+  {name:"legacy",bundle:"/Applications/Codex.app",server:"/Applications/Codex.app/Contents/Resources/codex",gui:"/Applications/Codex.app/Contents/MacOS/Codex"},
+  {name:"nested ChatGPT",bundle:"/Applications/ChatGPT.app",server:"/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",gui:"/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"},
+]) it(`actual Darwin ${layout.name} env-only hooks preserve metadata through runtime and dispatch verified app focus and completed HUD filtering`, async t => {
   const h = harness(t, { platform: "darwin", throughRuntime: true });
   const deliveries = [];
   // createPidResolver reads process.platform and requires child_process itself;
@@ -66,10 +69,8 @@ it("actual Darwin env-only hooks preserve metadata through runtime and dispatch 
   const sharedRequire = createRequire(sharedPath);
   const observations = new Map([
     [730, { ppid: 731, comm: "/bin/zsh", command: "/bin/zsh -c hook" }],
-    [731, { ppid: 732, comm: "/Applications/Codex.app/Contents/Resources/codex",
-      command: "/Applications/Codex.app/Contents/Resources/codex app-server --stdio" }],
-    [732, { ppid: 1, comm: "/Applications/Codex.app/Contents/MacOS/Codex",
-      command: "/Applications/Codex.app/Contents/MacOS/Codex" }],
+    [731, { ppid: 732, comm: layout.server, command: `${layout.server} app-server --stdio` }],
+    [732, { ppid: 1, comm: layout.gui, command: layout.gui }],
     [1, { ppid: 0, comm: "/sbin/launchd", command: "/sbin/launchd" }],
   ]);
   const queries = [], metadata = [], sharedModule = { exports: {} };
@@ -143,8 +144,8 @@ it("actual Darwin env-only hooks preserve metadata through runtime and dispatch 
       const result = focusProcessAppWindow(request, { platform: "darwin", execFile(bin, args, _options, done) {
         calls.push([bin, args]);
         done(null, bin === "ps"
-          ? "731 732 Sat Oct 24 12:01:00 2026 /Applications/Codex.app/Contents/Resources/codex\n732 1 Sat Oct 24 12:00:00 2026 /Applications/Codex.app/Contents/MacOS/Codex\n"
-          : "activated\n");
+          ? `731 732 Sat Oct 24 12:01:00 2026 ${layout.server}\n732 1 Sat Oct 24 12:00:00 2026 ${layout.gui}\n`
+          : "");
       } });
       pending.push(result); return result;
     },
@@ -154,10 +155,8 @@ it("actual Darwin env-only hooks preserve metadata through runtime and dispatch 
   assert.equal(context.focusDashboardSession(id), true);
   assert.equal((await Promise.all(pending))[0].submitted, true);
   assert.equal(requests[0].sourcePid, 732); assert.equal(requests[0].agentPid, 731);
-  assert.deepEqual(calls.map(call => call[0]), ["ps", "osascript"]);
-  assert.match(calls[1][1][1], /unix id is 732/);
-  assert.match(calls[1][1][1], /\/bin\/ps -ww -p 731 -o lstart=,comm=/);
-  assert.match(calls[1][1][1], /\/bin\/ps -ww -p 732 -o lstart=,comm=/);
+  assert.deepEqual(calls.map(call => call[0]), ["ps", "ps", "/usr/bin/open"]);
+  assert.deepEqual(calls[2][1], [layout.bundle], "activate the verified outer bundle, never the helper");
 
   await run("PostToolUse", { tool_name: "update_plan", tool_input: { plan: [
     { step: "first", status: "completed" }, { step: "second", status: "in_progress" },
