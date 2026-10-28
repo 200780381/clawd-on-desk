@@ -38,6 +38,7 @@ const {
   buildSessionSnapshot: buildSessionSnapshotFromSessions,
   getActiveSessionAliasKeys: getActiveSessionAliasKeysFromSessions,
   sessionSnapshotSignature,
+  shouldHideActiveCodexEphemeral,
   AWAITING_ACTIVITY_AGENTS,
 } = require("./state-session-snapshot");
 const { getAgentIconUrl } = require("./state-agent-icons");
@@ -3441,6 +3442,12 @@ function updateSession(sessionId, state, event, opts = {}) {
     return;
   }
 
+  // A hidden temporary request must not reset an existing sleep/idle animation
+  // merely by resolving to idle. Canonical lifecycle and the snapshot below
+  // still advance, including keep-awake and recap consumers.
+  if (shouldHideActiveCodexEphemeral(sessionId, sessions.get(sessionId), getPetPresentationOptions())
+    && isPassivePetPresentation()
+    && resolveDisplayState() === "idle") return;
   const displayState = resolveDisplayState();
   setState(displayState, getSvgOverride(displayState));
   } finally {
@@ -3987,8 +3994,40 @@ function disposeKimiPermissionSession(sessionId) {
   stopKimiPermissionPoll(sessionId);
 }
 
+function getPetPresentationOptions() {
+  return {
+    sessionHudHideActiveCodexEphemeral: ctx.sessionHudHideActiveCodexEphemeral === true,
+    pendingPermissionSessionIds: new Set((ctx.pendingPermissions || []).filter(Boolean).map(entry => entry.sessionId)),
+  };
+}
+
+// Accept a prior projection so child/pending-attention overlays can be applied
+// first. Neither this map nor its entries are written back to canonical state.
+function getPetPresentationSessions(source = sessions) {
+  const options = getPetPresentationOptions();
+  if (!options.sessionHudHideActiveCodexEphemeral) return source;
+  let projected = source;
+  for (const [id, session] of source) {
+    if (!shouldHideActiveCodexEphemeral(id, session, options)) continue;
+    if (projected === source) projected = new Map(source);
+    projected.delete(id);
+  }
+  return projected;
+}
+
+function isPassivePetPresentation() {
+  return SLEEP_SEQUENCE.has(currentState)
+    || ["mini-idle", "mini-sleep", "mini-peek", "mini-peek-hold", "mini-sleep-peek"].includes(currentState);
+}
+
+function refreshPetPresentation() {
+  const resolved = resolveDisplayState();
+  if (resolved === "idle" && isPassivePetPresentation()) return;
+  setState(resolved, getSvgOverride(resolved));
+}
+
 function resolveDisplayState() {
-  return resolveDisplayStateFromSessions(sessions, {
+  return resolveDisplayStateFromSessions(getPetPresentationSessions(), {
     statePriority: STATE_PRIORITY,
     compacting: hasCodexCompactionVisual(),
     permissionLocked: hasPermissionAnimationLock(),
@@ -4018,7 +4057,7 @@ function getSvgOverride(state) {
     updateVisualSvgOverride,
     idleFollowSvg: SVG_IDLE_FOLLOW,
     idleDefaultVisual: typeof ctx.getIdleVisualChoice === "function" ? ctx.getIdleVisualChoice() : null,
-    sessions,
+    sessions: getPetPresentationSessions(),
     displayHintMap: DISPLAY_HINT_MAP,
     theme,
     stateSvgs: STATE_SVGS,
@@ -4161,7 +4200,7 @@ return {
   // Read-only, unmerged account windows for source-specific alert deduplication.
   getAccountQuotaSnapshot: () => accountQuota.snapshot({ mergeSources: false }),
   startStaleCleanup, stopStaleCleanup, startWakePoll, stopWakePoll,
-  getSvgOverride, cleanStaleSessions, startStartupRecovery, refreshTheme,
+  getSvgOverride, getPetPresentationSessions, refreshPetPresentation, cleanStaleSessions, startStartupRecovery, refreshTheme,
   detectRunningAgentProcesses, buildSessionSnapshot,
   emitSessionSnapshot, broadcastSessionSnapshot, getLastSessionSnapshot,
   getActiveSessionAliasKeys,

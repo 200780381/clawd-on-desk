@@ -4886,6 +4886,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
     _state.applyState("idle", _state.getSvgOverride("idle"));
   },
   refreshDisplayedVisual: refreshDisplayedVisualForLowPowerMode,
+  refreshPetPresentation: () => _state.refreshPetPresentation(),
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
   disableMobilePermissionObservation: () => setMobilePermissionObservationEnabled(false),

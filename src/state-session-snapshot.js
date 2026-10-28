@@ -1,4 +1,5 @@
 "use strict";
+const { hasSubagentHoldEvidence } = require("./subagent-lifecycle");
 
 const crypto = require("crypto");
 const path = require("path");
@@ -368,7 +369,7 @@ function isSessionAwaitingActivity(session) {
 
 // An opt-in HUD presentation preference, not internal-source classification or
 // session retirement. Keep every canonical entry available to other consumers.
-function shouldHideCodexEphemeralFromHud(id, session, badge, options) {
+function shouldHideCodexEphemeralFromHud(id, session, badge, options = {}) {
   const hideCompleted = options.sessionHudHideCompletedCodexEphemeral === true
     && session?.state === "idle" && badge === "done";
   const hideActive = options.sessionHudHideActiveCodexEphemeral === true
@@ -392,9 +393,19 @@ function shouldHideCodexEphemeralFromHud(id, session, badge, options) {
   if (hideCompleted && !isDoneEvent(lastEvent)) return false;
   // A request can arrive before the pending-permission snapshot catches up.
   // Never collapse the active row while it is asking the user for a decision.
-  if (hideActive && ["PermissionRequest", "CodexUserInputRequest", "Elicitation"].includes(lastEvent)) return false;
+  if (hideActive && (session.requiresCompletionAck === true
+      || hasSubagentHoldEvidence(session)
+      || ["PermissionRequest", "CodexUserInputRequest", "Elicitation", "Notification", "StopFailure", "PostToolUseFailure", "ApiError", "Interrupt"].includes(lastEvent))) return false;
   return !(options.pendingPermissionSessionIds instanceof Set
     && options.pendingPermissionSessionIds.has(id));
+}
+
+// Share the strict active-only policy with the pet without applying the
+// independent completed-row HUD option to completion animations.
+function shouldHideActiveCodexEphemeral(id, session, options = {}) {
+  return shouldHideCodexEphemeralFromHud(id, session, deriveSessionBadge(session), {
+    ...options, sessionHudHideCompletedCodexEphemeral: false,
+  });
 }
 
 function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {}) {
@@ -761,6 +772,7 @@ module.exports = {
   shouldAutoClearDetachedSession,
   AWAITING_ACTIVITY_AGENTS,
   isSessionAwaitingActivity,
+  shouldHideActiveCodexEphemeral,
   getSessionAliasEntry,
   getEffectiveSessionTitle,
   sessionDisplayFolder,
