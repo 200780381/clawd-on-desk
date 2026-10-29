@@ -9296,6 +9296,37 @@ describe("settings renderer browser environment", () => {
   });
 
 
+  it("offers Copy for pairing values except the expiry time", async () => {
+    const harness = loadPermissionsTabForTest({
+      subtab: "lan",
+      snapshot: { mobilePreviewEnabled: true },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    harness.render();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const rows = harness.content.querySelectorAll(".mobile-conn-row");
+    assert.equal(rows.length, 5);
+    const copiedValues = [];
+    for (const row of rows) {
+      const label = row.querySelector(".row-label").textContent;
+      const buttons = row.querySelectorAll(".mobile-copy");
+      if (label === "mobileConnPairExpires") {
+        assert.equal(buttons.length, 0, "expiry time should have no Copy button");
+      } else {
+        assert.equal(buttons.length, 1, `${label} should retain its Copy button`);
+        copiedValues.push(row.querySelector(".mobile-conn-value").textContent);
+        buttons[0].dispatchEvent({ type: "click" });
+        await Promise.resolve();
+        assert.equal(buttons[0].textContent, "mobileCopied");
+      }
+    }
+    assert.deepStrictEqual(harness.clipboardWrites, copiedValues);
+    assert.equal(copiedValues.length, 4);
+  });
+
   it("gates the Telegram test footer on ready, runtime and native readiness", async () => {
     async function renderTelegram({ allowedTgUserId = "123456789", tokenConfigured = true, state, migration, testCommand }) {
       const calls = [];

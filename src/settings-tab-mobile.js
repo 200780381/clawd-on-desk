@@ -78,8 +78,8 @@
     return row;
   }
 
-  // One pairing value: label + monospace value + a compact Copy button.
-  function buildConnectionRow(labelKey, value, valueClass = "") {
+  // One pairing value: label + monospace value + an optional compact Copy button.
+  function buildConnectionRow(labelKey, value, valueClass = "", options = {}) {
     const row = document.createElement("div");
     row.className = "row mobile-conn-row";
     const text = document.createElement("div");
@@ -93,6 +93,8 @@
     text.appendChild(label);
     text.appendChild(valueEl);
     row.appendChild(text);
+
+    if (options.copyable === false) return row;
 
     const control = document.createElement("div");
     control.className = "row-control";
@@ -213,7 +215,9 @@
         container.appendChild(buildConnectionRow("mobileConnPairCode", code, "mobile-pair-code"));
       }
       if (Number.isFinite(info.pairExpiresAt)) {
-        container.appendChild(buildConnectionRow("mobileConnPairExpires", new Date(info.pairExpiresAt).toLocaleTimeString()));
+        container.appendChild(buildConnectionRow(
+          "mobileConnPairExpires", new Date(info.pairExpiresAt).toLocaleTimeString(), "", { copyable: false }
+        ));
       }
       if (info.pairUrl) {
         container.appendChild(buildConnectionRow("mobileConnUrl", info.pairUrl, "mobile-pair-url"));
