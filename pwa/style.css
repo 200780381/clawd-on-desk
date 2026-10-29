@@ -328,3 +328,9 @@ body { display: flex; flex-direction: column; height: 100%; }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 2px; }
+
+#pair-form { margin: 16px; padding: 16px; border: 1px solid var(--card-border); border-radius: var(--radius); }
+#pair-form label { display: block; margin-bottom: 12px; }
+#pair-form input { width: 65%; padding: 10px; border: 1px solid var(--faint); border-radius: var(--radius-sm); background: var(--card); color: var(--text); font: inherit; }
+#pair-form button { padding: 10px; border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--text); font: inherit; }
+#pair-hint { margin-top: 12px; color: var(--muted); font-size: 13px; }

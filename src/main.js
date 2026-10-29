@@ -359,6 +359,15 @@ const _initialPrefsLoad = prefsModule.load(PREFS_PATH);
 // process, and a backup failure locks persistence as well. Runtime gates stay
 // closed until restart in either case.
 const _initialPrefsRecovered = _initialPrefsLoad.recovered === true;
+// #1183: must run before app ready, so it reads the startup snapshot directly
+// instead of waiting for the settings controller. Kept as a constant so
+// Settings can tell when the saved switch no longer matches this process.
+const _hardwareAccelerationDisabledAtStartup = isWin
+  && !!_initialPrefsLoad.snapshot
+  && _initialPrefsLoad.snapshot.disableHardwareAcceleration === true;
+if (_hardwareAccelerationDisabledAtStartup) {
+  app.disableHardwareAcceleration();
+}
 const _initialPrefsRecoveryBackupFailed = _initialPrefsLoad.recoveryBackupFailed === true;
 const _recapStartupAuthorityLost = (
   _initialPrefsLoad.locked === true
@@ -464,8 +473,9 @@ let _restartScheduled = false;
 function _restartClawdNow() {
   if (_restartScheduled) return;
   _restartScheduled = true;
-  // Triggered by Doctor's restart-clawd repair. relaunch() queues a fresh
-  // process; quit() then follows the normal shutdown path so before-quit
+  // Triggered by Doctor's restart-clawd repair and by the restartClawd command
+  // behind the #1183 GPU switch. relaunch() queues a fresh process; quit()
+  // then follows the normal shutdown path so before-quit
   // still flushes prefs and cleans up server/monitor resources.
   // setImmediate so the IPC reply for repairDoctorIssue lands in the
   // renderer before the main process starts closing windows.
@@ -604,8 +614,10 @@ const _settingsController = createSettingsController({
     getFeishuApprovalStatus: () => getFeishuApprovalStatus(),
     getFeishuApprovalSecretInfo: () => getFeishuApprovalSecretInfo(),
     sendFeishuApprovalTest: (persisted) => sendFeishuApprovalTest(persisted),
-    regenerateMobileToken: () => ensureMobilePreviewServer().regenerateToken(),
     resetMobileAccess: () => ensureMobilePreviewServer().resetMobileAccess(),
+    refreshMobilePairCode: () => ensureMobilePreviewServer().refreshPairCode(),
+    revokeMobileDevice: (id) => ensureMobilePreviewServer().revokeDevice(id),
+    revokeMobileLegacy: () => ensureMobilePreviewServer().revokeLegacy(),
     disconnectMobilePreviewClients: () => ensureMobilePreviewServer().disconnectClients({
       code: 4001,
       reason: "Permission preview consent changed",
@@ -3145,6 +3157,7 @@ function ensureMobilePreviewServer() {
   const { initMobilePreviewServer } = require("./network/mobile-preview-server");
   _lanWss = initMobilePreviewServer({
     sessions,
+    rotationMs: !app.isPackaged ? Number(process.env.CLAWD_MOBILE_ROTATION_MS) : undefined,
     permissionObservation: _perm && _perm.permissionObservation,
     log: (message) => sessionLog(message),
   });
@@ -5175,6 +5188,7 @@ const settingsIpcRuntime = registerSettingsIpc({
     ),
   }),
   getSizeContext: getSizeSliderContext,
+  getHardwareAccelerationDisabledAtStartup: () => _hardwareAccelerationDisabledAtStartup,
   sendToRenderer,
   getDoNotDisturb: () => doNotDisturb,
   getSoundMuted: () => soundMuted,
