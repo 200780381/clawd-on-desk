@@ -141,6 +141,7 @@ scripts/apt/__pycache__/
 !scripts/manual/
 scripts/manual/*
 !scripts/manual/README.md
+!scripts/manual/mobile-freeze-e2e.js
 !scripts/manual/remote-ssh-codespaces-546.ps1
 !scripts/manual/remote-ssh-codespaces-546-observe.ps1
 !scripts/manual/remote-ssh-codespaces-546-port-holder.js
