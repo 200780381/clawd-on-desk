@@ -500,10 +500,10 @@ describe("PWA permission notifications and access reset", () => {
 });
 
 describe("PWA static and protocol contracts", () => {
-  it("contains reduced-motion permission styling and cache v7", () => {
+  it("contains reduced-motion permission styling and cache v8", () => {
     assert.match(CSS_SOURCE, /prefers-reduced-motion:\s*reduce/);
     assert.match(CSS_SOURCE, /\.permission-card\s*\{\s*animation:\s*none/);
-    assert.match(SW_SOURCE, /clawd-mobile-v7/);
+    assert.match(SW_SOURCE, /clawd-mobile-v8/);
     assert.ok(!SW_SOURCE.includes("clawd-mobile-v6"));
   });
 
@@ -511,7 +511,7 @@ describe("PWA static and protocol contracts", () => {
     for (const term of [
       "permission_snapshot", "permission_request", "permission_dismissed",
       "token_rotate", "token_rotate_ack", "permission_response",
-      "plaintext WebSocket", "0.0.0.0", "best-effort", "no device roster",
+      "plaintext WebSocket", "0.0.0.0", "best-effort", "no per-device permission entitlement", "proto=2", "pair-rejected", "partialReset",
     ]) assert.ok(PROTOCOL_SOURCE.includes(term), `missing protocol term: ${term}`);
     assert.ok(!PROTOCOL_SOURCE.includes("polls the desktop session cache every 2 seconds"));
   });

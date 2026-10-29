@@ -48,7 +48,7 @@ describe("mobile permission preview consent commands", () => {
     assert.strictEqual(updateRegistry.mobilePreviewEnabled.lockKey, "mobilePreview");
     for (const name of [
       "setMobilePermissionPreviewEnabled",
-      "mobilePreview.regenerateToken",
+      "mobilePreview.refreshPairCode",
       "mobilePreview.resetAccess",
     ]) {
       assert.strictEqual(commandRegistry[name].lockKey, "mobilePreview", name);
