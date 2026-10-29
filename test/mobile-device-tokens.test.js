@@ -104,6 +104,53 @@ function fillDevices(f) {
   }
 }
 
+test("device list exposes only display fields and reads lastSeenAt without persisting", async (t) => {
+  const f = await fixture(t);
+  const rotation = f.pair().rotation();
+  const pending = f.read().devices[0];
+  assert.deepEqual(f.server.listDevices(), [{
+    id: pending.id,
+    name: "iPhone · Safari",
+    origin: "pair",
+    state: "pending",
+    createdAt: 1000000,
+    lastSeenAt: 1000000,
+    currentIssuedAt: null,
+  }]);
+  const active = f.device(rotation.newToken);
+  const before = fs.readFileSync(f.devicesPath, "utf8");
+  f.time(1000100);
+  active.emit("pong");
+  const devices = f.server.listDevices();
+  assert.deepEqual(devices, [{
+    id: pending.id,
+    name: "iPhone · Safari",
+    origin: "pair",
+    state: "active",
+    createdAt: 1000000,
+    lastSeenAt: 1000100,
+    currentIssuedAt: 1000000,
+  }]);
+  assert.deepEqual(Object.keys(devices[0]).sort(),
+    ["id", "name", "origin", "state", "createdAt", "lastSeenAt", "currentIssuedAt"].sort());
+  assert.equal(fs.readFileSync(f.devicesPath, "utf8"), before);
+  devices[0].name = "changed by caller";
+  devices.pop();
+  assert.equal(f.server.listDevices()[0].name, pending.name);
+});
+
+test("legacy activity is false on fresh install, true on upgrade, false after revocation", async (t) => {
+  const fresh = await fixture(t, { missingToken: true });
+  assert.equal(fresh.server.isLegacyActive(), false);
+  const upgrade = await fixture(t, { previous: PREVIOUS, graceUntil: 1000001 });
+  assert.equal(upgrade.server.isLegacyActive(), true);
+  upgrade.server.revokeLegacy();
+  assert.equal(upgrade.server.isLegacyActive(), false);
+  await upgrade.server.cleanup();
+  const restarted = await fixture(t, { dir: upgrade.dir });
+  assert.equal(restarted.server.isLegacyActive(), false);
+});
+
 test("legacy clients never rotate on connect, heartbeat, promotion or restart", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const f = await fixture(t);

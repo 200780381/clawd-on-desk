@@ -1040,9 +1040,38 @@ function resetMobileAccess(_payload, deps = {}) {
   catch (err) { return { status: "error", message: err.message, partialReset: err.legacyRevoked === true }; }
 }
 
+function revokeMobileDevice(payload, deps = {}) {
+  if (!payload || typeof payload.id !== "string" || payload.id.length !== 18 || !/^d_[a-f0-9]{16}$/.test(payload.id)) {
+    return { status: "error", message: "Invalid mobile device ID" };
+  }
+  if (typeof deps.revokeMobileDevice !== "function") {
+    return { status: "error", message: "mobile device revocation is unavailable" };
+  }
+  try {
+    const result = deps.revokeMobileDevice(payload.id);
+    return { status: "ok", mayHoldLegacy: result.mayHoldLegacy === true };
+  } catch (err) {
+    return { status: "error", message: err.message };
+  }
+}
+
+function revokeMobileLegacy(_payload, deps = {}) {
+  if (typeof deps.revokeMobileLegacy !== "function") {
+    return { status: "error", message: "mobile legacy revocation is unavailable" };
+  }
+  try {
+    deps.revokeMobileLegacy();
+    return { status: "ok" };
+  } catch (err) {
+    return { status: "error", message: err.message, partialRevoke: err.legacyRevoked === true };
+  }
+}
+
 setMobilePermissionPreviewEnabled.lockKey = "mobilePreview";
 refreshMobilePairCode.lockKey = "mobilePreview";
 resetMobileAccess.lockKey = "mobilePreview";
+revokeMobileDevice.lockKey = "mobilePreview";
+revokeMobileLegacy.lockKey = "mobilePreview";
 
 function setBubbleCategoryEnabled(payload, deps) {
   if (!payload || typeof payload !== "object") {
@@ -2768,6 +2797,8 @@ const commandRegistry = {
   setMobilePermissionPreviewEnabled,
   "mobilePreview.refreshPairCode": refreshMobilePairCode,
   "mobilePreview.resetAccess": resetMobileAccess,
+  "mobilePreview.revokeDevice": revokeMobileDevice,
+  "mobilePreview.revokeLegacy": revokeMobileLegacy,
   setBubbleCategoryEnabled,
   "sessionCleanup.setTriple": setSessionCleanupTriple,
   setSessionAlias,

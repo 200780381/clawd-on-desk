@@ -213,6 +213,16 @@ function createMobileDeviceStore(options) {
 
   return {
     getState: () => state,
+    listDevices: () => state.devices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      origin: device.origin,
+      state: device.state,
+      createdAt: device.createdAt,
+      lastSeenAt: lastSeen.get(device.id) ?? device.lastSeenAt,
+      currentIssuedAt: device.currentIssuedAt,
+    })),
+    isLegacyActive: () => legacyHashes.size > 0,
     acceptsLegacy: (token) => typeof token === "string" && legacyHashes.has(hash(token)),
     isPaused: () => paused,
     recordSeen: (id) => lastSeen.set(id, now()),

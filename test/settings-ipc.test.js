@@ -18,6 +18,8 @@ const {
 const prefs = require("../src/prefs");
 const { createSettingsController } = require("../src/settings-controller");
 const { commandRegistry } = require("../src/settings-actions");
+const { initMobilePreviewServer } = require("../src/network/mobile-preview-server");
+const { createMobileDeviceStore, atomicWrite } = require("../src/network/mobile-device-store");
 
 class FakeIpcMain {
   constructor() {
@@ -944,6 +946,125 @@ test("mobile pairing and access IPC routes delegate only to locked controller co
   assert.strictEqual(commandRegistry["mobilePreview.resetAccess"].lockKey, "mobilePreview");
   runtime.dispose();
 });
+
+test("mobile devices IPC returns display data and reports read errors", async () => {
+  const devices = [{ id: "d_0123456789abcdef", name: "iPhone · Safari", state: "pending" }];
+  const { ipcMain, runtime } = createHarness({
+    getLanWsServer: () => ({ listDevices: () => devices, isLegacyActive: () => true }),
+  });
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-devices"), { status: "ok", devices, legacyActive: true });
+  runtime.dispose();
+  for (const server of [null, { listDevices() { throw new Error("read failed"); } }]) {
+    const harness = createHarness({ getLanWsServer: () => server });
+    const result = await harness.ipcMain.invoke("settings:mobile-devices");
+    assert.equal(result.status, "error");
+    assert.match(result.message, server ? /read failed/ : /not available/);
+    harness.runtime.dispose();
+  }
+});
+
+for (const origin of ["pair", "legacy"]) {
+  for (const failure of ["none", "devices", "invalid-id"]) {
+    test(`device revoke IPC via real controller: ${origin}, ${failure}`, async (t) => {
+      const f = createMobileRevocationHarness(t, origin);
+      const before = f.server.listDevices();
+      f.fail(failure);
+      const id = failure === "invalid-id" ? "d_../../invalid" : f.id;
+      const result = await f.ipcMain.invoke("settings:revoke-mobile-device", id);
+      assert.equal(result.status, failure === "none" ? "ok" : "error");
+      if (failure === "none") {
+        assert.equal(result.mayHoldLegacy, origin === "legacy");
+        assert.deepEqual(f.server.listDevices(), []);
+      } else {
+        assert.deepEqual(f.server.listDevices(), before);
+        assert.match(result.message, failure === "invalid-id" ? /Invalid mobile device ID/ : /Failed to revoke/);
+      }
+      f.assertNoPreferenceChanges();
+    });
+  }
+}
+
+for (const failure of ["none", "token", "devices"]) {
+  test(`legacy revoke IPC via real controller: ${failure}`, async (t) => {
+    const f = createMobileRevocationHarness(t);
+    const before = f.server.listDevices();
+    f.fail(failure);
+    const result = await f.ipcMain.invoke("settings:revoke-mobile-legacy");
+    assert.deepStrictEqual(result, failure === "none" ? { status: "ok", message: undefined } : {
+      status: "error",
+      message: failure === "token" ? "Failed to persist legacy revocation" : "Failed to persist mobile device reset",
+      partialRevoke: failure === "devices",
+    });
+    assert.equal(f.server.isLegacyActive(), failure === "token");
+    assert.deepEqual(f.server.listDevices(), before);
+    f.assertNoPreferenceChanges();
+  });
+}
+
+test("device revocation commands share the mobile lock and reject malformed IDs before calling the server", async (t) => {
+  const f = createMobileRevocationHarness(t);
+  assert.equal(commandRegistry["mobilePreview.revokeDevice"].lockKey, "mobilePreview");
+  assert.equal(commandRegistry["mobilePreview.revokeLegacy"].lockKey, "mobilePreview");
+  let calls = 0;
+  for (const id of [null, undefined, 1, {}, "d_ABCDEF0123456789", "d_0123456789abcdef\n", "d_0123456789abcde", "d_0123456789abcdef0"]) {
+    const result = commandRegistry["mobilePreview.revokeDevice"]({ id }, {
+      revokeMobileDevice() { calls++; },
+    });
+    assert.equal(result.status, "error");
+  }
+  assert.equal(calls, 0);
+  assert.equal((await f.controller.applyCommand("mobilePreview.revokeDevice", null)).status, "error");
+});
+
+function createMobileRevocationHarness(t, origin = "legacy") {
+  const dir = makeTempDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tokenPath = path.join(dir, "mobile-token.json");
+  atomicWrite(tokenPath, { token: "a".repeat(32) });
+  const store = createMobileDeviceStore({ tokenPath, now: () => 1000000, log() {} });
+  const device = store.commit((next) => store.createDevice(next, "c_" + "1".repeat(22), origin, "iPhone Safari/17"));
+  let failure = "none";
+  let saves = 0;
+  let commits = 0;
+  const server = initMobilePreviewServer({
+    tokenPath,
+    log() {},
+    writeTokenState(file, value) {
+      if (failure === "token") return false;
+      return atomicWrite(file, value);
+    },
+    writeDeviceState(file, value) {
+      if (failure === "devices") return false;
+      return atomicWrite(file, value);
+    },
+  });
+  t.after(() => server.cleanup());
+  const controller = createSettingsController({
+    prefsPath: path.join(dir, "prefs.json"),
+    loadResult: { snapshot: prefs.getDefaults(), locked: false },
+    prefs: { save() { saves++; } },
+    injectedDeps: {
+      revokeMobileDevice: server.revokeDevice,
+      revokeMobileLegacy: server.revokeLegacy,
+    },
+  });
+  const snapshot = controller.getSnapshot();
+  controller.subscribe(() => { commits++; });
+  const harness = createHarness({ settingsController: controller, getLanWsServer: () => server });
+  t.after(() => harness.runtime.dispose());
+  return {
+    ...harness,
+    controller,
+    server,
+    id: device.id,
+    fail(value) { failure = value; },
+    assertNoPreferenceChanges() {
+      assert.equal(saves, 0);
+      assert.equal(commits, 0);
+      assert.deepStrictEqual(controller.getSnapshot(), snapshot);
+    },
+  };
+}
 
 test("settings IPC delegates Codex Pet theme channels and decorates metadata", async () => {
   const codexCalls = [];

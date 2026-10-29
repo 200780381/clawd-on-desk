@@ -223,6 +223,9 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   confirmRemoveTheme: (themeId) =>
     ipcRenderer.invoke("settings:confirm-remove-theme", themeId),
   getMobileConnectionInfo: () => ipcRenderer.invoke("settings:mobile-connection-info"),
+  getMobileDevices: () => ipcRenderer.invoke("settings:mobile-devices"),
+  revokeMobileDevice: (id) => ipcRenderer.invoke("settings:revoke-mobile-device", id),
+  revokeMobileLegacy: () => ipcRenderer.invoke("settings:revoke-mobile-legacy"),
   refreshMobilePairCode: () => ipcRenderer.invoke("settings:refresh-mobile-pair-code"),
   resetMobileAccess: () => ipcRenderer.invoke("settings:reset-mobile-access"),
   onChanged: (cb) => {

@@ -5244,6 +5244,28 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 .mobile-conn-row:last-of-type { border-bottom: none; }
+.mobile-device-row {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+}
+.mobile-device-row .row-text {
+  flex: 1 1 12em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mobile-device-row .row-control {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+.mobile-device-revoke {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  height: auto;
+}
 .mobile-conn-value {
   font-size: 13px;
   font-family: ui-monospace, Menlo, Consolas, monospace;

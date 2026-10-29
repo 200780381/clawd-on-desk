@@ -1192,6 +1192,28 @@ function registerSettingsIpc(options = {}) {
     return settingsController.applyCommand("mobilePreview.refreshPairCode", {});
   });
 
+  handle("settings:mobile-devices", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer) return { status: "error", message: "LAN bridge not available" };
+      return {
+        status: "ok",
+        devices: lanWsServer.listDevices(),
+        legacyActive: lanWsServer.isLegacyActive(),
+      };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:revoke-mobile-device", async (_event, id) => {
+    return settingsController.applyCommand("mobilePreview.revokeDevice", { id });
+  });
+
+  handle("settings:revoke-mobile-legacy", async () => {
+    return settingsController.applyCommand("mobilePreview.revokeLegacy", {});
+  });
+
   handle("settings:reset-mobile-access", async () => {
     return settingsController.applyCommand("mobilePreview.resetAccess", {});
   });

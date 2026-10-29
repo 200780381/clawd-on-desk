@@ -2067,6 +2067,7 @@ function loadPermissionsTabForTest({
       lanIp: "192.168.0.23",
       pairUrl: "http://192.168.0.23:23380/mobile/?pair=ABCD1234",
     }),
+    getMobileDevices: () => Promise.resolve({ status: "ok", devices: [], legacyActive: false }),
     refreshMobilePairCode: () => {
       commands.push({ name: "refreshMobilePairCode" });
       return Promise.resolve({ status: "ok" });
@@ -9229,7 +9230,7 @@ describe("settings renderer browser environment", () => {
     );
   });
 
-  it("renders the LAN card as one header switch, one group and one footer", async () => {
+  it("renders pairing and paired-device groups below the LAN card controls", async () => {
     let confirmResult = false;
     const harness = loadPermissionsTabForTest({
       subtab: "lan",
@@ -9247,6 +9248,7 @@ describe("settings renderer browser environment", () => {
     assert.equal(card.querySelector(".settings-detail-group-rows .switch").classList.contains("disabled"), true);
     assert.equal(card.querySelector(".channel-foot-hint").textContent, "mobilePairingHint");
     assert.equal(card.querySelector(".mobile-conn-row"), null);
+    assert.equal(card.querySelectorAll("div").some((node) => node.id === "mobile-devices"), false);
     const groupingLabels = card.querySelectorAll(".settings-detail-group-label").map((label) => label.textContent);
     assert.deepStrictEqual(groupingLabels, ["mobileGroupPhoneShows"]);
     assert.equal(groupingLabels.includes("mobileGroupPairing"), false);
@@ -9259,14 +9261,15 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve();
     await Promise.resolve();
     enabled.render();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
     card = enabled.content.querySelector(".mobile-channel-card");
     assert.equal(card.querySelector(".settings-status-text").textContent, "mobileStatusRunning");
     assert.deepStrictEqual(
       card.querySelectorAll(".settings-detail-group-label").map((label) => label.textContent),
-      ["mobileGroupPhoneShows", "mobileGroupPairing"],
+      ["mobileGroupPhoneShows", "mobileGroupPairing", "mobileGroupDevices"],
     );
+    const deviceList = card.querySelectorAll("div").find((node) => node.id === "mobile-devices");
+    assert.equal(deviceList.textContent, "mobileDevicesEmpty");
     const rows = card.querySelectorAll(".mobile-conn-row");
     assert.equal(rows.length, 5);
     assert.deepStrictEqual(

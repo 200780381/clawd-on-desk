@@ -77,6 +77,9 @@ Cached permission cards become stale while disconnected.
 
 ### Revocation and reset
 
+Settings → Permissions → LAN approval → Paired devices lists pending and active
+devices, with actions to revoke one device or the old shared token.
+
 These are synchronous desktop operations. Removing one device persists its
 removal before closing its connections with 1008 `device-revoked`. A migrated
 device may still hold the shared token (`mayHoldLegacy: true`), so revoke that

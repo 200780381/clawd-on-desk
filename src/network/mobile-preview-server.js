@@ -932,6 +932,8 @@ function initMobilePreviewServer(ctx) {
     onSnapshot,
     getPort: () => activePort,
     getConnectionInfo,
+    listDevices: store.listDevices,
+    isLegacyActive: store.isLegacyActive,
     refreshPairCode: store.refreshPairCode,
     revokeDevice,
     revokeLegacy: () => revokeLegacy(),
