@@ -347,7 +347,7 @@ function initMobilePreviewServer(ctx) {
     return (pairFailures.get(ip) || []).length >= 20;
   }
 
-  function claimPairDevice(ws, code, cid, userAgent, ip) {
+  function claimDeviceForPairing(ws, code, cid, userAgent, ip) {
     const codeHash = hash(code);
     const boundDevice = store.getState().devices.find((d) => d.pairCodeHash === codeHash);
     if (boundDevice && boundDevice.cid === cid && boundDevice.state === "pending") return boundDevice;
@@ -375,7 +375,7 @@ function initMobilePreviewServer(ctx) {
     }
   }
 
-  function claimPair(ws, url, req) {
+  function handlePairConnection(ws, url, req) {
     const cid = url.searchParams.get("cid");
     if (url.searchParams.get("proto") !== "2" || !CID_RE.test(cid || "")) {
       ws.close(4004, "pair-rejected");
@@ -391,7 +391,7 @@ function initMobilePreviewServer(ctx) {
       return;
     }
     const code = url.searchParams.get("pair").toUpperCase().replace(/-/g, "");
-    const device = claimPairDevice(ws, code, cid, req.headers["user-agent"] || "", ip);
+    const device = claimDeviceForPairing(ws, code, cid, req.headers["user-agent"] || "", ip);
     if (!device) return;
     const meta = {
       kind: "pair",
@@ -492,6 +492,89 @@ function initMobilePreviewServer(ctx) {
     return http.createServer(serveStatic);
   }
 
+  function sendInitialSnapshots(ws) {
+    // Keep both authoritative snapshots in this synchronous event-loop turn
+    // to preserve snapshot-before-delta ordering for the observation subscriber.
+    let permissionSnapshotSent = false;
+    try {
+      const snapshot = {};
+      for (const [sid, data] of sessionCache) snapshot[sid] = data;
+      const permissionSnapshot = readPermissionObservationSnapshot();
+      const permissionFeature = buildPermissionFeature(permissionSnapshot);
+      ws.send(buildMessage("snapshot", {
+        features: { permissionPreview: permissionFeature },
+        sessions: snapshot,
+      }));
+      ws.send(buildMessage(
+        "permission_snapshot",
+        buildPermissionSnapshotPayload(permissionSnapshot)
+      ));
+      permissionSnapshotSent = true;
+    } catch {}
+    if (permissionSnapshotSent) {
+      logPermissionFanout("permission_snapshot", 1, { source: "connect" });
+    }
+  }
+
+  function attachDataClientEvents(ws, meta) {
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+      const meta = clientMeta.get(ws);
+      if (meta) {
+        meta.lastPong = Date.now();
+        if (meta.kind === "device") store.recordSeen(meta.deviceId);
+      }
+    });
+
+    attachClientMessages(ws, meta);
+
+    ws.on("close", () => {
+      clients.delete(ws);
+      clientMeta.delete(ws);
+      if (clients.size === 0) stopHeartbeat();
+    });
+    ws.on("error", () => {
+      clients.delete(ws);
+      clientMeta.delete(ws);
+    });
+  }
+
+  function handleDataConnection(ws, url, req) {
+    const auth = authenticateClient(ws, url);
+    if (!auth) return;
+    if (clients.size >= MAX_CLIENTS) {
+      ws.close(1013, "server-busy");
+      return;
+    }
+    const meta = {
+      kind: auth.kind,
+      deviceId: auth.device ? auth.device.id : null,
+      tokenHash: auth.tokenHash,
+      proto2: auth.proto2,
+      messageCount: 0,
+      windowStart: Date.now(),
+      ip: (req.socket.remoteAddress || "").replace(/^::ffff:/, ""),
+      lastPong: Date.now(),
+    };
+    clients.add(ws);
+    clientMeta.set(ws, meta);
+    let rotationDevice = auth.device;
+    if (auth.device) store.recordSeen(auth.device.id);
+    const cid = url.searchParams.get("cid");
+    if (auth.kind === "legacy" && auth.proto2 && CID_RE.test(cid || "")) {
+      rotationDevice = migrateLegacy(cid, req.headers["user-agent"] || "");
+    }
+
+    sendInitialSnapshots(ws);
+    startHeartbeat();
+
+    if (rotationDevice && (auth.kind === "device" || rotationDevice.state === "pending")) {
+      sendRotation(ws, rotationDevice, meta);
+    }
+    attachDataClientEvents(ws, meta);
+  }
+
   // Attach ws only after the HTTP server has successfully bound a port.
   // WebSocket.Server forwards the underlying HTTP server's pre-listen
   // EADDRINUSE as its own `error` event. When ws was attached before the port
@@ -533,83 +616,10 @@ function initMobilePreviewServer(ctx) {
         return;
       }
       if (url.searchParams.has("pair")) {
-        claimPair(ws, url, req);
-        return;
+        handlePairConnection(ws, url, req);
+      } else {
+        handleDataConnection(ws, url, req);
       }
-      const auth = authenticateClient(ws, url);
-      if (!auth) return;
-      if (clients.size >= MAX_CLIENTS) {
-        ws.close(1013, "server-busy");
-        return;
-      }
-      const meta = {
-        kind: auth.kind,
-        deviceId: auth.device ? auth.device.id : null,
-        tokenHash: auth.tokenHash,
-        proto2: auth.proto2,
-        messageCount: 0,
-        windowStart: Date.now(),
-        ip: (req.socket.remoteAddress || "").replace(/^::ffff:/, ""),
-        lastPong: Date.now(),
-      };
-      clients.add(ws);
-      clientMeta.set(ws, meta);
-      let rotationDevice = auth.device;
-      if (auth.device) store.recordSeen(auth.device.id);
-      const cid = url.searchParams.get("cid");
-      if (auth.kind === "legacy" && auth.proto2 && CID_RE.test(cid || "")) {
-        rotationDevice = migrateLegacy(cid, req.headers["user-agent"] || "");
-      }
-
-      // Add the client, then synchronously send both authoritative snapshots.
-      // Do not introduce an await here: this single event-loop turn preserves
-      // snapshot-before-delta ordering for the observation subscriber.
-      let permissionSnapshotSent = false;
-      try {
-        const snapshot = {};
-        for (const [sid, data] of sessionCache) snapshot[sid] = data;
-        const permissionSnapshot = readPermissionObservationSnapshot();
-        const permissionFeature = buildPermissionFeature(permissionSnapshot);
-        ws.send(buildMessage("snapshot", {
-          features: { permissionPreview: permissionFeature },
-          sessions: snapshot,
-        }));
-        ws.send(buildMessage(
-          "permission_snapshot",
-          buildPermissionSnapshotPayload(permissionSnapshot)
-        ));
-        permissionSnapshotSent = true;
-      } catch {}
-      if (permissionSnapshotSent) {
-        logPermissionFanout("permission_snapshot", 1, { source: "connect" });
-      }
-
-      startHeartbeat();
-
-      if (rotationDevice && (auth.kind === "device" || rotationDevice.state === "pending")) {
-        sendRotation(ws, rotationDevice, meta);
-      }
-      ws.isAlive = true;
-      ws.on("pong", () => {
-        ws.isAlive = true;
-        const meta = clientMeta.get(ws);
-        if (meta) {
-          meta.lastPong = Date.now();
-          if (meta.kind === "device") store.recordSeen(meta.deviceId);
-        }
-      });
-
-      attachClientMessages(ws, meta);
-
-      ws.on("close", () => {
-        clients.delete(ws);
-        clientMeta.delete(ws);
-        if (clients.size === 0) stopHeartbeat();
-      });
-      ws.on("error", () => {
-        clients.delete(ws);
-        clientMeta.delete(ws);
-      });
     });
     return socketServer;
   }

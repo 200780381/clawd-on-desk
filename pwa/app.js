@@ -308,12 +308,18 @@
 
   class ConnectionManager {
     constructor() {
-      this.ws = null; this.config = null;
-      this.reconnectDelay = 1000; this.maxReconnectDelay = 30000;
-      this.reconnectTimer = null; this.state = "disconnected";
+      this.ws = null;
+      this.config = null;
+      this.reconnectDelay = 1000;
+      this.maxReconnectDelay = 30000;
+      this.reconnectTimer = null;
+      this.state = "disconnected";
       this.retryCount = 0;
       this.authBlocked = false;
-      this.onStateChange = null; this.onMessage = null; this.onDisconnected = null; this.onAccessReset = null;
+      this.onStateChange = null;
+      this.onMessage = null;
+      this.onDisconnected = null;
+      this.onAccessReset = null;
       this._hiddenAt = 0;
       this.latestSwitches = 0;
       this.prevTried = false;
@@ -338,7 +344,10 @@
         }
         this.cid = cid;
         this.storageOk = true;
-      } catch { this.cid = null; this.storageOk = false; }
+      } catch {
+        this.cid = null;
+        this.storageOk = false;
+      }
     }
 
     _readCredential() {
@@ -413,14 +422,35 @@
 
     rePair(code) {
       this._prepareCid();
-      if (!this.storageOk || !this._markMigrated()) { this._storageError(); return; }
+      if (!this.storageOk || !this._markMigrated()) {
+        this._storageError();
+        return;
+      }
       try {
         localStorage.removeItem("clawd-cred-v2");
         if (localStorage.getItem("clawd-cred-v2") !== null) throw new Error("Storage verification failed");
-      } catch { this._storageError(); return; }
+      } catch {
+        this._storageError();
+        return;
+      }
       this.backupPair = null;
-      this.latestSwitches = 0; this.prevTried = false;
+      this.latestSwitches = 0;
+      this.prevTried = false;
       this.connect({ host: this.config.host, port: this.config.port, pair: String(code).trim().toUpperCase().replace(/-/g, "") });
+    }
+
+    _selectCredential(prevAttempt) {
+      var saved = this._readCredential();
+      // Keep the one-shot previous token even while storage still holds the primary that failed.
+      if (prevAttempt) {
+        return { kind: "device", deviceId: prevAttempt.deviceId, token: prevAttempt.prevToken, prevAttempt: prevAttempt };
+      }
+      if (this.config.pair !== undefined) return { kind: "pair", pair: this.config.pair };
+      if (saved) {
+        this.config = saved;
+        return { kind: "device", deviceId: saved.deviceId, token: saved.token };
+      }
+      return { kind: "legacy", token: this.config.token };
     }
 
     _doConnect(prevAttempt) {
@@ -428,18 +458,22 @@
       // Tear down callbacks first so events from an old socket cannot change this connection.
       var old = this.ws;
       if (old) {
-        old.onopen = old.onmessage = old.onclose = old.onerror = null;
+        old.onopen = null;
+        old.onmessage = null;
+        old.onclose = null;
+        old.onerror = null;
         try { old.close(1000); } catch {}
       }
       this._prepareCid();
-      var saved = this._readCredential();
-      var used;
-      if (prevAttempt) used = { kind: "device", deviceId: prevAttempt.deviceId, token: prevAttempt.prevToken, prevAttempt: prevAttempt };
-      else if (this.config.pair !== undefined) used = { kind: "pair", pair: this.config.pair };
-      else if (saved) { used = { kind: "device", deviceId: saved.deviceId, token: saved.token }; this.config = saved; }
-      else used = { kind: "legacy", token: this.config.token };
-      if (used.kind === "pair" && !this.storageOk) { this._storageError(); return; }
-      if (used.kind !== "pair" && !used.token) { this._showPairing("请输入配对码"); return; }
+      var used = this._selectCredential(prevAttempt);
+      if (used.kind === "pair" && !this.storageOk) {
+        this._storageError();
+        return;
+      }
+      if (used.kind !== "pair" && !used.token) {
+        this._showPairing("请输入配对码");
+        return;
+      }
       this.used = used;
       var scheme = window.location.protocol === "https:" ? "wss://" : "ws://";
       var host = this.config.host.indexOf(":") !== -1 ? "[" + this.config.host.replace(/^\[|\]$/g, "") + "]" : this.config.host;
@@ -465,7 +499,10 @@
         if (socket !== self.ws) return; // stale socket — ignore
         try {
           var msg = JSON.parse(event.data);
-          if (msg.type === "token_rotate") { self._rotate(msg, used); return; }
+          if (msg.type === "token_rotate") {
+            self._rotate(msg, used);
+            return;
+          }
           if (msg.type === "snapshot") {
             if (used.kind === "pair") return;
             self._snapshot(used, !receivedSnapshot);
@@ -476,46 +513,68 @@
       };
       socket.onclose = function(event) {
         if (socket !== self.ws) return; // stale socket — ignore
-        log("Disconnected (code: " + event.code + ")");
-        if (event.code === 1008) { self._authFailed(used, event); return; }
-        if (self.onDisconnected) self.onDisconnected();
-        if (event.code === 4002) { self._doConnect(); return; }
-        if (event.code === 4004 || event.code === 4005) {
-          self.backupPair = null;
-          self.authBlocked = true;
-          self._setState("auth_failed");
-          self._showPairing(event.code === 4005 ? "电脑上已配对的设备满了，请先在电脑上清理" : "配对码无效、已过期或已被使用");
-          return;
-        }
-        self._scheduleReconnect();
+        self._handleClose(event, used);
       };
       socket.onerror = function() {};
+    }
+
+    _handleClose(event, used) {
+      log("Disconnected (code: " + event.code + ")");
+      if (event.code === 1008) {
+        this._authFailed(used, event);
+        return;
+      }
+      if (this.onDisconnected) this.onDisconnected();
+      if (event.code === 4002) {
+        this._doConnect();
+        return;
+      }
+      if (event.code === 4004 || event.code === 4005) {
+        this.backupPair = null;
+        this.authBlocked = true;
+        this._setState("auth_failed");
+        this._showPairing(event.code === 4005 ? "电脑上已配对的设备满了，请先在电脑上清理" : "配对码无效、已过期或已被使用");
+        return;
+      }
+      this._scheduleReconnect();
     }
 
     _rotate(msg, used) {
       if (!/^d_[a-f0-9]{16}$/.test(msg.deviceId) || !Number.isInteger(msg.gen) || msg.gen < 1
           || typeof msg.newToken !== "string" || !msg.newToken) return;
       var saved = this._readCredential();
+      // Reuse preserves a peer's saved generation and prevToken when it already stored this token (v3 §4.4).
       var reuse = false;
       if (used.kind === "device") {
-        if (!saved || saved.deviceId !== used.deviceId || msg.deviceId !== used.deviceId || msg.gen <= saved.gen) return;
+        if (!saved || saved.deviceId !== used.deviceId) return;
+        if (msg.deviceId !== used.deviceId || msg.gen <= saved.gen) return;
       } else if (used.kind === "legacy") {
         if (saved) {
           if (saved.deviceId !== msg.deviceId || saved.token !== msg.newToken) return;
           reuse = true;
         }
-      } else if (saved && saved.deviceId === msg.deviceId) {
-        if (saved.token === msg.newToken) reuse = true;
-        else if (msg.gen <= saved.gen) return;
+      } else {
+        // This page's explicit pairing can replace another device so a stale peer cannot block it (v3 §4.4).
+        if (saved && saved.deviceId === msg.deviceId) {
+          if (saved.token === msg.newToken) reuse = true;
+          else if (msg.gen <= saved.gen) return;
+        }
       }
-      var value = reuse ? saved : { host: this.config.host, port: this.config.port,
-        deviceId: msg.deviceId, gen: msg.gen, token: msg.newToken, prevToken: used.kind === "device" ? used.token : null };
+      var value = reuse ? saved : {
+        host: this.config.host,
+        port: this.config.port,
+        deviceId: msg.deviceId,
+        gen: msg.gen,
+        token: msg.newToken,
+        prevToken: used.kind === "device" ? used.token : null,
+      };
       if (!reuse && !this._writeCredential(value)) {
         if (used.kind === "pair") {
           this.authBlocked = true;
           this._setState("auth_failed");
           this._showPairing("无法保存配对，这个浏览器现在不能保存配对信息");
-          this.ws.onclose = null; this.ws.close(1000);
+          this.ws.onclose = null;
+          this.ws.close(1000);
         }
         return;
       }
@@ -535,7 +594,9 @@
           if (this._writeCredential(restored)) this.config = restored;
         }
       }
-      this.retryCount = 0; this.reconnectDelay = 1000; this.latestSwitches = 0;
+      this.retryCount = 0;
+      this.reconnectDelay = 1000;
+      this.latestSwitches = 0;
       if (firstSnapshot) {
         this._setState("connected");
         log("Connected");
@@ -568,7 +629,8 @@
         return;
       }
       this.authBlocked = true;
-      clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
       if (this.onAccessReset) this.onAccessReset(event);
       this._setState("auth_failed");
       this._showPairing("凭据无效或已被撤销，请重新配对");
@@ -613,7 +675,10 @@
         if (event.key !== "clawd-cred-v2" || !self.config || !self.authBlocked) return;
         var saved = self._readCredential();
         if (!saved) return;
-        self.config = saved; self.authBlocked = false; self.latestSwitches = 0; self.prevTried = false;
+        self.config = saved;
+        self.authBlocked = false;
+        self.latestSwitches = 0;
+        self.prevTried = false;
         self._doConnect();
       });
     }
@@ -621,7 +686,10 @@
     _bindVisibility() {
       var self = this;
       document.addEventListener("visibilitychange", function() {
-        if (document.visibilityState !== "visible") { self._hiddenAt = Date.now(); return; }
+        if (document.visibilityState !== "visible") {
+          self._hiddenAt = Date.now();
+          return;
+        }
         if (!self.config || self.authBlocked) return;
         var hiddenFor = self._hiddenAt ? Date.now() - self._hiddenAt : 0;
         // Background > 30s: force reconnect (zombie guard).
