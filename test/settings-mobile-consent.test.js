@@ -30,6 +30,8 @@ class FakeElement {
     this._innerHTML = "";
     this.textContent = "";
   }
+  get innerHTML() { return this._innerHTML || ""; }
+  set innerHTML(value) { this._innerHTML = value; this.children = []; }
   appendChild(child) {
     child.parentNode = this;
     this.children.push(child);
@@ -454,3 +456,67 @@ test("every language defines device list, confirmation and failure text", () => 
     for (const key of keys) assert.ok(strings[key], `${lang}.${key}`);
   }
 });
+
+for (const failure of ["reject", "error"]) {
+  test(`pairing info recovers after success, ${failure}, and the same success`, async () => {
+    const timers = new Map();
+    let timerId = 0;
+    let reads = 0;
+    const info = {
+      status: "ok", port: 23334, lanIp: "192.0.2.1", pairCode: "ABCD1234",
+      pairExpiresAt: 2000000000000, pairUrl: "http://192.0.2.1:23334/mobile/?pair=ABCD1234",
+    };
+    const context = vm.createContext({
+      Promise, Date, navigator: {},
+      document: { visibilityState: "visible", createElement: () => new FakeElement() },
+      setTimeout(fn, delay) { timers.set(++timerId, { fn, delay }); return timerId; },
+      clearTimeout(id) { timers.delete(id); },
+      window: { settingsAPI: { getMobileConnectionInfo: async () => {
+        if (++reads === 2) {
+          if (failure === "reject") throw new Error("transient IPC failure");
+          return { status: "error" };
+        }
+        return info;
+      } } },
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/settings-tab-mobile.js"), "utf8"), context);
+    context.ClawdSettingsTabMobile.init({
+      state: { snapshot: { mobilePreviewEnabled: true } },
+      helpers: {
+        t: (key) => key,
+        buildSwitchRow: () => new FakeElement(),
+        attachDescriptionDisclosure() {},
+        buildButton: () => new FakeElement(),
+        buildDetailGroup(_label, rows) {
+          const group = new FakeElement();
+          rows.forEach((row) => group.appendChild(row));
+          return group;
+        },
+      },
+    });
+    const body = new FakeElement();
+    context.ClawdSettingsTabMobile.renderChannelBody(body);
+    await new Promise((resolve) => setImmediate(resolve));
+    const container = body.children.flatMap((group) => group.children)
+      .find((element) => element.id === "mobile-connection-info");
+    assert.equal(container.children.length, 5);
+    async function poll() {
+      const [id, timer] = [...timers].find(([, task]) => task.delay === 5000);
+      timers.delete(id);
+      timer.fn();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await poll();
+    assert.equal(container.children.length, 1);
+    assert.equal(container.children[0].textContent, "mobileError");
+    await poll();
+    assert.equal(reads, 3);
+    assert.equal(container.children.length, 5);
+    const values = container.children.map((row) => row.children[0].children[1].textContent);
+    assert.ok(values.includes("ABCD-1234"));
+    assert.ok(values.includes(info.pairUrl));
+    const restoredRow = container.children[0];
+    await poll();
+    assert.strictEqual(container.children[0], restoredRow, "unchanged visible info still avoids a redraw");
+  });
+}

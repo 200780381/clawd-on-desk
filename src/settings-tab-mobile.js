@@ -12,7 +12,9 @@
   let changeListenerRegistered = false;
   let headerStatusIdSeq = 0;
   let pairInfoTimer = null;
+  // Ignore late responses after a newer read starts or the info container is replaced.
   let infoRevision = 0;
+  // Skip redraws only while this signature is displayed; explicit reloads and errors invalidate it.
   let lastInfo = null;
   let devicesContainer = null;
   let devicesRevision = 0;
@@ -364,6 +366,7 @@
           }, MOBILE_INFO_RETRY_MS);
           return;
         }
+        lastInfo = null;
         container.innerHTML = "";
         const error = document.createElement("p");
         error.className = "mobile-info-error";

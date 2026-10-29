@@ -47,6 +47,15 @@ async function until(check, description, timeout = 15000) {
   throw new Error(`Timed out: ${description}`);
 }
 
+async function waitForPromotionAndClose(desktop, deviceId, gen, frozenRecord) {
+  await until(
+    () => desktop.state().devices.some((device) => device.id === deviceId && device.currentGen >= gen),
+    "desktop device promotion",
+    rotationMs * 4 + 15000
+  );
+  await until(() => frozenRecord.sentCode === 4002, "X token-rotated close");
+}
+
 async function waitDuration(ms, label) {
   const start = Date.now();
   let lastReport = start;
@@ -295,6 +304,7 @@ async function runCase(chrome, name, preserve) {
       const y = await page(chrome, browserContextId, "Y", d.base); await y.connected();
       const wantedGen = initial.gen + (name === "two-rotations" ? 2 : 1);
       expectedCredential = await until(async () => { const value = await y.credential(); return value && value.gen >= wantedGen && value; }, "Y staged promotions", rotationMs * 4 + 15000);
+      await waitForPromotionAndClose(d, expectedCredential.deviceId, expectedCredential.gen, frozen.record);
       assert.equal(frozen.record.sentCode, 4002);
     }
     const probe = await thaw(x, frozen, name === "two-tabs" || name === "two-rotations");
@@ -346,7 +356,7 @@ async function main() {
   }
 }
 
-module.exports = { describeLongFreeze };
+module.exports = { describeLongFreeze, waitForPromotionAndClose };
 
 if (require.main === module) {
   main().catch((err) => { console.error(err.stack); process.exitCode = 1; });
