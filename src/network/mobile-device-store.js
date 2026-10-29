@@ -39,29 +39,41 @@ function newPairing(now) {
   return { code: Array.from(bytes, (byte) => PAIR_ALPHABET[byte & 31]).join(""), expiresAt: now + PAIR_TTL_MS };
 }
 
+function validLegacy(legacy) {
+  return !!legacy && Array.isArray(legacy.graceHashes)
+    && legacy.graceHashes.every((h) => HASH_RE.test(h))
+    && (legacy.deadTokenHash === null || HASH_RE.test(legacy.deadTokenHash));
+}
+
+function validPairing(pairing) {
+  return !!pairing && /^[0-9A-HJKMNP-TV-Z]{8}$/.test(pairing.code)
+    && Number.isFinite(pairing.expiresAt);
+}
+
+function validDevice(device) {
+  if (!device || !/^d_[a-f0-9]{16}$/.test(device.id) || !CID_RE.test(device.cid)
+      || typeof device.name !== "string" || !["pair", "legacy"].includes(device.origin)
+      || !["pending", "active"].includes(device.state)
+      || !Number.isInteger(device.currentGen) || device.currentGen < 0
+      || !Number.isFinite(device.createdAt) || !Number.isFinite(device.lastSeenAt)
+      || !(device.pairCodeHash === null || HASH_RE.test(device.pairCodeHash))) return false;
+  if (device.pairCodeHash !== null && (device.origin !== "pair" || device.state !== "pending")) return false;
+  if (device.state === "pending") {
+    if (device.currentHash !== null || device.currentGen !== 0 || device.currentIssuedAt !== null || !device.staged) return false;
+  } else if (!HASH_RE.test(device.currentHash) || device.currentGen < 1 || !Number.isFinite(device.currentIssuedAt)) return false;
+  return device.staged === null
+    ? device.stagedGen === null
+    : TOKEN_RE.test(device.staged) && device.stagedGen === device.currentGen + 1;
+}
+
 function validState(state) {
   if (!state || state.version !== 2 || !Array.isArray(state.devices) || state.devices.length > MAX_DEVICES
-      || !state.legacy || !Array.isArray(state.legacy.graceHashes)
-      || !state.legacy.graceHashes.every((h) => HASH_RE.test(h))
-      || !(state.legacy.deadTokenHash === null || HASH_RE.test(state.legacy.deadTokenHash))
-      || !state.pairing || !/^[0-9A-HJKMNP-TV-Z]{8}$/.test(state.pairing.code)
-      || !Number.isFinite(state.pairing.expiresAt)) return false;
+      || !validLegacy(state.legacy) || !validPairing(state.pairing)) return false;
   const ids = new Set();
-  return state.devices.every((d) => {
-    if (!d || !/^d_[a-f0-9]{16}$/.test(d.id) || ids.has(d.id) || !CID_RE.test(d.cid)
-        || typeof d.name !== "string" || !["pair", "legacy"].includes(d.origin)
-        || !["pending", "active"].includes(d.state)
-        || !Number.isInteger(d.currentGen) || d.currentGen < 0
-        || !Number.isFinite(d.createdAt) || !Number.isFinite(d.lastSeenAt)
-        || !(d.pairCodeHash === null || HASH_RE.test(d.pairCodeHash))) return false;
-    ids.add(d.id);
-    if (d.pairCodeHash !== null && (d.origin !== "pair" || d.state !== "pending")) return false;
-    if (d.state === "pending") {
-      if (d.currentHash !== null || d.currentGen !== 0 || d.currentIssuedAt !== null || !d.staged) return false;
-    } else if (!HASH_RE.test(d.currentHash) || d.currentGen < 1 || !Number.isFinite(d.currentIssuedAt)) return false;
-    return d.staged === null
-      ? d.stagedGen === null
-      : TOKEN_RE.test(d.staged) && d.stagedGen === d.currentGen + 1;
+  return state.devices.every((device) => {
+    if (!validDevice(device) || ids.has(device.id)) return false;
+    ids.add(device.id);
+    return true;
   });
 }
 
@@ -115,6 +127,8 @@ function createMobileDeviceStore(options) {
     dirty = true;
   }
   if (process.platform !== "win32") {
+    // Credentials must stay owner-only: clear setuid/setgid/sticky, owner execute,
+    // and all group/other access bits.
     try { if (io.statSync(tokenPath).mode & 0o7177) io.chmodSync(tokenPath, 0o600); }
     catch { log("[mobile-preview] cannot restrict legacy token file permissions"); }
   }

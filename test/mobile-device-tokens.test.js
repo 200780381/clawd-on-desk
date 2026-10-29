@@ -541,3 +541,23 @@ test("mobile server and device store expose no plaintext-token getter", async (t
   const store = createMobileDeviceStore({ tokenPath: f.tokenPath, now: () => 1000000, log() {} });
   assert.equal("getLegacyToken" in store, false);
 });
+
+
+for (const field of ["legacy", "pairing", "device", "duplicate"]) {
+  test(`startup rejects invalid ${field} state while retaining legacy access`, async (t) => {
+    const f = await fixture(t);
+    const token = f.legacy().rotation().newToken;
+    f.device(token).close(1000);
+    await f.server.cleanup();
+    const state = f.read();
+    if (field === "legacy") state.legacy.graceHashes = ["invalid"];
+    else if (field === "pairing") state.pairing.code = "IIIIIIII";
+    else if (field === "device") state.devices[0].currentGen = 0;
+    else state.devices.push({ ...state.devices[0] });
+    fs.writeFileSync(f.devicesPath, JSON.stringify(state));
+    const again = await fixture(t, { dir: f.dir });
+    assert.deepEqual(again.read().devices, []);
+    assert.equal(again.device(token).code, 1008);
+    checkSnapshot(again.device(LEGACY, ""));
+  });
+}

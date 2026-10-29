@@ -290,6 +290,42 @@ test("controlled cross-tab read/write interleaving can temporarily lower gen but
   assert.equal(h.Socket.instances.length, 3);
 });
 
+test("lost higher generation without another peer write ends after one prevToken attempt and asks to re-pair", () => {
+  const h = deviceHarness();
+  const states = [];
+  h.connection.onStateChange = (state) => states.push(state);
+  h.socket().message({ type: "snapshot" });
+  h.setWriteHook((key) => {
+    if (key === CRED) h.save(credential({ gen: 3, token: "C", prevToken: "B" }));
+  });
+  h.socket().message(rotation());
+  h.setWriteHook(null);
+  // Y has promoted C, but X's stale write lost C locally and Y never writes again.
+  assert.deepEqual(h.saved(), credential({ gen: 2, token: "B", prevToken: "A" }));
+  assert.equal(h.connection.used.token, "B");
+  h.socket().end(1008);
+  assert.equal(h.connection.used.token, "A");
+  assert.equal(h.connection.prevTried, true);
+  h.socket().end(1008);
+  assert.equal(h.connection.state, "auth_failed");
+  assert.equal(h.connection.authBlocked, true);
+  assert.equal(states.filter((state) => state === "connected").length, 1);
+  assert.match(h.elements.get("pair-hint").textContent, /请重新配对/);
+  assert.equal(h.timers.has(h.connection.reconnectTimer), false);
+  assert.equal(h.Socket.instances.length, 3);
+  const attempts = h.Socket.instances.map((socket) => new URLSearchParams(socket.url.split("?")[1]));
+  assert.deepEqual(attempts.map((params) => params.get("token")), ["A", "B", "A"]);
+  assert.ok(attempts.every((params) => !params.has("pair")));
+  assert.equal(h.connection.config.deviceId, DEVICE);
+  assert.deepEqual(h.saved(), credential({ gen: 2, token: "B", prevToken: "A" }));
+  h.document.visibilityState = "hidden";
+  h.events.visibilitychange();
+  h.now(1100000);
+  h.document.visibilityState = "visible";
+  h.events.visibilitychange();
+  assert.equal(h.Socket.instances.length, 3, "visibility cannot restart rejected credentials");
+});
+
 test("service worker uses network first for navigation/JS/CSS and never caches credential-bearing navigation keys", async () => {
   const handlers = {}, keys = [], matched = [];
   let online = true, response;
