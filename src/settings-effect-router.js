@@ -100,6 +100,7 @@ function createSettingsEffectRouter(options = {}) {
   const syncHitWin = options.syncHitWin || noop;
   const refreshIdleVisual = options.refreshIdleVisual || noop;
   const refreshDisplayedVisual = options.refreshDisplayedVisual || noop;
+  const refreshPetPresentation = options.refreshPetPresentation || noop;
   const rebuildAllMenus = options.rebuildAllMenus || noop;
   const reconcilePowerSaveBlocker = options.reconcilePowerSaveBlocker || noop;
   const disableMobilePermissionObservation = options.disableMobilePermissionObservation || noop;
@@ -354,6 +355,15 @@ function createSettingsEffectRouter(options = {}) {
         emitSessionSnapshot({ force: true });
       } catch (err) {
         warn(logWarn, "Clawd: quota merge mode re-emit failed:", err);
+      }
+    }
+    if ("sessionHudHideCompletedCodexEphemeral" in changes || "sessionHudHideActiveCodexEphemeral" in changes) {
+      // Rebuild the snapshot immediately;
+      // never run lifecycle cleanup, acknowledge completion or touch approvals.
+      safeCall(logWarn, "Clawd: Codex ephemeral HUD preference refresh failed:",
+        emitSessionSnapshot, { force: true });
+      if ("sessionHudHideActiveCodexEphemeral" in changes) {
+        safeCall(logWarn, "Clawd: Codex ephemeral pet preference refresh failed:", refreshPetPresentation);
       }
     }
     if ("sessionHudCleanupDetached" in changes && changes.sessionHudCleanupDetached === true) {

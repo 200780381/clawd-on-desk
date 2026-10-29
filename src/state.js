@@ -2,6 +2,7 @@
 // Extracted from main.js L158-240, L299-505, L544-960
 
 let screen;
+const { mergeCodexClientEphemeral } = require("./codex-session-persistence");
 try { ({ screen } = require("electron")); } catch { screen = null; }
 const { normalizePlanProgress } = require("../hooks/codex-plan-progress");
 const {
@@ -38,6 +39,7 @@ const {
   buildSessionSnapshot: buildSessionSnapshotFromSessions,
   getActiveSessionAliasKeys: getActiveSessionAliasKeysFromSessions,
   sessionSnapshotSignature,
+  shouldHideActiveCodexEphemeral,
   AWAITING_ACTIVITY_AGENTS,
 } = require("./state-session-snapshot");
 const { getAgentIconUrl } = require("./state-agent-icons");
@@ -1256,6 +1258,10 @@ function buildSessionSnapshot() {
     resolveAgentDisplayName: ctx.resolveAgentDisplayName,
     statePriority: STATE_PRIORITY,
     sessionHudCleanupDetached: ctx.sessionHudCleanupDetached === true,
+    sessionHudHideCompletedCodexEphemeral: ctx.sessionHudHideCompletedCodexEphemeral === true,
+    sessionHudHideActiveCodexEphemeral: ctx.sessionHudHideActiveCodexEphemeral === true,
+    pendingPermissionSessionIds: new Set((ctx.pendingPermissions || [])
+      .filter(Boolean).map((entry) => entry.sessionId)),
     focusHostPlatform: ctx.focusHostPlatform || process.platform,
     isProcessAlive,
     accountQuota: accountQuota.snapshot({ mergeSources: ctx.quotaMergeSources === true }),
@@ -1853,6 +1859,7 @@ function updateCodexInitializationMetadata(sessionId, opts = {}) {
     provider: opts.provider || session.provider || null,
     codexOriginator: opts.codexOriginator || session.codexOriginator || null,
     codexSource: opts.codexSource || session.codexSource || null,
+    codexClientEphemeral: mergeCodexClientEphemeral(session, opts),
     ghosttyTerminalId: normalizeGhosttyTerminalId(opts.ghosttyTerminalId) || session.ghosttyTerminalId || null,
     transcriptPath: normalizeTranscriptPath(opts.transcriptPath) || session.transcriptPath || null,
     sessionAutomationIdentity: normalizeSessionAutomationIdentity(opts.sessionAutomationIdentity)
@@ -2506,7 +2513,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     ) return;
     const hasCodexPermissionMetadata = !!(
       sourcePid || wtHwnd || agentPid || (pidChain && pidChain.length) || cwd || host || wslDistro ||
-      model || provider || codexOriginator || codexSource || platform || ghosttyTerminalId ||
+      model || provider || codexOriginator || codexSource || Object.hasOwn(opts, "codexClientEphemeral") || platform || ghosttyTerminalId ||
       tmuxSocket || tmuxClient || orcaPaneKey || herdrPaneId
     );
     const shouldPersistCodexPermissionFocus = permAgentId === "codex" && (
@@ -2594,6 +2601,7 @@ function updateSession(sessionId, state, event, opts = {}) {
         provider: srcProvider,
         codexOriginator: srcCodexOriginator,
         codexSource: srcCodexSource,
+        codexClientEphemeral: mergeCodexClientEphemeral(existing, opts),
         ghosttyTerminalId: srcGhosttyTerminalId,
         sessionTitle: srcSessionTitle,
         sessionTitleFromPrompt: srcSessionTitleFromPrompt,
@@ -3064,7 +3072,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     opencodeAttachUrl === undefined && existing && existing.opencodeAttachSource === attachSource
       ? existing.opencodeAttachUrl : opencodeAttachUrl
   ) : null;
-  const base = { opencodeAttachUrl: attachUrl, opencodeAttachSource: attachSource, sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, planProgress: srcPlanProgress, planProgressSource: srcPlanProgressSource, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
+  const base = { opencodeAttachUrl: attachUrl, opencodeAttachSource: attachSource, sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, codexClientEphemeral: mergeCodexClientEphemeral(existing, opts), dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, planProgress: srcPlanProgress, planProgressSource: srcPlanProgressSource, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
   // Desktop apps can reopen a previous conversation on launch, so SessionStart
   // only means "opened" — not "used". Any other lifecycle event is a real action
   // and clears the marker. Only the listed agents carry the field; others are
@@ -3454,6 +3462,12 @@ function updateSession(sessionId, state, event, opts = {}) {
     return;
   }
 
+  // A hidden temporary request must not reset an existing sleep/idle animation
+  // merely by resolving to idle. Canonical lifecycle and the snapshot below
+  // still advance, including keep-awake and recap consumers.
+  if (shouldHideActiveCodexEphemeral(sessionId, sessions.get(sessionId), getPetPresentationOptions())
+    && isPassivePetPresentation()
+    && resolveDisplayState() === "idle") return;
   const displayState = resolveDisplayState();
   setState(displayState, getSvgOverride(displayState));
   } finally {
@@ -4021,8 +4035,40 @@ function disposeKimiPermissionSession(sessionId) {
   stopKimiPermissionPoll(sessionId);
 }
 
+function getPetPresentationOptions() {
+  return {
+    sessionHudHideActiveCodexEphemeral: ctx.sessionHudHideActiveCodexEphemeral === true,
+    pendingPermissionSessionIds: new Set((ctx.pendingPermissions || []).filter(Boolean).map(entry => entry.sessionId)),
+  };
+}
+
+// Accept a prior projection so child/pending-attention overlays can be applied
+// first. Neither this map nor its entries are written back to canonical state.
+function getPetPresentationSessions(source = sessions) {
+  const options = getPetPresentationOptions();
+  if (!options.sessionHudHideActiveCodexEphemeral) return source;
+  let projected = source;
+  for (const [id, session] of source) {
+    if (!shouldHideActiveCodexEphemeral(id, session, options)) continue;
+    if (projected === source) projected = new Map(source);
+    projected.delete(id);
+  }
+  return projected;
+}
+
+function isPassivePetPresentation() {
+  return SLEEP_SEQUENCE.has(currentState)
+    || ["mini-idle", "mini-sleep", "mini-peek", "mini-peek-hold", "mini-sleep-peek"].includes(currentState);
+}
+
+function refreshPetPresentation() {
+  const resolved = resolveDisplayState();
+  if (resolved === "idle" && isPassivePetPresentation()) return;
+  setState(resolved, getSvgOverride(resolved));
+}
+
 function resolveDisplayState() {
-  return resolveDisplayStateFromSessions(sessions, {
+  return resolveDisplayStateFromSessions(getPetPresentationSessions(), {
     statePriority: STATE_PRIORITY,
     compacting: hasCodexCompactionVisual(),
     permissionLocked: hasPermissionAnimationLock(),
@@ -4052,7 +4098,7 @@ function getSvgOverride(state) {
     updateVisualSvgOverride,
     idleFollowSvg: SVG_IDLE_FOLLOW,
     idleDefaultVisual: typeof ctx.getIdleVisualChoice === "function" ? ctx.getIdleVisualChoice() : null,
-    sessions,
+    sessions: getPetPresentationSessions(),
     displayHintMap: DISPLAY_HINT_MAP,
     theme,
     stateSvgs: STATE_SVGS,
@@ -4195,7 +4241,7 @@ return {
   // Read-only, unmerged account windows for source-specific alert deduplication.
   getAccountQuotaSnapshot: () => accountQuota.snapshot({ mergeSources: false }),
   startStaleCleanup, stopStaleCleanup, startWakePoll, stopWakePoll,
-  getSvgOverride, cleanStaleSessions, startStartupRecovery, refreshTheme,
+  getSvgOverride, getPetPresentationSessions, refreshPetPresentation, cleanStaleSessions, startStartupRecovery, refreshTheme,
   detectRunningAgentProcesses, buildSessionSnapshot,
   emitSessionSnapshot, broadcastSessionSnapshot, getLastSessionSnapshot,
   getActiveSessionAliasKeys,
