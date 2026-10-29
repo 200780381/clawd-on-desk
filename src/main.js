@@ -616,6 +616,8 @@ const _settingsController = createSettingsController({
     sendFeishuApprovalTest: (persisted) => sendFeishuApprovalTest(persisted),
     resetMobileAccess: () => ensureMobilePreviewServer().resetMobileAccess(),
     refreshMobilePairCode: () => ensureMobilePreviewServer().refreshPairCode(),
+    revokeMobileDevice: (id) => ensureMobilePreviewServer().revokeDevice(id),
+    revokeMobileLegacy: () => ensureMobilePreviewServer().revokeLegacy(),
     disconnectMobilePreviewClients: () => ensureMobilePreviewServer().disconnectClients({
       code: 4001,
       reason: "Permission preview consent changed",

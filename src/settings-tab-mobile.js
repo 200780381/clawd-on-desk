@@ -14,6 +14,9 @@
   let pairInfoTimer = null;
   let infoRevision = 0;
   let lastInfo = null;
+  let devicesContainer = null;
+  let devicesRevision = 0;
+  let lastDevices = null;
 
   function t(key) {
     return helpers.t(key);
@@ -124,7 +127,177 @@
     });
   }
 
-  function buildPairingFooter(container) {
+  function deviceStatus(device) {
+    if (device.state === "pending") return t("mobileDevicePending");
+    const elapsed = Math.max(0, Date.now() - device.lastSeenAt) / 1000;
+    const units = [
+      [31536000, "year"],
+      [2592000, "month"],
+      [86400, "day"],
+      [3600, "hour"],
+      [60, "minute"],
+      [1, "second"],
+    ];
+    const [seconds, unit] = units.find(([size]) => elapsed >= size) || units[units.length - 1];
+    const time = new Intl.RelativeTimeFormat(state.snapshot.lang || "en", { numeric: "auto" })
+      .format(-Math.floor(elapsed / seconds), unit);
+    return t("mobileDeviceLastSeen").replace("{time}", time);
+  }
+
+  function showDeviceError(result, titleKey) {
+    const detail = result && result.partialRevoke
+      ? t("mobilePartialRevokeFailure")
+      : (result && result.message) || t("mobileDevicesError");
+    return helpers.showSettingsDialog({
+      title: t(titleKey),
+      detail,
+      actions: [{ id: "ok", label: t("mobileDismiss"), defaultFocus: true }],
+    });
+  }
+
+  async function revokeLegacy(button) {
+    const choice = await helpers.showSettingsDialog({
+      title: t("mobileRevokeLegacy"),
+      detail: t("mobileRevokeLegacyConfirm"),
+      actions: [
+        { id: "cancel", label: t("permissionAutomationCancel"), defaultFocus: true },
+        { id: "revoke", label: t("mobileRevokeLegacy"), tone: "danger" },
+      ],
+    });
+    if (choice !== "revoke") return;
+    button.disabled = true;
+    try {
+      const result = await window.settingsAPI.revokeMobileLegacy();
+      await refreshMobileData();
+      if (!result || result.status !== "ok") await showDeviceError(result, "mobileRevokeLegacy");
+    } catch (err) {
+      await showDeviceError(err, "mobileRevokeLegacy");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function revokeDevice(device, button) {
+    const choice = await helpers.showSettingsDialog({
+      title: t("mobileRevokeDevice"),
+      detail: t("mobileRevokeDeviceConfirm").replace("{name}", device.name),
+      actions: [
+        { id: "cancel", label: t("permissionAutomationCancel"), defaultFocus: true },
+        { id: "revoke", label: t("mobileRevokeDevice"), tone: "danger" },
+      ],
+    });
+    if (choice !== "revoke") return;
+    button.disabled = true;
+    try {
+      const result = await window.settingsAPI.revokeMobileDevice(device.id);
+      const devices = await refreshMobileData();
+      if (!result || result.status !== "ok") {
+        await showDeviceError(result, "mobileRevokeDevice");
+        return;
+      }
+      if (result.mayHoldLegacy && devices && devices.status === "ok" && devices.legacyActive) {
+        const next = await helpers.showSettingsDialog({
+          title: t("mobileRevokeLegacy"),
+          detail: t("mobileDeviceMayHoldLegacy"),
+          actions: [
+            { id: "later", label: t("mobileRevokeLater"), defaultFocus: true },
+            { id: "revoke", label: t("mobileRevokeLegacy"), tone: "danger" },
+          ],
+        });
+        if (next === "revoke") await revokeLegacy(button);
+      }
+    } catch (err) {
+      await showDeviceError(err, "mobileRevokeDevice");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function buildDeviceRow(device) {
+    const row = document.createElement("div");
+    row.className = "row mobile-device-row";
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = device ? device.name : t("mobileLegacyDevices");
+    text.appendChild(label);
+    if (device) {
+      const status = document.createElement("div");
+      status.className = "row-desc mobile-device-status";
+      status.textContent = deviceStatus(device);
+      const paired = document.createElement("div");
+      paired.className = "row-desc";
+      paired.textContent = t("mobileDevicePairedAt")
+        .replace("{time}", new Date(device.createdAt).toLocaleString(state.snapshot.lang || "en"));
+      text.appendChild(status);
+      text.appendChild(paired);
+      if (device.origin === "legacy") {
+        const migrated = document.createElement("div");
+        migrated.className = "row-desc";
+        migrated.textContent = t("mobileDeviceMigrated");
+        text.appendChild(migrated);
+      }
+    }
+    const control = document.createElement("div");
+    control.className = "row-control";
+    const revoke = helpers.buildButton({
+      labelKey: device ? "mobileRevokeDevice" : "mobileRevokeLegacy",
+      tone: "quiet",
+      size: "compact",
+      className: "danger mobile-device-revoke",
+    });
+    revoke.addEventListener("click", () => device ? revokeDevice(device, revoke) : revokeLegacy(revoke));
+    control.appendChild(revoke);
+    row.appendChild(text);
+    row.appendChild(control);
+    return row;
+  }
+
+  async function renderDevices(container) {
+    if (!container || state.snapshot.mobilePreviewEnabled !== true) return null;
+    const revision = ++devicesRevision;
+    let result;
+    try {
+      result = await window.settingsAPI.getMobileDevices();
+    } catch (err) {
+      result = { status: "error", message: err.message };
+    }
+    if (container !== devicesContainer || !container.isConnected || revision !== devicesRevision) return null;
+    const signature = JSON.stringify(result);
+    if (signature === lastDevices) {
+      if (result && result.status === "ok") {
+        const statuses = container.querySelectorAll(".mobile-device-status");
+        result.devices.forEach((device, index) => { statuses[index].textContent = deviceStatus(device); });
+      }
+      return result;
+    }
+    lastDevices = signature;
+    container.innerHTML = "";
+    if (!result || result.status !== "ok") {
+      const error = document.createElement("p");
+      error.className = "mobile-info-error";
+      error.textContent = (result && result.message) || t("mobileDevicesError");
+      container.appendChild(error);
+      return result;
+    }
+    for (const device of result.devices) container.appendChild(buildDeviceRow(device));
+    if (result.legacyActive) container.appendChild(buildDeviceRow(null));
+    if (!result.devices.length && !result.legacyActive) {
+      const empty = document.createElement("p");
+      empty.className = "row-desc";
+      empty.textContent = t("mobileDevicesEmpty");
+      container.appendChild(empty);
+    }
+    return result;
+  }
+
+  function refreshMobileData() {
+    if (infoContainer) renderConnectionInfo(infoContainer, 0, true);
+    return renderDevices(devicesContainer);
+  }
+
+  function buildPairingFooter() {
     const foot = document.createElement("div");
     foot.className = "channel-foot";
     const refresh = helpers.buildButton({
@@ -134,7 +307,7 @@
     refresh.addEventListener("click", () => {
       if (!window.settingsAPI || typeof window.settingsAPI.refreshMobilePairCode !== "function") return;
       window.settingsAPI.refreshMobilePairCode().then((result) => {
-        if (result && result.status === "ok") renderConnectionInfo(container);
+        if (result && result.status === "ok") refreshMobileData();
         else showPairingError(result, "mobileRefreshPairCode");
       });
     });
@@ -146,7 +319,7 @@
       if (!window.confirm(t("mobileResetConfirm"))) return;
       if (!window.settingsAPI || typeof window.settingsAPI.resetMobileAccess !== "function") return;
       window.settingsAPI.resetMobileAccess().then((result) => {
-        if (result && result.status === "ok") renderConnectionInfo(container);
+        if (result && result.status === "ok") refreshMobileData();
         else showPairingError(result, "mobileReset");
       });
     });
@@ -161,7 +334,7 @@
       if (container !== infoContainer || !container.isConnected || state.snapshot.mobilePreviewEnabled !== true) return;
       const visible = document.visibilityState !== "hidden"
         && (typeof container.getClientRects !== "function" || container.getClientRects().length > 0);
-      if (visible) renderConnectionInfo(container, 0, true);
+      if (visible) refreshMobileData();
       schedulePairInfoRefresh(container);
     }, 5000);
   }
@@ -223,6 +396,9 @@
   // settings-tab-telegram-approval.js next to the other channels).
   function renderChannelBody(container) {
     clearTimeout(pairInfoTimer);
+    devicesContainer = null;
+    lastDevices = null;
+    devicesRevision++;
     const parentEnabled = !!(state.snapshot && state.snapshot.mobilePreviewEnabled === true);
 
     permissionPreviewRow = helpers.buildSwitchRow({
@@ -263,7 +439,7 @@
             // Token reset is an irreversible pre-commit phase. Even if the
             // later preference write fails, replace the stale pairing display.
             if (result && result.tokenReset === true && infoContainer) {
-              renderConnectionInfo(infoContainer);
+              refreshMobileData();
             }
             if (result && result.status !== "ok" && result.partialReset) {
               return Object.assign({}, result, { message: t("mobilePermissionPartialResetFailure") });
@@ -286,8 +462,12 @@
       infoContainer = document.createElement("div");
       infoContainer.id = "mobile-connection-info";
       container.appendChild(helpers.buildDetailGroup(t("mobileGroupPairing"), [infoContainer]));
-      container.appendChild(buildPairingFooter(infoContainer));
+      container.appendChild(buildPairingFooter());
+      devicesContainer = document.createElement("div");
+      devicesContainer.id = "mobile-devices";
+      container.appendChild(helpers.buildDetailGroup(t("mobileGroupDevices"), [devicesContainer]));
       renderConnectionInfo(infoContainer);
+      renderDevices(devicesContainer);
       schedulePairInfoRefresh(infoContainer);
     } else {
       infoContainer = null;
@@ -305,7 +485,7 @@
       changeListenerRegistered = true;
       window.settingsAPI.onChanged((evt) => {
         if (evt && evt.changes && Object.prototype.hasOwnProperty.call(evt.changes, "mobilePreviewEnabled")) {
-          if (infoContainer) renderConnectionInfo(infoContainer);
+          refreshMobileData();
           const parentOn = !!(evt.snapshot && evt.snapshot.mobilePreviewEnabled === true);
           const sw = permissionPreviewRow && permissionPreviewRow.querySelector(".switch");
           if (sw) {
