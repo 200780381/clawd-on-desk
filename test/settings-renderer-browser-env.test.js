@@ -4105,7 +4105,7 @@ describe("settings renderer browser environment", () => {
     });
     const parent = new FakeElement("main");
     core.tabs.animOverrides.render(parent, core);
-    assert.strictEqual(parent.querySelector(".anim-override-trigger").textContent, "PreToolUse (2+ sessions)");
+    assert.strictEqual(parent.querySelector(".anim-override-trigger").textContent, "Agent activity / tool results (2+ sessions)");
   });
 
   it("loads browser scripts in dependency order and keeps CommonJS helpers out of settings.html", () => {

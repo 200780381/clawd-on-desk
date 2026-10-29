@@ -6360,7 +6360,7 @@ describe("Stop completion gate (#406)", () => {
       api.updateSession("probe-cancel", "working", "PostToolUse", opts);
       fs.appendFileSync(transcript, JSON.stringify({ type: "assistant", message: { content: "Old final answer." } }) + "\n");
       mock.timers.tick(10000);
-      assert.equal(api.sessions.get("probe-cancel").state, "working");
+      assert.equal(api.sessions.get("probe-cancel").state, "executing");
       assert.ok(!soundsPlayed.includes("complete"));
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });

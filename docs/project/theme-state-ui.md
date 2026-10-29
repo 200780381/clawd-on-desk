@@ -24,7 +24,8 @@ Windows 的 hit window 在原生 activation controller 可用时按前台全屏�
 ## State Machine
 
 - 多会话追踪：`sessions` Map 按 `session_id` 独立记录状态，`resolveDisplayState()` 取最高优先级
-- 状态优先级：`error(8) > notification(7) > sweeping(6) > attention(5) > carrying/juggling(4) > working(3) > thinking(2) > idle(1) > sleeping(0)`
+- 状态优先级：`error(8) > notification(7) > sweeping(6) > attention(5) > carrying/juggling(4) > executing(3.5) > working(3) > thinking(2) > idle(1) > sleeping(0)`
+- `executing` 是本机交互式 Claude 主会话的新鲜工具调用提示，使用已有 prompt/tool 关联账本；不是未完成工具计数，也不证明进程已开始运行。普通结果保守回到 `working`，已接受的批次才回到 `thinking`；子代理返回和审批清理不恢复旧的 executing。主题可选提供 `states.executing`，缺少时完整复用 working 的档位、覆盖、稳定抽样与适用的 display hint/眼球跟踪；不注入合成主题绑定。显示时长默认继承主题的 working，Mini 复用 mini-working。Settings 仅在主题自带 executing 素材时显示独立配置卡。
 - 最小显示时长：防止快速闪切（`error=5s`、`attention/notification=4s`、`carrying=3s`、`sweeping=2s`、`working/thinking=1s`）
 - 一次性状态：`attention/error/sweeping/notification/carrying` 显示后自动回退（`AUTO_RETURN_MS`）
 - Codex `PreCompact` 为清扫额外建立按对话的显示持有，普通其他对话活动不会提前切回工作；完成或同对话恢复活动后释放，再按完成提示的最小显示时长回退。丢失完成最多持有 10 分钟，headless 不持有，DND/禁用动画/审批锁保持原有语义。

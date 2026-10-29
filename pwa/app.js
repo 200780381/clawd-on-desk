@@ -7,6 +7,7 @@
     error:        { icon: "error",        color: "#ef4444", priority: 0, label: "错误" },
     attention:    { icon: "attention",    color: "#b45309", priority: 1, label: "需要关注" },
     working:      { icon: "working",      color: "#22c55e", priority: 2, label: "工作中" },
+    executing:    { icon: "working",      color: "#22c55e", priority: 2, label: "工具处理中" },
     juggling:     { icon: "juggling",     color: "#22c55e", priority: 2, label: "多任务" },
     thinking:     { icon: "thinking",     color: "#3b82f6", priority: 3, label: "思考中" },
     notification: { icon: "notification", color: "#d97757", priority: 4, label: "通知" },
@@ -170,7 +171,7 @@
       var label = data.title || data.agentId || "Agent";
       if (s === "error" || s === "attention") {
         this._notify(config.label, label + " - " + config.label, s);
-      } else if ((prev === "working" || prev === "thinking") && s === "idle") {
+      } else if ((prev === "working" || prev === "executing" || prev === "thinking") && s === "idle") {
         this._notify("任务完成", label + " 已完成任务", "idle");
       }
     }

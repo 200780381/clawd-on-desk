@@ -500,6 +500,10 @@ describe("PWA permission notifications and access reset", () => {
 });
 
 describe("PWA static and protocol contracts", () => {
+  it("styles executing and working badges with the same green rule", () => {
+    assert.match(CSS_SOURCE, /\.state-badge\.working,\s*\.state-badge\.executing,\s*\.state-badge\.juggling\s*\{\s*color:\s*var\(--green\);\s*background:\s*var\(--green-dim\);\s*border-color:\s*var\(--green-border\);\s*\}/);
+  });
+
   it("contains reduced-motion permission styling and cache v8", () => {
     assert.match(CSS_SOURCE, /prefers-reduced-motion:\s*reduce/);
     assert.match(CSS_SOURCE, /\.permission-card\s*\{\s*animation:\s*none/);
