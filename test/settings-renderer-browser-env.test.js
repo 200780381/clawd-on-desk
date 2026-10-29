@@ -2062,12 +2062,13 @@ function loadPermissionsTabForTest({
     getMobileConnectionInfo: () => Promise.resolve({
       status: "ok",
       port: 23380,
-      token: "tok",
+      pairCode: "ABCD1234",
+      pairExpiresAt: 123456,
       lanIp: "192.168.0.23",
-      pairUrl: "http://192.168.0.23:23380/mobile/?token=tok",
+      pairUrl: "http://192.168.0.23:23380/mobile/?pair=ABCD1234",
     }),
-    regenerateMobileToken: () => {
-      commands.push({ name: "regenerateMobileToken" });
+    refreshMobilePairCode: () => {
+      commands.push({ name: "refreshMobilePairCode" });
       return Promise.resolve({ status: "ok" });
     },
     resetMobileAccess: () => {
@@ -9267,10 +9268,10 @@ describe("settings renderer browser environment", () => {
       ["mobileGroupPhoneShows", "mobileGroupPairing"],
     );
     const rows = card.querySelectorAll(".mobile-conn-row");
-    assert.equal(rows.length, 4);
+    assert.equal(rows.length, 5);
     assert.deepStrictEqual(
       rows.map((row) => row.querySelector(".row-label").textContent),
-      ["mobileConnLanIp", "mobileConnPort", "mobileConnToken", "mobileConnUrl"],
+      ["mobileConnLanIp", "mobileConnPort", "mobileConnPairCode", "mobileConnPairExpires", "mobileConnUrl"],
     );
     const copy = rows[0].querySelector(".mobile-copy");
     copy.dispatchEvent({ type: "click" });
@@ -9278,23 +9279,53 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(enabled.clipboardWrites, ["192.168.0.23"]);
     assert.equal(copy.textContent, "mobileCopied");
 
-    const regenerate = card.querySelector(".mobile-regenerate");
+    const refresh = card.querySelector(".mobile-refresh-pair-code");
     const reset = card.querySelector(".mobile-reset");
-    assert.ok(regenerate && reset);
+    assert.ok(refresh && reset);
     assert.equal(reset.classList.contains("danger"), true);
-    regenerate.dispatchEvent({ type: "click" });
     reset.dispatchEvent({ type: "click" });
-    assert.equal(enabled.commands.some((call) => call.name === "regenerateMobileToken"), false);
+    assert.equal(enabled.commands.some((call) => call.name === "refreshMobilePairCode"), false);
     assert.equal(enabled.commands.some((call) => call.name === "resetMobileAccess"), false);
 
     confirmResult = true;
-    regenerate.dispatchEvent({ type: "click" });
+    refresh.dispatchEvent({ type: "click" });
     reset.dispatchEvent({ type: "click" });
     await Promise.resolve();
-    assert.equal(enabled.commands.some((call) => call.name === "regenerateMobileToken"), true);
+    assert.equal(enabled.commands.some((call) => call.name === "refreshMobilePairCode"), true);
     assert.equal(enabled.commands.some((call) => call.name === "resetMobileAccess"), true);
   });
 
+
+  it("offers Copy for pairing values except the expiry time", async () => {
+    const harness = loadPermissionsTabForTest({
+      subtab: "lan",
+      snapshot: { mobilePreviewEnabled: true },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    harness.render();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const rows = harness.content.querySelectorAll(".mobile-conn-row");
+    assert.equal(rows.length, 5);
+    const copiedValues = [];
+    for (const row of rows) {
+      const label = row.querySelector(".row-label").textContent;
+      const buttons = row.querySelectorAll(".mobile-copy");
+      if (label === "mobileConnPairExpires") {
+        assert.equal(buttons.length, 0, "expiry time should have no Copy button");
+      } else {
+        assert.equal(buttons.length, 1, `${label} should retain its Copy button`);
+        copiedValues.push(row.querySelector(".mobile-conn-value").textContent);
+        buttons[0].dispatchEvent({ type: "click" });
+        await Promise.resolve();
+        assert.equal(buttons[0].textContent, "mobileCopied");
+      }
+    }
+    assert.deepStrictEqual(harness.clipboardWrites, copiedValues);
+    assert.equal(copiedValues.length, 4);
+  });
 
   it("gates the Telegram test footer on ready, runtime and native readiness", async () => {
     async function renderTelegram({ allowedTgUserId = "123456789", tokenConfigured = true, state, migration, testCommand }) {

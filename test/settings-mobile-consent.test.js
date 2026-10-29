@@ -30,6 +30,8 @@ class FakeElement {
     this.innerHTML = "";
     this.textContent = "";
   }
+  get innerHTML() { return this._innerHTML || ""; }
+  set innerHTML(value) { this._innerHTML = value; this.children = []; }
   appendChild(child) {
     child.parentNode = this;
     this.children.push(child);
@@ -59,16 +61,18 @@ test("mobile consent surfaces token-reset phase failure in the command error", a
       return {
         status: "ok",
         port: 23334,
-        token: `token-${connectionInfoReads}`,
+        pairCode: "ABCD1234",
+        pairExpiresAt: 123456,
         lanIp: "192.0.2.10",
-        pairUrl: `http://192.0.2.10:23334/mobile/?token=token-${connectionInfoReads}`,
+        pairUrl: `http://192.0.2.10:23334/mobile/?pair=ABCD1234`,
       };
     },
   };
   const context = vm.createContext({
     console,
     Promise,
-    setTimeout,
+    setTimeout: () => 1,
+    clearTimeout() {},
     navigator: {},
     document: { createElement: () => new FakeElement() },
     window: { settingsAPI },
@@ -121,3 +125,125 @@ test("mobile consent surfaces token-reset phase failure in the command error", a
   await Promise.resolve();
   assert.strictEqual(connectionInfoReads, 2, "reset failure must refresh stale pairing data");
 });
+
+for (const enabling of [false, true]) {
+  test(`partial reset UI distinguishes ${enabling ? "enable preview" : "standalone reset"} and leaves preference unchanged`, async () => {
+    const buttons = new Map(), configs = new Map(), dialogs = [], timers = [];
+    const strings = i18nContext.ClawdSettingsI18n.STRINGS.zh;
+    const result = { status: "error", message: "disk full", partialReset: true };
+    let reads = 0, refreshes = 0;
+    const snapshot = { mobilePreviewEnabled: true, mobilePermissionPreviewEnabled: !enabling };
+    const context = vm.createContext({
+      Promise, Date, console, navigator: {}, document: { createElement: () => new FakeElement(), visibilityState: "visible" },
+      setTimeout(fn, delay) { timers.push({ fn, delay }); return timers.length; }, clearTimeout() {},
+      window: { confirm: () => true, settingsAPI: {
+        resetMobileAccess: async () => result, refreshMobilePairCode: async () => { refreshes++; return { status: "error", message: "refresh failed" }; },
+        command: async () => result,
+        getMobileConnectionInfo: async () => { reads++; return { status: "ok", port: 23334, lanIp: "192.0.2.1", pairCode: "ABCD1234", pairExpiresAt: 123456, pairUrl: "http://192.0.2.1:23334/mobile/?pair=ABCD1234" }; },
+      } },
+    });
+    context.globalThis = context;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/settings-tab-mobile.js"), "utf8"), context);
+    context.ClawdSettingsTabMobile.init({ state: { snapshot }, helpers: {
+      t: (key) => strings[key],
+      buildSwitchRow(config) { configs.set(config.key, config); return new FakeElement(); },
+      attachDescriptionDisclosure() {}, buildDetailGroup(_label, rows) { const el = new FakeElement(); rows.forEach((r) => el.appendChild(r)); return el; },
+      buildButton(config) { const el = new FakeElement(); el.addEventListener = (_name, fn) => { el.click = fn; }; buttons.set(config.labelKey, el); return el; },
+      showSettingsDialog: async (config) => { dialogs.push(config); return "reset"; },
+    } });
+    context.ClawdSettingsTabMobile.renderChannelBody(new FakeElement());
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(reads, 1, "info without token must be ready");
+    assert.ok(buttons.has("mobileRefreshPairCode")); assert.equal(buttons.has("mobileRegenerate"), false);
+    if (enabling) {
+      const feedback = await configs.get("mobilePermissionPreviewEnabled").onToggle({ nextRaw: true });
+      assert.equal(feedback.partialReset, true); assert.match(feedback.message, /权限预览没有开启/);
+    } else {
+      buttons.get("mobileReset").click(); await Promise.resolve(); await Promise.resolve();
+      assert.equal(dialogs.at(-1).title, strings.mobileReset);
+      assert.equal(dialogs.at(-1).detail, strings.mobilePartialResetFailure);
+      assert.doesNotMatch(dialogs.at(-1).detail, /权限预览没有开启/);
+    }
+    assert.equal(snapshot.mobilePermissionPreviewEnabled, !enabling);
+    buttons.get("mobileRefreshPairCode").click(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(refreshes, 1);
+    assert.equal(dialogs.at(-1).title, strings.mobileRefreshPairCode);
+    assert.equal(dialogs.at(-1).detail, "refresh failed");
+    const beforePoll = reads;
+    timers.find((timer) => timer.delay === 5000).fn(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(reads, beforePoll + 1);
+  });
+}
+
+test("all language packs define pairing and partial-reset messages", () => {
+  for (const [locale, strings] of Object.entries(i18nContext.ClawdSettingsI18n.STRINGS)) {
+    for (const key of ["mobileRefreshPairCode", "mobileConnPairCode", "mobileConnPairExpires", "mobilePartialResetFailure", "mobilePermissionPartialResetFailure", "mobileDismiss"]) {
+      assert.equal(typeof strings[key], "string", `${locale}.${key}`); assert.ok(strings[key]);
+    }
+  }
+});
+
+
+for (const failure of ["reject", "error"]) {
+  test(`pairing info recovers after success, ${failure}, and the same success`, async () => {
+    const timers = new Map();
+    let timerId = 0;
+    let reads = 0;
+    const info = {
+      status: "ok", port: 23334, lanIp: "192.0.2.1", pairCode: "ABCD1234",
+      pairExpiresAt: 2000000000000, pairUrl: "http://192.0.2.1:23334/mobile/?pair=ABCD1234",
+    };
+    const context = vm.createContext({
+      Promise, Date, navigator: {},
+      document: { visibilityState: "visible", createElement: () => new FakeElement() },
+      setTimeout(fn, delay) { timers.set(++timerId, { fn, delay }); return timerId; },
+      clearTimeout(id) { timers.delete(id); },
+      window: { settingsAPI: { getMobileConnectionInfo: async () => {
+        if (++reads === 2) {
+          if (failure === "reject") throw new Error("transient IPC failure");
+          return { status: "error" };
+        }
+        return info;
+      } } },
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/settings-tab-mobile.js"), "utf8"), context);
+    context.ClawdSettingsTabMobile.init({
+      state: { snapshot: { mobilePreviewEnabled: true } },
+      helpers: {
+        t: (key) => key,
+        buildSwitchRow: () => new FakeElement(),
+        attachDescriptionDisclosure() {},
+        buildButton: () => new FakeElement(),
+        buildDetailGroup(_label, rows) {
+          const group = new FakeElement();
+          rows.forEach((row) => group.appendChild(row));
+          return group;
+        },
+      },
+    });
+    const body = new FakeElement();
+    context.ClawdSettingsTabMobile.renderChannelBody(body);
+    await new Promise((resolve) => setImmediate(resolve));
+    const container = body.children.flatMap((group) => group.children)
+      .find((element) => element.id === "mobile-connection-info");
+    assert.equal(container.children.length, 5);
+    async function poll() {
+      const [id, timer] = [...timers].find(([, task]) => task.delay === 5000);
+      timers.delete(id);
+      timer.fn();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await poll();
+    assert.equal(container.children.length, 1);
+    assert.equal(container.children[0].textContent, "mobileError");
+    await poll();
+    assert.equal(reads, 3);
+    assert.equal(container.children.length, 5);
+    const values = container.children.map((row) => row.children[0].children[1].textContent);
+    assert.ok(values.includes("ABCD-1234"));
+    assert.ok(values.includes(info.pairUrl));
+    const restoredRow = container.children[0];
+    await poll();
+    assert.strictEqual(container.children[0], restoredRow, "unchanged visible info still avoids a redraw");
+  });
+}

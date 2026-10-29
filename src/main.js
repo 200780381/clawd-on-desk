@@ -614,8 +614,8 @@ const _settingsController = createSettingsController({
     getFeishuApprovalStatus: () => getFeishuApprovalStatus(),
     getFeishuApprovalSecretInfo: () => getFeishuApprovalSecretInfo(),
     sendFeishuApprovalTest: (persisted) => sendFeishuApprovalTest(persisted),
-    regenerateMobileToken: () => ensureMobilePreviewServer().regenerateToken(),
     resetMobileAccess: () => ensureMobilePreviewServer().resetMobileAccess(),
+    refreshMobilePairCode: () => ensureMobilePreviewServer().refreshPairCode(),
     disconnectMobilePreviewClients: () => ensureMobilePreviewServer().disconnectClients({
       code: 4001,
       reason: "Permission preview consent changed",
@@ -3148,6 +3148,7 @@ function ensureMobilePreviewServer() {
   const { initMobilePreviewServer } = require("./network/mobile-preview-server");
   _lanWss = initMobilePreviewServer({
     sessions,
+    rotationMs: !app.isPackaged ? Number(process.env.CLAWD_MOBILE_ROTATION_MS) : undefined,
     permissionObservation: _perm && _perm.permissionObservation,
     log: (message) => sessionLog(message),
   });

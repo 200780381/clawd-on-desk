@@ -535,7 +535,7 @@ function createHarness({
     },
     getPreviewSoundUrl: () => Promise.resolve(null),
     getMobileConnectionInfo: () => Promise.resolve({
-      status: "ok", port: 23334, token: "test-token", lanIp: "127.0.0.1",
+      status: "ok", port: 23334, pairCode: "ABCD1234", pairExpiresAt: 123456, lanIp: "127.0.0.1",
     }),
     getTextScaleContext: () => Promise.resolve({ percent: 100 }),
     getSizeContext: () => Promise.resolve({ ui: 50, synced: true, overMax: false }),
@@ -548,6 +548,8 @@ function createHarness({
   const context = {
     console,
     navigator: { platform },
+    setTimeout: () => 1,
+    clearTimeout() {},
     localStorage: localStorage || { getItem: () => null, setItem: () => {} },
     document,
     requestAnimationFrame: (cb) => {

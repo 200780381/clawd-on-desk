@@ -773,40 +773,22 @@ test("settings IPC reports the GPU mode this process launched with (#1183)", asy
 });
 
 test("mobile connection info reports starting until the LAN bridge has a port", async () => {
-  const token = "0123456789abcdef0123456789abcdef";
   const { ipcMain, runtime } = createHarness({
-    getLanWsServer: () => ({
-      getPort: () => null,
-      getToken: () => token,
-    }),
+    getLanWsServer: () => ({ getConnectionInfo: () => ({ status: "starting", port: null, lanIp: "192.0.2.1" }) }),
   });
-
-  const result = await ipcMain.invoke("settings:mobile-connection-info");
-
-  assert.deepStrictEqual(result, {
-    status: "starting",
-    message: "LAN bridge is starting",
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-connection-info"), {
+    status: "starting", message: "LAN bridge is starting",
   });
   runtime.dispose();
 });
 
-test("mobile connection info returns a ready pair URL only when port and token are available", async () => {
-  const token = "0123456789abcdef0123456789abcdef";
+test("mobile connection info returns pairing fields without token", async () => {
+  const info = { status: "ok", port: 23334, lanIp: "192.0.2.1",
+    pairUrl: "http://192.0.2.1:23334/mobile/?pair=ABCD1234", pairCode: "ABCD1234", pairExpiresAt: 123456 };
   const { ipcMain, runtime } = createHarness({
-    getLanWsServer: () => ({
-      getPort: () => 23334,
-      getToken: () => token,
-    }),
+    getLanWsServer: () => ({ getConnectionInfo: () => ({ ...info, token: "must-not-leak" }) }),
   });
-
-  const result = await ipcMain.invoke("settings:mobile-connection-info");
-
-  assert.strictEqual(result.status, "ok");
-  assert.strictEqual(result.port, 23334);
-  assert.strictEqual(result.token, token);
-  assert.ok(result.pairUrl.includes("port=23334"));
-  assert.ok(result.pairUrl.includes(`token=${token}`));
-  assert.ok(!result.pairUrl.includes("port=null"));
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-connection-info"), info);
   runtime.dispose();
 });
 
@@ -933,7 +915,7 @@ test("settings:update cannot bypass the Feishu command-only boundary", async () 
   runtime.dispose();
 });
 
-test("mobile token and access IPC routes delegate only to locked controller commands", async () => {
+test("mobile pairing and access IPC routes delegate only to locked controller commands", async () => {
   const delegated = [];
   const { ipcMain, runtime } = createHarness({
     settingsController: {
@@ -946,19 +928,19 @@ test("mobile token and access IPC routes delegate only to locked controller comm
     },
   });
 
-  assert.deepStrictEqual(await ipcMain.invoke("settings:regenerate-mobile-token"), {
+  assert.deepStrictEqual(await ipcMain.invoke("settings:refresh-mobile-pair-code"), {
     status: "ok",
-    name: "mobilePreview.regenerateToken",
+    name: "mobilePreview.refreshPairCode",
   });
   assert.deepStrictEqual(await ipcMain.invoke("settings:reset-mobile-access"), {
     status: "ok",
     name: "mobilePreview.resetAccess",
   });
   assert.deepStrictEqual(delegated, [
-    ["mobilePreview.regenerateToken", {}],
+    ["mobilePreview.refreshPairCode", {}],
     ["mobilePreview.resetAccess", {}],
   ]);
-  assert.strictEqual(commandRegistry["mobilePreview.regenerateToken"].lockKey, "mobilePreview");
+  assert.strictEqual(commandRegistry["mobilePreview.refreshPairCode"].lockKey, "mobilePreview");
   assert.strictEqual(commandRegistry["mobilePreview.resetAccess"].lockKey, "mobilePreview");
   runtime.dispose();
 });
