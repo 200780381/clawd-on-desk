@@ -108,7 +108,7 @@ function toCoarseState(state) {
   return "idle";
 }
 
-// The snapshot only persists active states (idle/thinking/working/juggling);
+// The snapshot only persists active states (idle/thinking/working/executing/juggling);
 // finished + failed turns collapse to idle, so the badge recovers "done" /
 // "interrupted" for the image fallback. In the normal Clawd bridge path,
 // sleeping and one-shots are represented by the exact visual mapping instead.
