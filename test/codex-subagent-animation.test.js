@@ -176,7 +176,7 @@ describe("Codex delegated child presentation", () => {
     update(state, "SessionEnd", "sleeping");
     assert.equal(state.sessions.get(key("parent")).state, "idle");
     assert.equal(state.hasActiveCodexSubagents(), false);
-    assert.equal(state.getCurrentState(), "idle");
+    assert.equal(state.getCurrentState(), "attention");
     assert.equal(child(state, "a", "activity"), false);
     assert.equal(child(state, "new-child"), false);
     update(state, "UserPromptSubmit", "thinking");

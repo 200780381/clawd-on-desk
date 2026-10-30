@@ -1844,7 +1844,7 @@ class CodexLogMonitor {
     // parent's ordinary state callback/official-hook arbitration.
     const child = tracked.delegatedChild;
     const childPhase = observeDelegatedChild(child, key, recordTurnId || child?.turnId, parsedOccurredAt, this._delegatedNow());
-    if (childPhase && !tracked.backfilling) this._publishDelegatedChild(child, childPhase, parsedOccurredAt);
+    if (childPhase && !tracked.backfilling) this._publishDelegatedChild(child, childPhase, parsedOccurredAt, childPhase === "stop");
 
     // A new turn invalidates the previous checklist. A terminal response does
     // not imply that every declared plan step completed.
@@ -2460,7 +2460,7 @@ class CodexLogMonitor {
       owner.activeTurnId = null;
       owner.turnBoundaryOpen = false;
     }
-    this._releaseDelegatedChild(child);
+    this._releaseDelegatedChild(child, true);
     return true;
   }
 
@@ -2473,7 +2473,7 @@ class CodexLogMonitor {
       const now = this._delegatedNow();
       observeDelegatedChild(child, "event_msg:task_complete", child.turnId, now, now);
     }
-    this._releaseDelegatedChild(child);
+    this._releaseDelegatedChild(child, true);
   }
 
   endSubagentsOfParent(rawThreadId) {
@@ -2492,7 +2492,7 @@ class CodexLogMonitor {
     }
   }
 
-  _publishDelegatedChild(child, phase, occurredAt) {
+  _publishDelegatedChild(child, phase, occurredAt, terminal = false) {
     if (!child || !this._onSubagentActivity) return;
     const turnId = phase === "stop" ? child.publishedTurnId : child.turnId;
     const now = this._delegatedNow();
@@ -2511,15 +2511,17 @@ class CodexLogMonitor {
       child.publishedTurnId = turnId;
       this._publishedChildren.add(child);
     }
-    this._onSubagentActivity(child.parentId, { childId: child.childId, turnId, phase, occurredAt });
+    this._onSubagentActivity(child.parentId, { childId: child.childId, turnId, phase, occurredAt,
+      ...(terminal ? { terminal: true } : {}),
+    });
     if (phase === "stop") {
       child.publishedTurnId = null;
       this._publishedChildren.delete(child);
     }
   }
 
-  _releaseDelegatedChild(child) {
-    if (child && child.publishedTurnId) this._publishDelegatedChild(child, "stop", this._delegatedNow());
+  _releaseDelegatedChild(child, terminal = false) {
+    if (child && child.publishedTurnId) this._publishDelegatedChild(child, "stop", this._delegatedNow(), terminal);
   }
 
   _emitStateChange(tracked, state, event, extra = null) {
