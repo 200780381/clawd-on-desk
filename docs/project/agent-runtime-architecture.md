@@ -164,6 +164,55 @@ SessionEnd 分支删行、取消 exit probe、结束 automation lifecycle，但�
 SessionStart / UserPromptSubmit，被 fence 拒掉的旧回合开始不解除；SessionEnd 不清 turn fence。
 新增该 hook 需要用户在 Codex `/hooks` 里重新批准后才生效。
 
+本机 Codex 临时线程的导航：official hook 将已有的客户端临时线程判定作为可选布尔
+`codex_client_ephemeral` 上报（非空客户端 originator 环境、无 transcript；显式 CLI 身份除外），
+state / permission 路由仅接受本机 official Codex，映射为 `codexClientEphemeral`。
+该字段本身不授予隐藏，也不改变状态或会话分组；HUD/宠物的可选收起规则见下文。省略保留已知事实；没有正向
+持久化证据的 false 不清除 true，同线程的有效 official rollout 路径可确认已持久化。
+snapshot 签名包含它；旧审批/通知 fallback 不能覆盖 live 会话的事实或进程/面板目标。
+已确认临时线程不生成 `codex://threads` 恢复 URL；新 `codex-app` 路径仅 Windows/macOS，
+只激活经 OS 映像、真实父链和启动时间核验的现有 Codex GUI，不运行 resume / CLI / CMD、
+不按目录/标题/历史窗口缓存猜测。Windows 支持已验证的版本化 app-server → MSIX Codex GUI
+布局。macOS 从 GUI 直接父进程的外层 `.app/Contents/MacOS/<executable>` 解析应用包，
+app-server 的 `codex` 映像须位于同一外层包的 `Contents/Resources/` 内；支持内嵌
+`codex-cli/CodexCLI.app/Contents/MacOS/codex`，不硬编码外层应用名。
+GUI 必须是该外层包的直接主可执行路径，嵌套 helper 不能冒充 GUI；包外 CLI、
+非直接父链或无法验证的布局及 Linux 新路径不可聚焦。
+macOS 无 transcript 的真实 hook 可以只带 typed 临时标记而没有 originator；保留其
+`sourcePid=GUI` / `agentPid=app-server`，聚焦时用 agentPid 核验 server 映像与 GUI 直接父链，
+并要求 sourcePid 等于该 server 或核验出的 GUI。只有旧 sourcePid 已指向 server 时可缺 agentPid；
+不为导航改写 originator，因此不扩大 Desktop 去重或自动化身份。
+macOS 激活前再次核对 server/GUI 的 PID、出生时间、映像及直接父关系；一致后仅以单个
+argv 将已验证的外层包传给 `/usr/bin/open`，经 LaunchServices 提交激活，沿用 Dock 的
+重新打开语义以恢复最小化窗口，不依赖 System Events 或 Automation 授权。
+身份改变、复核或 `open` 失败直接返回失败，不降级到 URI、CLI 或粘贴；提交激活也不宣称前台已确认。
+激活应用不证明选择了具体侧边聊天，也不允许自动粘贴；已确认临时线程拒绝 queue，
+Direct Send 保持原生手动粘贴边界。未知的旧会话和持久化会话保留既有首次 URI 聚焦。
+
+`sessionHudHideCompletedCodexEphemeral` 与 `sessionHudHideActiveCodexEphemeral` 是两个独立、
+默认关闭的显示偏好，均不识别后台来源，也不结束任务。共同门槛是本机、明确
+`codexClientEphemeral=true` 且无持久 transcript；typed 标记可用于缺省 originator 的 macOS 行，
+显式 CLI / unknown originator、CLI / exec / mcp / internal / subagent 来源、headless、remote 与 WSL
+不按这些偏好收起。不能从标题、目录、缺少 rollout 或数据库记录自行推断临时线程。
+
+- 完成偏好只收起 idle、badge=Done 且最新事件为完成的行，取消/失败行不适用。
+  同会话 pending permission / 原生问题 / 通知卡始终可见。该规则也会收起已完成的普通侧边聊天，
+  但不屏蔽完成动画；单独开启它时，后续真实工作会恢复该行。
+- 活动偏好只收起 thinking/working 行，也可能包含真正运行的普通侧边聊天。
+  pending 权限/问题、最新请求或错误/中断提示、完成确认及已识别子代理活动不按此规则收起。
+  活动偏好不依赖完成偏好：只开活动偏好时，临时会话工作期间收起，完成后重新显示；
+  两者都开时，符合各自门槛的活动行与完成行都收起。清扫及其他强提示不属于活动过滤范围。
+
+HUD 原生几何、renderer、HUD 快捷导航和 HUD 统计统一消费独立 snapshot 字段
+`hudHiddenByPreference`，不复用 `hiddenFromHud`。活动偏好还复用同一 active-only 判定，
+为宠物状态和 SVG 层级生成只读会话投影；已收起的临时活动不再驱动思考/工作动画，
+也不能仅凭该活动唤醒被动 sleep/Mini 状态。已有子代理/待输入呈现投影须先应用再过滤，
+避免丢掉真实子代理和审批提示。完成偏好不进入宠物过滤。
+两者都不删除或改写 canonical 会话，不改变系统 keep-awake、Dashboard、Telegram、Discord、
+额度、审批决定、完成确认、小结或活动时间。开关变化经 controller/effect router 重发 snapshot，
+活动开关还在 mirror 更新后重新选择宠物呈现；pending 卡增删经合并微任务重算。
+关闭相应选项立即恢复仍存活且不被另一个选项收起的行。老 hook 没有 typed 临时标记时维持原显示。
+
 本机 Codex 会话标题：现有 JSONL monitor 每轮为已观察到生命周期的会话合并读取一次
 `session_index.jsonl`（沿用 512 KiB tail 上限）。新标题/改名以 `session_index:title`
 送入 `updateSessionMetadata(expectedAgentId: "codex")`，即使 rollout 未增长也刷新

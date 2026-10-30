@@ -184,6 +184,16 @@ function callStatePost(body, overrides = {}) {
   });
 }
 
+describe("internally derived execution hint", () => {
+  it("normalizes inbound executing before theme validation for any agent", async () => {
+    for (const agent_id of ["claude-code", "codex"]) {
+      const result = await callStatePost(JSON.stringify({ state: "executing", event: "PostToolUse",
+        agent_id, session_id: "raw-executing" }));
+      assert.equal(result.calls.updateSession[0][1], "working");
+    }
+  });
+});
+
 describe("Codex official plan progress", () => {
   const raw = "codex:official-plan";
   const body = (extra = {}) => JSON.stringify({
@@ -633,7 +643,7 @@ describe("server-route-state POST", () => {
       await post("Stop");
       const start = await post("PreToolUse", { prompt_id: "queued", tool_name: "Read", tool_use_id: "queued-tool" });
       assert.equal(start.statusCode, 200);
-      assert.equal(api.sessions.get(sid).state, "working");
+      assert.equal(api.sessions.get(sid).state, "executing");
       await post("PostToolUse", { prompt_id: "queued", tool_name: "Read", tool_use_id: "queued-tool" });
       await post("PostToolBatch", { prompt_id: "queued", tool_calls: [{ tool_use_id: "queued-tool" }] });
       assert.equal(api.sessions.get(sid).state, "thinking");

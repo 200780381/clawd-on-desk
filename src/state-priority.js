@@ -15,6 +15,7 @@ const STATE_PRIORITY = Object.freeze({
   attention: 5,
   carrying: 4,
   juggling: 4,
+  executing: 3.5,
   working: 3,
   thinking: 2,
   idle: 1,

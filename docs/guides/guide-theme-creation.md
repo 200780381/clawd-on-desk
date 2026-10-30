@@ -2,6 +2,8 @@
 
 Install a downloaded Clawd theme, or create your own desktop pet theme with custom characters and animations.
 
+`states.executing` is an optional animation for Claude Code's tool-call phase. Without it, Clawd reuses the complete `working` visual selection, including session tiers, animation overrides and applicable display hints/eye tracking. It does not add a new required asset or a synthetic theme binding. A theme that supplies `executing` gets its own Settings animation card; `timings.minDisplay.executing` defaults to the theme's working duration. Mini mode continues using `mini-working`.
+
 ## Install A Downloaded Theme
 
 A Clawd theme is a folder whose top level contains `theme.json`. The folder name is the theme id; the display name shown in Clawd comes from `theme.json.name`.

@@ -54,6 +54,8 @@ const FROZEN_KEYS = [
   "permissionAutomationUnattendedWarningDismissed",
   "quotaMergeSources",
   "sessionHudCleanupDetached",
+  "sessionHudHideCompletedCodexEphemeral",
+  "sessionHudHideActiveCodexEphemeral",
   "allowEdgePinning",
   "disableMiniMode",
   "freeRoam",
@@ -61,6 +63,7 @@ const FROZEN_KEYS = [
   "keepSizeAcrossDisplays",
   "fullscreenAutoHide",
   "openAtLogin",
+  "disableHardwareAcceleration",
   "hideBubbles",
   "bubbleFollowPet",
   "bubbleFollowPreference",
@@ -83,6 +86,7 @@ const EXPECTED_KEYS = {
     "showTray",
     "showDock",
     "openAtLogin",
+    "disableHardwareAcceleration",
   ],
   pet: [
     "size",
@@ -114,6 +118,8 @@ const EXPECTED_KEYS = {
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
     "sessionHudCleanupDetached",
+    "sessionHudHideCompletedCodexEphemeral",
+    "sessionHudHideActiveCodexEphemeral",
     "sessionHudShowQuota",
     "quotaRingDisplayMode",
     "quotaMergeSources",
@@ -447,6 +453,8 @@ function makeSnapshot(overrides = {}) {
     sessionHudShowElapsed: true,
     sessionHudShowContextUsage: true,
     sessionHudCleanupDetached: true,
+    sessionHudHideCompletedCodexEphemeral: false,
+    sessionHudHideActiveCodexEphemeral: false,
     sessionHudShowQuota: true,
     quotaRingDisplayMode: "used",
     quotaMergeSources: false,
@@ -533,7 +541,7 @@ function createHarness({
     },
     getPreviewSoundUrl: () => Promise.resolve(null),
     getMobileConnectionInfo: () => Promise.resolve({
-      status: "ok", port: 23334, token: "test-token", lanIp: "127.0.0.1",
+      status: "ok", port: 23334, pairCode: "ABCD1234", pairExpiresAt: 123456, lanIp: "127.0.0.1",
     }),
     getTextScaleContext: () => Promise.resolve({ percent: 100 }),
     getSizeContext: () => Promise.resolve({ ui: 50, synced: true, overMax: false }),
@@ -546,6 +554,8 @@ function createHarness({
   const context = {
     console,
     navigator: { platform },
+    setTimeout: () => 1,
+    clearTimeout() {},
     localStorage: localStorage || { getItem: () => null, setItem: () => {} },
     document,
     requestAnimationFrame: (cb) => {
@@ -733,7 +743,7 @@ describe("settings tab split", () => {
     assert.deepStrictEqual(sectionTitles(sessions), ["会话 HUD", "额度环与提醒", "高级"]);
     assert.deepStrictEqual(sectionRowLabels(sessions), [
       ["会话面板"],
-      ["启用", "显示状态标签", "显示 HUD 时间", "显示上下文用量", "自动清理已分离会话"],
+      ["启用", "显示状态标签", "显示 HUD 时间", "显示上下文用量", "自动清理已分离会话", "收起已完成的 Codex 临时会话", "收起活动中的 Codex 临时会话"],
       ["显示额度环", "额度显示方式", "在桌宠旁显示", "合并多机额度", "额度快用完时提醒", "提醒时机", "额度恢复时也提醒", "测试通知"],
       ["超时清理", "会话超时（空闲）", "工作超时", "Codex 活跃任务超时", "终端关闭后清理延迟"],
     ]);
@@ -762,6 +772,41 @@ describe("settings tab split", () => {
       ["语言", "文字大小"],
       ["开机自启", "在菜单栏显示", "在 Dock 显示", "低功耗 idle", "工作时阻止休眠"],
     ]);
+  });
+
+  it("offers a restart only while the GPU switch differs from launch (#1183)", async () => {
+    const general = createHarness({
+      tab: "general",
+      platform: "Win32",
+      snapshot: makeSnapshot({ disableHardwareAcceleration: false }),
+      settingsAPI: {
+        getStartupRenderState: () => Promise.resolve({ hardwareAccelerationDisabled: false }),
+      },
+    });
+    await general.settle();
+    const row = () => general.core.state.mountedControls.generalSwitches
+      .get("disableHardwareAcceleration").row;
+    const restartButton = () => row().querySelectorAll("button")
+      .find((button) => button.textContent === "Restart Clawd") || null;
+    assert.ok(general.getSwitch("disableHardwareAcceleration"));
+    assert.strictEqual(restartButton(), null);
+
+    general.apply("disableHardwareAcceleration", true);
+    await general.settle();
+    assert.ok(restartButton(), "a pending GPU change shows the restart button");
+    assert.ok(row().querySelectorAll(".row-desc-extra")
+      .some((node) => node.textContent === "Not applied yet. Restart Clawd to switch."));
+
+    restartButton().click();
+    await general.settle();
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(general.commandCalls.filter((call) => call.action === "restartClawd"))),
+      [{ action: "restartClawd", payload: { confirmed: true } }],
+    );
+
+    general.apply("disableHardwareAcceleration", false);
+    await general.settle();
+    assert.strictEqual(restartButton(), null, "switching back to the launch value hides it");
   });
 
   it("patches every independent sync branch in place for its own key", async () => {
@@ -957,6 +1002,8 @@ describe("settings tab split", () => {
       "sessionHudShowElapsed",
       "sessionHudShowContextUsage",
       "sessionHudCleanupDetached",
+      "sessionHudHideCompletedCodexEphemeral",
+      "sessionHudHideActiveCodexEphemeral",
     ]) {
       assert.strictEqual(sessions.getSwitch(key).classList.contains("disabled"), true, key);
     }
@@ -973,6 +1020,8 @@ describe("settings tab split", () => {
       "sessionHudShowElapsed",
       "sessionHudShowContextUsage",
       "sessionHudCleanupDetached",
+      "sessionHudHideCompletedCodexEphemeral",
+      "sessionHudHideActiveCodexEphemeral",
     ]) {
       assert.strictEqual(sessions.getSwitch(key).classList.contains("disabled"), false, key);
     }

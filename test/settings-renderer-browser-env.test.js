@@ -2062,12 +2062,14 @@ function loadPermissionsTabForTest({
     getMobileConnectionInfo: () => Promise.resolve({
       status: "ok",
       port: 23380,
-      token: "tok",
+      pairCode: "ABCD1234",
+      pairExpiresAt: 123456,
       lanIp: "192.168.0.23",
-      pairUrl: "http://192.168.0.23:23380/mobile/?token=tok",
+      pairUrl: "http://192.168.0.23:23380/mobile/?pair=ABCD1234",
     }),
-    regenerateMobileToken: () => {
-      commands.push({ name: "regenerateMobileToken" });
+    getMobileDevices: () => Promise.resolve({ status: "ok", devices: [], legacyActive: false }),
+    refreshMobilePairCode: () => {
+      commands.push({ name: "refreshMobilePairCode" });
       return Promise.resolve({ status: "ok" });
     },
     resetMobileAccess: () => {
@@ -4103,7 +4105,7 @@ describe("settings renderer browser environment", () => {
     });
     const parent = new FakeElement("main");
     core.tabs.animOverrides.render(parent, core);
-    assert.strictEqual(parent.querySelector(".anim-override-trigger").textContent, "PreToolUse (2+ sessions)");
+    assert.strictEqual(parent.querySelector(".anim-override-trigger").textContent, "Agent activity / tool results (2+ sessions)");
   });
 
   it("loads browser scripts in dependency order and keeps CommonJS helpers out of settings.html", () => {
@@ -9228,7 +9230,7 @@ describe("settings renderer browser environment", () => {
     );
   });
 
-  it("renders the LAN card as one header switch, one group and one footer", async () => {
+  it("renders pairing and paired-device groups below the LAN card controls", async () => {
     let confirmResult = false;
     const harness = loadPermissionsTabForTest({
       subtab: "lan",
@@ -9246,6 +9248,7 @@ describe("settings renderer browser environment", () => {
     assert.equal(card.querySelector(".settings-detail-group-rows .switch").classList.contains("disabled"), true);
     assert.equal(card.querySelector(".channel-foot-hint").textContent, "mobilePairingHint");
     assert.equal(card.querySelector(".mobile-conn-row"), null);
+    assert.equal(card.querySelectorAll("div").some((node) => node.id === "mobile-devices"), false);
     const groupingLabels = card.querySelectorAll(".settings-detail-group-label").map((label) => label.textContent);
     assert.deepStrictEqual(groupingLabels, ["mobileGroupPhoneShows"]);
     assert.equal(groupingLabels.includes("mobileGroupPairing"), false);
@@ -9258,19 +9261,20 @@ describe("settings renderer browser environment", () => {
     await Promise.resolve();
     await Promise.resolve();
     enabled.render();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
     card = enabled.content.querySelector(".mobile-channel-card");
     assert.equal(card.querySelector(".settings-status-text").textContent, "mobileStatusRunning");
     assert.deepStrictEqual(
       card.querySelectorAll(".settings-detail-group-label").map((label) => label.textContent),
-      ["mobileGroupPhoneShows", "mobileGroupPairing"],
+      ["mobileGroupPhoneShows", "mobileGroupPairing", "mobileGroupDevices"],
     );
+    const deviceList = card.querySelectorAll("div").find((node) => node.id === "mobile-devices");
+    assert.equal(deviceList.textContent, "mobileDevicesEmpty");
     const rows = card.querySelectorAll(".mobile-conn-row");
-    assert.equal(rows.length, 4);
+    assert.equal(rows.length, 5);
     assert.deepStrictEqual(
       rows.map((row) => row.querySelector(".row-label").textContent),
-      ["mobileConnLanIp", "mobileConnPort", "mobileConnToken", "mobileConnUrl"],
+      ["mobileConnLanIp", "mobileConnPort", "mobileConnPairCode", "mobileConnPairExpires", "mobileConnUrl"],
     );
     const copy = rows[0].querySelector(".mobile-copy");
     copy.dispatchEvent({ type: "click" });
@@ -9278,23 +9282,53 @@ describe("settings renderer browser environment", () => {
     assert.deepStrictEqual(enabled.clipboardWrites, ["192.168.0.23"]);
     assert.equal(copy.textContent, "mobileCopied");
 
-    const regenerate = card.querySelector(".mobile-regenerate");
+    const refresh = card.querySelector(".mobile-refresh-pair-code");
     const reset = card.querySelector(".mobile-reset");
-    assert.ok(regenerate && reset);
+    assert.ok(refresh && reset);
     assert.equal(reset.classList.contains("danger"), true);
-    regenerate.dispatchEvent({ type: "click" });
     reset.dispatchEvent({ type: "click" });
-    assert.equal(enabled.commands.some((call) => call.name === "regenerateMobileToken"), false);
+    assert.equal(enabled.commands.some((call) => call.name === "refreshMobilePairCode"), false);
     assert.equal(enabled.commands.some((call) => call.name === "resetMobileAccess"), false);
 
     confirmResult = true;
-    regenerate.dispatchEvent({ type: "click" });
+    refresh.dispatchEvent({ type: "click" });
     reset.dispatchEvent({ type: "click" });
     await Promise.resolve();
-    assert.equal(enabled.commands.some((call) => call.name === "regenerateMobileToken"), true);
+    assert.equal(enabled.commands.some((call) => call.name === "refreshMobilePairCode"), true);
     assert.equal(enabled.commands.some((call) => call.name === "resetMobileAccess"), true);
   });
 
+
+  it("offers Copy for pairing values except the expiry time", async () => {
+    const harness = loadPermissionsTabForTest({
+      subtab: "lan",
+      snapshot: { mobilePreviewEnabled: true },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    harness.render();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const rows = harness.content.querySelectorAll(".mobile-conn-row");
+    assert.equal(rows.length, 5);
+    const copiedValues = [];
+    for (const row of rows) {
+      const label = row.querySelector(".row-label").textContent;
+      const buttons = row.querySelectorAll(".mobile-copy");
+      if (label === "mobileConnPairExpires") {
+        assert.equal(buttons.length, 0, "expiry time should have no Copy button");
+      } else {
+        assert.equal(buttons.length, 1, `${label} should retain its Copy button`);
+        copiedValues.push(row.querySelector(".mobile-conn-value").textContent);
+        buttons[0].dispatchEvent({ type: "click" });
+        await Promise.resolve();
+        assert.equal(buttons[0].textContent, "mobileCopied");
+      }
+    }
+    assert.deepStrictEqual(harness.clipboardWrites, copiedValues);
+    assert.equal(copiedValues.length, 4);
+  });
 
   it("gates the Telegram test footer on ready, runtime and native readiness", async () => {
     async function renderTelegram({ allowedTgUserId = "123456789", tokenConfigured = true, state, migration, testCommand }) {

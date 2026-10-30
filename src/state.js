@@ -2,6 +2,7 @@
 // Extracted from main.js L158-240, L299-505, L544-960
 
 let screen;
+const { mergeCodexClientEphemeral } = require("./codex-session-persistence");
 try { ({ screen } = require("electron")); } catch { screen = null; }
 const { normalizePlanProgress } = require("../hooks/codex-plan-progress");
 const {
@@ -13,6 +14,7 @@ const {
 const {
   buildStateBindings,
   createStableVisualPicker,
+  getVisualState,
   hasOwnVisualFiles: hasOwnVisualFilesWithBindings,
   resolveVisualBinding: resolveVisualBindingWithBindings,
   getSvgOverride: getSvgOverrideWithDeps,
@@ -37,6 +39,7 @@ const {
   buildSessionSnapshot: buildSessionSnapshotFromSessions,
   getActiveSessionAliasKeys: getActiveSessionAliasKeysFromSessions,
   sessionSnapshotSignature,
+  shouldHideActiveCodexEphemeral,
   AWAITING_ACTIVITY_AGENTS,
 } = require("./state-session-snapshot");
 const { getAgentIconUrl } = require("./state-agent-icons");
@@ -49,6 +52,7 @@ const { ANTIGRAVITY_QUOTA_FIELDS } = require("../hooks/antigravity-context-usage
 const { CLAUDE_QUOTA_FIELDS } = require("../hooks/claude-rate-limits");
 const { getClaudeStopDisposition } = require("../hooks/claude-stop-disposition");
 const { createClaudeToolPhaseLedger } = require("./claude-tool-phase");
+const { classifyPermissionInteraction, INTERACTION_INTENT } = require("./permission-automation-policy");
 const { getStartupRecoveryProcessNames } = require("../agents/registry");
 const { normalizeCodexTurnId } = require("./codex-turn-id");
 const { TERMINAL_EVENTS: CODEX_TERMINAL_EVENTS } = require("./codex-turn-fence");
@@ -642,7 +646,8 @@ function refreshTheme() {
   if (theme.miniMode && theme.miniMode.states) {
     Object.assign(STATE_SVGS, theme.miniMode.states);
   }
-  MIN_DISPLAY_MS = theme.timings.minDisplay;
+  MIN_DISPLAY_MS = { ...theme.timings.minDisplay,
+    executing: theme.timings.minDisplay.executing ?? theme.timings.minDisplay.working ?? 0 };
   AUTO_RETURN_MS = theme.timings.autoReturn;
   DEEP_SLEEP_TIMEOUT = theme.timings.deepSleepTimeout;
   YAWN_DURATION = theme.timings.yawnDuration;
@@ -825,6 +830,7 @@ function hasOwnVisualFiles(state) {
 }
 
 function resolveVisualBinding(state) {
+  if (state === "executing") return getSvgOverride(state);
   return resolveVisualBindingWithBindings(state, STATE_BINDINGS);
 }
 
@@ -915,7 +921,7 @@ function applyState(state, svgOverride, options = {}) {
     // and later perform the hand-back.
     if (state === "notification") return applyState("mini-alert", undefined, applyOptions);
     if (state === "attention") return applyState("mini-happy", undefined, applyOptions);
-    if (state === "working" || state === "thinking" || state === "juggling") {
+    if (state === "working" || state === "executing" || state === "thinking" || state === "juggling") {
       if (hasOwnVisualFiles("mini-working")) return applyState("mini-working", undefined, applyOptions);
       return;
     }
@@ -927,7 +933,7 @@ function applyState(state, svgOverride, options = {}) {
 
   previousState = currentState;
   currentState = state;
-  stableVisualPicker.retainOnly(state);
+  stableVisualPicker.retainOnly(getVisualState(state, STATE_SVGS));
   displayRevision += 1;
   currentVisualSource = applyOptions.settingsPreview === true
     ? VISUAL_SOURCE_SETTINGS_PREVIEW
@@ -1261,6 +1267,10 @@ function buildSessionSnapshot() {
     resolveAgentDisplayName: ctx.resolveAgentDisplayName,
     statePriority: STATE_PRIORITY,
     sessionHudCleanupDetached: ctx.sessionHudCleanupDetached === true,
+    sessionHudHideCompletedCodexEphemeral: ctx.sessionHudHideCompletedCodexEphemeral === true,
+    sessionHudHideActiveCodexEphemeral: ctx.sessionHudHideActiveCodexEphemeral === true,
+    pendingPermissionSessionIds: new Set((ctx.pendingPermissions || [])
+      .filter(Boolean).map((entry) => entry.sessionId)),
     focusHostPlatform: ctx.focusHostPlatform || process.platform,
     isProcessAlive,
     accountQuota: accountQuota.snapshot({ mergeSources: ctx.quotaMergeSources === true }),
@@ -1858,6 +1868,7 @@ function updateCodexInitializationMetadata(sessionId, opts = {}) {
     provider: opts.provider || session.provider || null,
     codexOriginator: opts.codexOriginator || session.codexOriginator || null,
     codexSource: opts.codexSource || session.codexSource || null,
+    codexClientEphemeral: mergeCodexClientEphemeral(session, opts),
     ghosttyTerminalId: normalizeGhosttyTerminalId(opts.ghosttyTerminalId) || session.ghosttyTerminalId || null,
     transcriptPath: normalizeTranscriptPath(opts.transcriptPath) || session.transcriptPath || null,
     sessionAutomationIdentity: normalizeSessionAutomationIdentity(opts.sessionAutomationIdentity)
@@ -2289,6 +2300,15 @@ function observeClaudeToolPhase(sessionId, event, opts = {}) {
     confirmedNativeChildEnd });
 }
 
+function isLocalClaudeExecutionSource(existing, opts) {
+  return opts.agentId === "claude-code" && opts.agentIdDefaulted !== true
+    && (!existing || existing.agentId === "claude-code")
+    && (opts.profileId || (existing && existing.profileId) || "local") === "local"
+    && !(opts.host || (existing && existing.host))
+    && !(opts.wslDistro || (existing && existing.wslDistro))
+    && !(opts.headless || (existing && existing.headless)) && !opts.subagentId;
+}
+
 function updateSession(sessionId, state, event, opts = {}) {
   // The ledger gates the new batch hint, not ordinary message/lifecycle work.
   // Proven old tools may annotate existing metadata without changing phase,
@@ -2328,6 +2348,12 @@ function updateSession(sessionId, state, event, opts = {}) {
   // Keep the model phase as the logical resume state while the error cue runs.
   if (phase.errorCue) opts = { ...opts, preserveState: true };
   if (phase.thinking && !phase.errorCue && event !== "SubagentStart") state = "thinking";
+  if (state === "working" && event === "PreToolUse" && phase.freshStart === true
+    && !ctx.doNotDisturb && isLocalClaudeExecutionSource(sessions.get(sessionId), opts)
+    && classifyPermissionInteraction({ agentId: "claude-code", toolName: opts.toolName }).intent
+      === INTERACTION_INTENT.TOOL_APPROVAL) {
+    state = "executing";
+  }
   const suppliedRecapOccurredAt = opts && opts.recapOccurredAt;
   const recapTimestampTrusted = Number.isSafeInteger(suppliedRecapOccurredAt) && suppliedRecapOccurredAt >= 0;
   const recapOccurredAt = recapTimestampTrusted
@@ -2497,7 +2523,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     ) return;
     const hasCodexPermissionMetadata = !!(
       sourcePid || wtHwnd || agentPid || (pidChain && pidChain.length) || cwd || host || wslDistro ||
-      model || provider || codexOriginator || codexSource || platform || ghosttyTerminalId ||
+      model || provider || codexOriginator || codexSource || Object.hasOwn(opts, "codexClientEphemeral") || platform || ghosttyTerminalId ||
       tmuxSocket || tmuxClient || orcaPaneKey || herdrPaneId
     );
     const shouldPersistCodexPermissionFocus = permAgentId === "codex" && (
@@ -2585,6 +2611,7 @@ function updateSession(sessionId, state, event, opts = {}) {
         provider: srcProvider,
         codexOriginator: srcCodexOriginator,
         codexSource: srcCodexSource,
+        codexClientEphemeral: mergeCodexClientEphemeral(existing, opts),
         ghosttyTerminalId: srcGhosttyTerminalId,
         sessionTitle: srcSessionTitle,
         sessionTitleFromPrompt: srcSessionTitleFromPrompt,
@@ -2763,7 +2790,8 @@ function updateSession(sessionId, state, event, opts = {}) {
   const incomingToolName = normalizeToolName(toolName);
   const srcToolName = incomingToolName || (existing && existing.lastToolName) || null;
   const srcTranscriptPath = normalizeTranscriptPath(transcriptPath) || (existing && existing.transcriptPath) || null;
-  const srcResumeState = (existing && existing.resumeState) || null;
+  const srcResumeState = existing && existing.resumeState === "executing"
+    ? "working" : (existing && existing.resumeState) || null;
   const isSubagentStart = event === "SubagentStart" || event === "subagentStart";
   const isSubagentStop = event === "SubagentStop" || event === "subagentStop";
   const normalizedSubagentId = normalizeChildId(subagentId);
@@ -3058,7 +3086,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     opencodeAttachUrl === undefined && existing && existing.opencodeAttachSource === attachSource
       ? existing.opencodeAttachUrl : opencodeAttachUrl
   ) : null;
-  const base = { opencodeAttachUrl: attachUrl, opencodeAttachSource: attachSource, sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, planProgress: srcPlanProgress, planProgressSource: srcPlanProgressSource, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
+  const base = { opencodeAttachUrl: attachUrl, opencodeAttachSource: attachSource, sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, codexClientEphemeral: mergeCodexClientEphemeral(existing, opts), dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, planProgress: srcPlanProgress, planProgressSource: srcPlanProgressSource, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
   // Desktop apps can reopen a previous conversation on launch, so SessionStart
   // only means "opened" — not "used". Any other lifecycle event is a real action
   // and clears the marker. Only the listed agents carry the field; others are
@@ -3111,7 +3139,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       // #862: one stop does not mean the work is over. Restoring on the first
       // stop dropped the pet back to typing while other subagents were still
       // running; hold juggling until the last one reports in.
-      const resumeState = existing.resumeState || null;
+      const resumeState = srcResumeState;
       if (resumeState) {
         const dh = pickDisplayHint(resumeState, existing, displayHint);
         sessions.set(sessionId, { state: resumeState, updatedAt: Date.now(), displayHint: dh, ...base, resumeState: null });
@@ -3267,13 +3295,13 @@ function updateSession(sessionId, state, event, opts = {}) {
     if (isSubagentStart) {
       const dh = pickDisplayHint(state, existing, displayHint);
       const resumeState = !hadSubagentHoldBefore && existing && existing.state !== "juggling"
-        ? existing.state
+        ? (existing.state === "executing" ? "working" : existing.state)
         : srcResumeState;
       sessions.set(sessionId, { state, updatedAt: Date.now(), displayHint: dh, ...base, resumeState });
       debugSession(`subagent-start store ${describeSession(sessionId, sessions.get(sessionId))}`);
     } else if (
       hasSubagentHoldEvidence(subagentTracker)
-      && (state === "working" || state === "thinking" || state === "idle" || state === "juggling")
+      && (state === "working" || state === "executing" || state === "thinking" || state === "idle" || state === "juggling")
     ) {
       sessions.set(sessionId, {
         state: "juggling",
@@ -3467,6 +3495,12 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (srcAgentId === "codex" && srcHeadless && codexSubagentPresentation.hasAny()
     && (isSettingsPreviewVisual() || (ONESHOT_STATES.has(currentState)
       && getStatePriority(currentState, STATE_PRIORITY) > getStatePriority("juggling", STATE_PRIORITY)))) return;
+  // A hidden temporary request must not reset an existing sleep/idle animation
+  // merely by resolving to idle. Canonical lifecycle and the snapshot below
+  // still advance, including keep-awake and recap consumers.
+  if (shouldHideActiveCodexEphemeral(sessionId, sessions.get(sessionId), getPetPresentationOptions())
+    && isPassivePetPresentation()
+    && resolveDisplayState() === "idle") return;
   const displayState = resolveDisplayState();
   setState(displayState, getSvgOverride(displayState));
   } finally {
@@ -3688,10 +3722,31 @@ function takeTrailingPermissionRequest(session) {
 
 function clearPermissionNotification(sessionId, options = {}) {
   const id = typeof sessionId === "string" ? sessionId : "";
-  if (!id || options.hasPendingForSession === true) return false;
+  if (!id) return false;
 
   let changed = false;
   const session = sessions.get(id);
+  // PermissionRequest has no reliable Claude tool id. A non-allow can only
+  // invalidate the session's presentation hint, not settle a specific tool.
+  // Record the suppression even before the first async Pre has arrived.
+  if (options.permissionSource && isLocalClaudeExecutionSource(session, options.permissionSource)
+    && options.behavior !== "allow") {
+    claudeToolPhases.suppressExecution(id);
+    if (session && session.state === "executing") {
+      session.state = "working";
+      changed = true;
+    }
+  }
+  if (options.hasPendingForSession === true) {
+    if (changed) {
+      // Invalidate the logical hint immediately, but keep the remaining
+      // approval's ordinary notification hold instead of cutting it short.
+      const resolved = resolveDisplayState();
+      setState(resolved, getSvgOverride(resolved), resolveSoundOptionsForState(resolved));
+      emitSessionSnapshot({ force: true });
+    }
+    return changed;
+  }
   if (session) {
     const trailingPermission = takeTrailingPermissionRequest(session);
     if (session.state === "notification") {
@@ -3707,7 +3762,7 @@ function clearPermissionNotification(sessionId, options = {}) {
       // A stale sweep may downgrade a Codex session while the approval is
       // still pending. Once the permission resolves, restore the work state
       // recorded at request time so long commands do not stay visually idle.
-      session.state = trailingPermission.state;
+      session.state = trailingPermission.state === "executing" ? "working" : trailingPermission.state;
       changed = true;
     }
     if (trailingPermission) {
@@ -4070,8 +4125,42 @@ function clearCodexSubagentActivities() {
   return changed;
 }
 
+function getPetPresentationOptions() {
+  return {
+    sessionHudHideActiveCodexEphemeral: ctx.sessionHudHideActiveCodexEphemeral === true,
+    pendingPermissionSessionIds: new Set((ctx.pendingPermissions || []).filter(Boolean).map(entry => entry.sessionId)),
+  };
+}
+
+// Accept a prior projection so child/pending-attention overlays can be applied
+// first. Neither this map nor its entries are written back to canonical state.
+function getPetPresentationSessions(source = sessions) {
+  const options = getPetPresentationOptions();
+  if (!options.sessionHudHideActiveCodexEphemeral) return source;
+  let projected = source;
+  for (const [id, session] of source) {
+    if (!shouldHideActiveCodexEphemeral(id, session, options)) continue;
+    if (projected === source) projected = new Map(source);
+    projected.delete(id);
+  }
+  return projected;
+}
+
+function isPassivePetPresentation() {
+  return SLEEP_SEQUENCE.has(currentState)
+    || ["mini-idle", "mini-sleep", "mini-peek", "mini-peek-hold", "mini-sleep-peek"].includes(currentState);
+}
+
+function refreshPetPresentation() {
+  const resolved = resolveDisplayState();
+  if (resolved === "idle" && isPassivePetPresentation()) return;
+  setState(resolved, getSvgOverride(resolved));
+}
+
+// Child/pending-attention projection first, then the strict temporary-chat
+// filter, so a parent kept juggling or waiting is never collapsed off the pet.
 function resolveDisplayState() {
-  return resolveDisplayStateFromSessions(codexSubagentPresentation.project(getCodexPendingAttentionIds()), {
+  return resolveDisplayStateFromSessions(getPetPresentationSessions(codexSubagentPresentation.project(getCodexPendingAttentionIds())), {
     statePriority: STATE_PRIORITY,
     compacting: hasCodexCompactionVisual(),
     permissionLocked: hasPermissionAnimationLock(),
@@ -4101,7 +4190,7 @@ function getSvgOverride(state) {
     updateVisualSvgOverride,
     idleFollowSvg: SVG_IDLE_FOLLOW,
     idleDefaultVisual: typeof ctx.getIdleVisualChoice === "function" ? ctx.getIdleVisualChoice() : null,
-    sessions: codexSubagentPresentation.project(getCodexPendingAttentionIds()),
+    sessions: getPetPresentationSessions(codexSubagentPresentation.project(getCodexPendingAttentionIds())),
     displayHintMap: DISPLAY_HINT_MAP,
     theme,
     stateSvgs: STATE_SVGS,
@@ -4250,7 +4339,7 @@ return {
   // Read-only, unmerged account windows for source-specific alert deduplication.
   getAccountQuotaSnapshot: () => accountQuota.snapshot({ mergeSources: false }),
   startStaleCleanup, stopStaleCleanup, startWakePoll, stopWakePoll,
-  getSvgOverride, cleanStaleSessions, startStartupRecovery, refreshTheme,
+  getSvgOverride, getPetPresentationSessions, refreshPetPresentation, cleanStaleSessions, startStartupRecovery, refreshTheme,
   detectRunningAgentProcesses, buildSessionSnapshot,
   emitSessionSnapshot, broadcastSessionSnapshot, getLastSessionSnapshot,
   getActiveSessionAliasKeys,

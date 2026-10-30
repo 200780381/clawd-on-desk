@@ -21,7 +21,8 @@ let sessionActionFeedbackTimer = null;
 const hudEl = document.getElementById("hud");
 
 function isHudSession(session) {
-  return !!session && !session.headless && session.state !== "sleeping" && !session.hiddenFromHud;
+  return !!session && !session.headless && session.state !== "sleeping"
+    && !session.hiddenFromHud && !session.hudHiddenByPreference;
 }
 
 function t(key) {
@@ -111,6 +112,7 @@ function orderedHudSessions(currentSnapshot) {
 const STATE_CHIP_MAP = {
   thinking: { key: "sessionThinking", cls: "chip-thinking" },
   working: { key: "sessionWorking", cls: "chip-working" },
+  executing: { key: "sessionExecuting", cls: "chip-working" },
   juggling: { key: "sessionJuggling", cls: "chip-juggling" },
 };
 
