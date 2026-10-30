@@ -14,6 +14,8 @@ const {
 const { digestCodexTurnId, normalizeCodexTurnId } = require("./codex-turn-id");
 const createCodexTurnFence = require("./codex-turn-fence");
 const createCodexOfficialActivity = require("./codex-official-activity");
+const { normalizeDelegatedThread } = require("../agents/codex-delegated-child");
+const { CODEX_LOCAL_WORKING_STALE_FLOOR_MS: CHILD_ACTIVITY_TTL_MS } = require("./state-stale-cleanup");
 const { createQoderSessionTitleTracker, QODER_TITLE_EVENTS } = require("./qoder-session-title");
 const { createWorkBuddySessionTitleTracker } = require("./workbuddy-session-title");
 
@@ -91,6 +93,46 @@ function createAgentRuntimeMain(options = {}) {
   const getPermissionRuntime = options.getPermissionRuntime || (() => null);
   const isAgentEnabled = options.isAgentEnabled || (() => true);
   const updateSession = options.updateSession || (() => {});
+  // A startup scan may encounter a child before its already-active parent.
+  // Keep only live, fenced starts; this ledger never creates a session.
+  const pendingCodexChildren = new Map();
+
+  function dropClosedCodexChildActivity(activity) {
+    const childId = normalizeDelegatedThread(activity?.childId);
+    const turnId = normalizeCodexTurnId(activity?.turnId);
+    if (!childId || !turnId) return false;
+    const childKey = resolveSessionIdentity(childId, "local").sessionId;
+    if (!codexTurnFence.getSnapshot(childKey)?.closedTurnIds.includes(turnId)) return false;
+    // An official terminal may arrive before this rollout is discovered, or
+    // while its parent is still pending. Reuse the child's closed-turn fence;
+    // never compare its turn with the parent's independently owned turn.
+    codexMonitor?.endSubagentTurn?.(childId, turnId);
+    return true;
+  }
+
+  function prunePendingCodexChildren() {
+    for (const [parentId, children] of pendingCodexChildren) {
+      for (const [childId, activity] of children) {
+        if (now() - activity.occurredAt > CHILD_ACTIVITY_TTL_MS) children.delete(childId);
+      }
+      if (!children.size) pendingCodexChildren.delete(parentId);
+    }
+  }
+
+  function flushPendingCodexChildren(parentId) {
+    prunePendingCodexChildren();
+    const state = getStateRuntime();
+    const parent = state?.sessions?.get(parentId);
+    if (!isAgentEnabled("codex") || loadCodexAgent().capabilities?.subagent !== true
+      || !isLocalCodexSessionRecord(parent) || parent.headless || parent.platform === "wsl"
+      || hasCodexSessionEndTombstone(parentId)) return;
+    const children = pendingCodexChildren.get(parentId);
+    if (!children) return;
+    pendingCodexChildren.delete(parentId);
+    for (const activity of children.values()) {
+      if (!dropClosedCodexChildActivity(activity)) state.updateCodexSubagentActivity?.(parentId, activity);
+    }
+  }
 
   // ── Local WorkBuddy archive/delete retirement (#655) ────────────────────
   // WorkBuddy changes a conversation's lifecycle only in workbuddy.db, without
@@ -301,6 +343,7 @@ function createAgentRuntimeMain(options = {}) {
   let codexArchiveTracker = options.codexArchiveTracker || null;
 
   function clearCodexSessionTracking(sessionId) {
+    pendingCodexChildren.delete(sessionId);
     if (codexTurnFence && typeof codexTurnFence.clearSession === "function") {
       codexTurnFence.clearSession(sessionId);
     }
@@ -553,7 +596,11 @@ function createAgentRuntimeMain(options = {}) {
       && opts.hookSource === "codex-official"
       && opts.profileId === "local"
       && !opts.host
-      && !opts.wslDistro);
+      && !opts.wslDistro
+      && String(opts.platform || "").trim().toLowerCase() !== "wsl");
+    const officialRawThreadId = normalizeDelegatedThread(opts.rawSessionId);
+    if (isLocalOfficialCodexEvent && officialRawThreadId
+      && resolveSessionIdentity(officialRawThreadId, "local").sessionId !== sessionId) return false;
     if (isLocalOfficialCodexEvent) {
       if (opts.codexInternalThread === CODEX_INTERNAL_THREAD_AMBIENT_SUGGESTIONS) {
         // Hidden ambient-suggestion work: remember the sid so later official
@@ -576,7 +623,7 @@ function createAgentRuntimeMain(options = {}) {
     }
     if (opts && opts.agentId === "codex" && opts.hookSource === "codex-official") {
       markCodexOfficialHookSession(sessionId, opts.turnId);
-      if (opts.profileId === "local") {
+      if (isLocalOfficialCodexEvent) {
         recordCodexTurnIdCapture(sessionId, "official", event, opts.turnId);
         const fenceDecision = codexTurnFence.observe({
           sessionId,
@@ -604,6 +651,9 @@ function createAgentRuntimeMain(options = {}) {
     }
     const stateRuntime = getStateRuntime();
     const sessions = stateRuntime && stateRuntime.sessions;
+    const officialChildTerminalId = isLocalOfficialCodexEvent && (event === "Stop" || event === "Interrupt")
+      ? normalizeDelegatedThread(opts.rawSessionId || sessions?.get(sessionId)?.rawSessionId)
+      : null;
     const sessionBeforeUpdate = event === "SessionEnd" && sessions && typeof sessions.get === "function"
       ? sessions.get(sessionId)
       : null;
@@ -616,6 +666,28 @@ function createAgentRuntimeMain(options = {}) {
     const result = preserveCodexInitialization
       ? stateRuntime.updateCodexInitializationMetadata(sessionId, opts)
       : updateSession(sessionId, state, event, opts);
+    if (officialChildTerminalId
+      && resolveSessionIdentity(officialChildTerminalId, "local").sessionId === sessionId) {
+      // The official turn fence above has accepted this terminal. The monitor
+      // also matches the child's own open turn before releasing its parent's
+      // projection; a parent's ordinary Stop never ends its running children.
+      codexMonitor?.endSubagentTurn?.(officialChildTerminalId, opts.turnId);
+    }
+    if (opts.agentId === "codex" && (opts.profileId || "local") === "local" && !opts.host && !opts.wslDistro) {
+      if (event === "SessionEnd") {
+        pendingCodexChildren.delete(sessionId);
+        const endedChildId = normalizeDelegatedThread(opts.rawSessionId || sessionBeforeUpdate?.rawSessionId);
+        if (endedChildId) codexMonitor?.endSubagent?.(endedChildId);
+        if (endedChildId) codexMonitor?.endSubagentsOfParent?.(endedChildId);
+        if (endedChildId) {
+          for (const [parentId, children] of pendingCodexChildren) {
+            children.delete(endedChildId);
+            if (!children.size) pendingCodexChildren.delete(parentId);
+          }
+        }
+      }
+      else flushPendingCodexChildren(sessionId);
+    }
     // Tombstone only a local Codex row this official SessionEnd actually
     // deleted. A row kept alive for a replyable completion mapping (state.js
     // treats that end as a no-op) must not be tombstoned.
@@ -762,6 +834,8 @@ function createAgentRuntimeMain(options = {}) {
   function stopMonitorForAgent(agentId) {
     if (agentId !== "codex") return;
     if (codexMonitor) codexMonitor.stop();
+    pendingCodexChildren.clear();
+    getStateRuntime()?.clearCodexSubagentActivities?.();
     stopCodexArchiveTracker();
   }
 
@@ -1023,9 +1097,44 @@ function createAgentRuntimeMain(options = {}) {
         }
         clearCodexNotifyBubbles(sessionId, `codex-state-transition:${state}`);
         updateSession(sessionId, state, event, sessionOptions);
+        flushPendingCodexChildren(sessionId);
         annotateCodexAccountQuota();
       }, {
         classifier: localCodexSubagentClassifier,
+        onSubagentActivity: (rawParentId, activity) => {
+          const releasing = activity?.phase === "stop";
+          // Teardown must release its previously admitted evidence even after
+          // disable/dispose has closed the admission gate.
+          if (!releasing && (disposed || !isAgentEnabled("codex") || codexAgent.capabilities?.subagent !== true)) return;
+          if (!releasing && dropClosedCodexChildActivity(activity)) return;
+          const parent = resolveSessionIdentity(rawParentId, "local");
+          const state = getStateRuntime();
+          const session = state?.sessions?.get(parent.sessionId);
+          prunePendingCodexChildren();
+          const pending = pendingCodexChildren.get(parent.sessionId);
+          if (activity.phase === "stop") {
+            if (pending?.get(activity.childId)?.turnId === activity.turnId) pending.delete(activity.childId);
+            if (pending && !pending.size) pendingCodexChildren.delete(parent.sessionId);
+          }
+          if (!releasing && (hasCodexSessionEndTombstone(parent.sessionId)
+            || shouldSuppressCodexArchive(parent.rawSessionId, { agentId: "codex", profileId: "local" }))) return;
+          if (!session) {
+            const prior = pending?.get(activity.childId);
+            if (activity.phase === "start" || (activity.phase === "activity" && prior?.turnId === activity.turnId)) {
+              if ((!pending && pendingCodexChildren.size >= 200) || (pending?.size >= 200 && !prior)) return;
+              const children = pending || new Map();
+              // Preserve start semantics until the actual parent is admitted.
+              children.set(activity.childId, { ...activity, phase: "start" });
+              pendingCodexChildren.set(parent.sessionId, children);
+            }
+            return;
+          }
+          if (!isLocalCodexSessionRecord(session) || session.headless || session.platform === "wsl") return;
+          // This callback has already passed the monitor's child-own lifecycle
+          // fence. It must never observe the child's turn under the parent id,
+          // clear a parent bubble, or carry child plan/process/recap metadata.
+          state.updateCodexSubagentActivity?.(parent.sessionId, activity);
+        },
         onActivity: (sid, activityState, _event, activity) => {
           const sessionIdentity = resolveSessionIdentity(sid, "local");
           if (shouldSuppressCodexArchive(sessionIdentity.rawSessionId, {
@@ -1105,6 +1214,7 @@ function createAgentRuntimeMain(options = {}) {
     workBuddySessionTitleTracker.clear();
     clearRetiredWorkBuddySessions();
     if (codexMonitor && typeof codexMonitor.stop === "function") codexMonitor.stop();
+    getStateRuntime()?.clearCodexSubagentActivities?.();
     stopCodexArchiveTracker();
     resetLocalCodexLifecycleTracking();
     if (qoderSessionTitleTracker && typeof qoderSessionTitleTracker.clear === "function") {
@@ -1113,6 +1223,7 @@ function createAgentRuntimeMain(options = {}) {
   }
 
   function resetLocalCodexLifecycleTracking() {
+    pendingCodexChildren.clear();
     codexTurnFence.clear();
     codexOfficialActivity.clear();
     codexSessionEndTombstones.clear();
