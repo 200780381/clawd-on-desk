@@ -50,6 +50,9 @@ const MAX_PARTIAL_BYTES = 65536;
 const MAX_POLL_READ_BYTES = 4 * 1024 * 1024;
 const MAX_POLL_TOTAL_REQUEST_BYTES = 16 * 1024 * 1024;
 const MAX_POLL_FILE_ATTEMPTS = 64;
+// Counts candidates, including skips. After startup recovery, with at most
+// 16 active-dir discovery attempts, 64 - 16 - 24 leaves 24 cold attempts.
+const MAX_HOT_POLL_ATTEMPTS = 24;
 const MAX_ACTIVE_DIR_DISCOVERY_ATTEMPTS_PER_POLL = 16;
 const MAX_STARTUP_RECOVERY_DISCOVERY_OPERATIONS_PER_POLL = 16;
 const MAX_OBSERVED_GROWTH_FILES = 2048;
@@ -65,7 +68,7 @@ const REPLAY_RETRY_MAX_BACKOFF_MS = 5 * 60 * 1000;
 const RECOVERY_MAX_READ_ATTEMPTS = 8;
 const RECENT_DAY_DIR_CACHE_MS = 60 * 60 * 1000; // 1 hour
 // A rollout file is considered "active" if written within this window. Used by
-// both the untracked-file pickup gate in _poll and the _getActiveDayDirs scan
+// both the untracked-file pickup gate in _pollCandidate and the _getActiveDayDirs scan
 // so slow Codex desktop sessions (3–5 min write cadence) aren't dropped by one
 // path only to be rescued by the other.
 const ACTIVE_SESSION_WINDOW_MS = 5 * 60 * 1000;
@@ -189,9 +192,10 @@ class CodexLogMonitor {
       ? options.onUserInputResolved
       : null;
     this._interval = null;
-    // Map<filePath, { offset, sessionId, cwd, lastEventTime, lastState }>
+    // Map<filePath, { offset, sessionId, cwd, lastEventTime, lastReadAt, lastState }>
     // offset is the byte immediately after the last committed newline. An
     // incomplete tail stays on disk and is reread after tracker eviction.
+    // lastReadAt is scheduling-only and is not saved when a tracker retires.
     this._tracked = new Map();
     this._retiredTracked = new Map();
     // Lightweight, process-lifetime tail positions outlive both rich tracker
@@ -205,6 +209,13 @@ class CodexLogMonitor {
     this._deferredRecent = new Map();
     this._deferredBackground = new Map();
     this._pollCursor = 0;
+    // An independent hot cursor preserves cold rotation while hot work leads.
+    this._hotPollCursor = 0;
+    // Previous candidate snapshot; null makes the first poll a baseline.
+    this._seenPollFiles = null;
+    // New paths and byte-budget retries stay hot until content is read or
+    // their mtime ages out, including files still empty or only partly written.
+    this._pendingPriorityFiles = new Set();
     this._activeDayWalker = null;
     this._startupRecoveryCandidates = new Map();
     this._startupRecoveryWalker = null;
@@ -249,6 +260,9 @@ class CodexLogMonitor {
     this._startupRecoveryBytesScanned = 0;
     this._activeDayWalker = null;
     this._pollCursor = 0;
+    this._hotPollCursor = 0;
+    this._seenPollFiles = null;
+    this._pendingPriorityFiles.clear();
     // Initial scan
     this._poll();
     this._interval = setInterval(
@@ -273,6 +287,9 @@ class CodexLogMonitor {
     this._deferredBackground.clear();
     this._activeDayWalker = null;
     this._pollCursor = 0;
+    this._hotPollCursor = 0;
+    this._seenPollFiles = null;
+    this._pendingPriorityFiles.clear();
     this._startupRecoveryCandidates.clear();
     this._startupRecoveryWalker = null;
     this._startupRecoveryReady = false;
@@ -324,72 +341,39 @@ class CodexLogMonitor {
       seen.add(candidate.filePath);
       unique.push(candidate);
     }
-    if (unique.length > 0) {
-      const start = this._pollCursor % unique.length;
-      const ordered = unique.slice(start).concat(unique.slice(0, start));
-      let processed = 0;
-      for (const candidate of ordered) {
-        if (context.remainingAttempts <= 0) break;
-        const deferred = this._deferredRecent.get(candidate.filePath)
-          || this._deferredBackground.get(candidate.filePath);
-        if (deferred && Date.now() < deferred.notBefore) {
-          processed += 1;
-          continue;
-        }
-        const observedByStartup = startupObserved.has(candidate.filePath);
-        let stat = observedByStartup ? startupObserved.get(candidate.filePath) : null;
-        let statError = null;
-        if (!observedByStartup) {
-          context.remainingAttempts -= 1;
-          try {
-            stat = fs.statSync(candidate.filePath);
-          } catch (error) {
-            statError = error;
-            stat = null;
-          }
-        }
-        if (!stat) {
-          if (["ENOENT", "ENOTDIR"].includes(statError?.code)) this._observedFileGrowth.delete(candidate.filePath);
-          if (deferred) {
-            this._backoffDeferredStatFailure(deferred);
-          } else {
-            this._markReplayNoProgress(candidate.filePath, this._tracked.get(candidate.filePath));
-          }
-          processed += 1;
-          continue;
-        }
-        if (
-          candidate.source === "normal"
-          && !this._tracked.has(candidate.filePath)
-          && Date.now() - stat.mtimeMs > ACTIVE_SESSION_WINDOW_MS
-        ) {
-          const growth = this._observeFileGrowth(candidate.filePath, stat);
-          if (!growth || !growth.pendingGrowth) {
-            processed += 1;
-            continue;
-          }
-          const retired = this._retiredTracked.get(candidate.filePath);
-          const position = this._readPositions.get(candidate.filePath);
-          if (!retired?.delegatedChild || position?.identity !== this._getFileIdentity(stat)
-            || stat.size < retired.offset) {
-            this._recoverGrownDelegatedFile(candidate, stat, context, growth);
-            processed += 1;
-            continue;
-          }
-        }
-        const result = this._pollFile(candidate.filePath, candidate.fileName, {
-          preStat: stat,
-          get remainingRequestBytes() { return context.remainingRequestBytes; },
-          set remainingRequestBytes(value) { context.remainingRequestBytes = value; },
-        });
-        if (result && result.kind === "budget") break;
-        if (this._tracked.has(candidate.filePath)) {
-          const growth = this._observedFileGrowth.get(candidate.filePath);
-          if (growth) growth.pendingGrowth = false;
-        }
-        processed += 1;
+    // The first directory snapshot is a baseline: history must not flood the
+    // hot queue on startup. Later arrivals may still be empty when first seen.
+    if (this._seenPollFiles) {
+      for (const filePath of seen) {
+        if (!this._seenPollFiles.has(filePath)) this._pendingPriorityFiles.add(filePath);
       }
-      this._pollCursor = (start + Math.max(1, processed)) % unique.length;
+    }
+    this._seenPollFiles = seen;
+    for (const filePath of this._pendingPriorityFiles) {
+      if (!seen.has(filePath)) this._pendingPriorityFiles.delete(filePath);
+    }
+    const hot = [];
+    const cold = [];
+    const now = Date.now();
+    for (const candidate of unique) {
+      const tracked = this._tracked.get(candidate.filePath);
+      // Event time is not a read clock: visits may read nothing, while reasoning
+      // records advance the read position without refreshing lastEventTime.
+      const recentlyRead = Number.isFinite(tracked?.lastReadAt)
+        && now - tracked.lastReadAt <= ACTIVE_SESSION_WINDOW_MS;
+      const isHot = recentlyRead || this._pendingPriorityFiles.has(candidate.filePath);
+      (isHot ? hot : cold).push(candidate);
+    }
+
+    // Capping hot work leaves cold files a share of the same attempt budget,
+    // so even frozen-mtime appends are eventually observed by stat.
+    const hotResult = this._pollCandidates(hot, this._hotPollCursor, MAX_HOT_POLL_ATTEMPTS, context, startupObserved);
+    this._hotPollCursor = hotResult.nextCursor;
+    // A hot byte-budget stop also pauses cold stats and frozen-mtime detection
+    // for this poll; the next poll starts again with a fresh byte budget.
+    if (!hotResult.hitByteBudget) {
+      const coldResult = this._pollCandidates(cold, this._pollCursor, cold.length, context, startupObserved);
+      this._pollCursor = coldResult.nextCursor;
     }
 
     if (this._startupRecoveryReady && !this._didInitialRecoveryScan && context.remainingAttempts > 0) {
@@ -397,6 +381,85 @@ class CodexLogMonitor {
     }
     this._pruneTrackedFilesIfNeeded();
     this._refreshSessionTitles();
+  }
+
+  _pollCandidates(candidates, cursor, limit, context, startupObserved) {
+    if (candidates.length === 0) return { nextCursor: 0, hitByteBudget: false };
+    const start = cursor % candidates.length;
+    let processed = 0;
+    let hitByteBudget = false;
+    while (processed < candidates.length && processed < limit && context.remainingAttempts > 0) {
+      const candidate = candidates[(start + processed) % candidates.length];
+      hitByteBudget = this._pollCandidate(candidate, context, startupObserved);
+      if (hitByteBudget) break;
+      processed += 1;
+    }
+    return { nextCursor: (start + Math.max(1, processed)) % candidates.length, hitByteBudget };
+  }
+
+  _pollCandidate(candidate, context, startupObserved) {
+    const deferred = this._deferredRecent.get(candidate.filePath)
+      || this._deferredBackground.get(candidate.filePath);
+    if (deferred && Date.now() < deferred.notBefore) return false;
+    const observedByStartup = startupObserved.has(candidate.filePath);
+    let stat = observedByStartup ? startupObserved.get(candidate.filePath) : null;
+    let statError = null;
+    if (!observedByStartup) {
+      context.remainingAttempts -= 1;
+      try {
+        stat = fs.statSync(candidate.filePath);
+      } catch (error) {
+        statError = error;
+        stat = null;
+      }
+    }
+    if (!stat) {
+      if (["ENOENT", "ENOTDIR"].includes(statError?.code)) {
+        this._observedFileGrowth.delete(candidate.filePath);
+        this._pendingPriorityFiles.delete(candidate.filePath);
+      }
+      if (deferred) {
+        this._backoffDeferredStatFailure(deferred);
+      } else {
+        this._markReplayNoProgress(candidate.filePath, this._tracked.get(candidate.filePath));
+      }
+      return false;
+    }
+    if (Date.now() - stat.mtimeMs > ACTIVE_SESSION_WINDOW_MS) {
+      this._pendingPriorityFiles.delete(candidate.filePath);
+    }
+    if (
+      candidate.source === "normal"
+      && !this._tracked.has(candidate.filePath)
+      && Date.now() - stat.mtimeMs > ACTIVE_SESSION_WINDOW_MS
+    ) {
+      const growth = this._observeFileGrowth(candidate.filePath, stat);
+      if (!growth || !growth.pendingGrowth) return false;
+      const retired = this._retiredTracked.get(candidate.filePath);
+      const position = this._readPositions.get(candidate.filePath);
+      if (!retired?.delegatedChild || position?.identity !== this._getFileIdentity(stat)
+        || stat.size < retired.offset) {
+        this._recoverGrownDelegatedFile(candidate, stat, context, growth);
+        return false;
+      }
+    }
+    const result = this._pollFile(candidate.filePath, candidate.fileName, {
+      preStat: stat,
+      get remainingRequestBytes() { return context.remainingRequestBytes; },
+      set remainingRequestBytes(value) { context.remainingRequestBytes = value; },
+    });
+    if (result && result.kind === "budget") {
+      // No bytes were read, so keep this candidate ahead of the cold queue.
+      this._pendingPriorityFiles.add(candidate.filePath);
+      return true;
+    }
+    const tracked = this._tracked.get(candidate.filePath);
+    if (tracked) {
+      const growth = this._observedFileGrowth.get(candidate.filePath);
+      if (growth) growth.pendingGrowth = false;
+      if (Number.isFinite(tracked.lastReadAt)) this._pendingPriorityFiles.delete(candidate.filePath);
+    }
+    return false;
   }
 
   _observeFileGrowth(filePath, stat) {
@@ -1501,6 +1564,7 @@ class CodexLogMonitor {
         && (readLen === MAX_POLL_READ_BYTES || scannedToSnapshotEnd);
       if (mayDiscard) {
         tracked.offset += bytesRead;
+        tracked.lastReadAt = Date.now();
         tracked.fileIdentity = openedIdentity;
         this._readPositions.set(filePath, { offset: tracked.offset, identity: openedIdentity });
         this._markReplayProgress(filePath);
@@ -1518,6 +1582,7 @@ class CodexLogMonitor {
     const committedBytes = lastNewline + 1;
     const text = buf.subarray(0, committedBytes).toString("utf8");
     tracked.offset += committedBytes;
+    tracked.lastReadAt = Date.now();
     tracked.fileIdentity = openedIdentity;
     this._readPositions.set(filePath, { offset: tracked.offset, identity: openedIdentity });
     this._markReplayProgress(filePath);
