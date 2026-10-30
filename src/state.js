@@ -215,6 +215,8 @@ function hasCodexCompactionVisual() {
 
 const sessions = new Map();
 const codexSubagentPresentation = require("./codex-subagent-presentation")(sessions, () => Date.now());
+// A parent's Stop can settle its turn while delegated children still own the visual.
+const deferredCodexCompletionCues = new Set();
 let lastCodexPendingAttentionIds = new Set();
 // The owner of a Codex plan belongs to the state runtime, not a session or
 // its snapshot. Clearing an evicted session also discards its turn ownership.
@@ -2017,6 +2019,7 @@ function clearAllClaudeTranscriptCompletionProbes() {
 }
 
 function deleteSessionWithCompletionCleanup(sessionId, reason) {
+  deferredCodexCompletionCues.delete(sessionId);
   codexSubagentPresentation.delete(sessionId);
   releaseCodexCompaction(sessionId);
   codexCompactionCompletions.delete(sessionId);
@@ -3005,6 +3008,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (srcAgentId === "codex" && !srcHeadless
     && ["UserPromptSubmit", "event_msg:task_started", "SessionStart"].includes(event)) {
     codexSubagentPresentation.resume(sessionId);
+    deferredCodexCompletionCues.delete(sessionId);
   }
   const hadSubagentHoldBefore = hasSubagentHoldEvidence(subagentTracker);
 
@@ -3182,17 +3186,30 @@ function updateSession(sessionId, state, event, opts = {}) {
 
   if (event === "SessionEnd") {
     const endingSession = sessions.get(sessionId);
+    const deferredCueSessions = [];
     if (srcAgentId === "codex" && srcHeadless) {
+      // Only children present before this SessionEnd can settle a deferred cue;
+      // an unrelated child must not settle a parent whose evidence expired.
+      const activeParents = [...deferredCodexCompletionCues].filter(id => codexSubagentPresentation.has(id));
       codexSubagentPresentation.endChild(rawSessionId || endingSession?.rawSessionId || sessionId);
+      for (const id of activeParents) {
+        if (codexSubagentPresentation.has(id)) continue;
+        deferredCodexCompletionCues.delete(id);
+        deferredCueSessions.push(sessions.get(id));
+      }
     }
+    if (srcAgentId === "codex" && !srcHeadless && deferredCodexCompletionCues.has(sessionId)) {
+      deferredCueSessions.push(endingSession);
+    }
+    deferredCodexCompletionCues.delete(sessionId);
     const endedDelegatedChildren = srcAgentId === "codex" && !srcHeadless
       ? codexSubagentPresentation.end(sessionId) : false;
     // Codex Desktop unloads an idle thread hours after its last turn, and that
     // SessionEnd must not retire a local Codex session the user can still reply
     // to through Telegram: a direct reply needs the live row
     // (src/telegram-direct-send.js returns session_not_live otherwise) and the
-    // completion mapping stays valid for 24h. Treat it as a no-op — no delete,
-    // no completion, no state change — and let stale cleanup retire it later.
+    // completion mapping stays valid for 24h. Keep the canonical row unchanged
+    // for stale cleanup; a deferred presentation cue can still settle below.
     if (
       endingSession
       && endingSession.agentId === "codex"
@@ -3207,6 +3224,7 @@ function updateSession(sessionId, state, event, opts = {}) {
         const resolved = resolveDisplayState();
         setState(resolved, getSvgOverride(resolved));
       }
+      deferredCueSessions.some(playDeferredCodexCompletionCue);
       return;
     }
     cancelCodexExitProbe(sessionId, "SessionEnd");
@@ -3235,6 +3253,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     }
     const displayState = resolveDisplayState();
     setState(displayState, getSvgOverride(displayState));
+    deferredCueSessions.some(playDeferredCodexCompletionCue);
     return;
   } else if (preservedState) {
     const dh = pickDisplayHint(preservedState, existing, displayHint);
@@ -3432,6 +3451,7 @@ function updateSession(sessionId, state, event, opts = {}) {
 
   if (ONESHOT_STATES.has(state)) {
     if (srcAgentId === "codex" && state === "attention" && codexSubagentPresentation.has(sessionId)) {
+      if (!suppressDuplicateCompletionVisual) deferredCodexCompletionCues.add(sessionId);
       const displayState = resolveDisplayState();
       setState(displayState, getSvgOverride(displayState));
       return;
@@ -3610,6 +3630,9 @@ function cleanStaleSessions() {
   let snapshotRefreshNeeded = accountQuota.prune();
   codexSubagentPresentation.prune();
   if (codexSubagentPresentation.consumeExpirationChange()) changed = true;
+  for (const id of deferredCodexCompletionCues) {
+    if (!codexSubagentPresentation.has(id)) deferredCodexCompletionCues.delete(id);
+  }
   const staleConfig = typeof ctx.getStaleConfig === "function" ? ctx.getStaleConfig() : null;
   for (const [id, s] of sessions) {
     const childActivityAt = codexSubagentPresentation.lastActivity(id);
@@ -4112,13 +4135,30 @@ function refreshCodexSubagentPresentation() {
   emitSessionSnapshot();
 }
 
+// Stop already recorded completion, so duplicate-event suppression would
+// swallow this first visual too. Only the deferred cue is consumed here.
+function playDeferredCodexCompletionCue(session) {
+  if (session?.state !== "idle" || session.awaitingInputSinceStop !== true) return false;
+  if (hasConfirmedPermissionAnimationLock()) return false;
+  setState("attention", null);
+  return true;
+}
+
 function updateCodexSubagentActivity(parentId, input) {
   if (!codexSubagentPresentation.update(parentId, input)) return false;
+  if (input.phase === "stop" && !codexSubagentPresentation.has(parentId)) {
+    const deferred = deferredCodexCompletionCues.delete(parentId);
+    if (deferred && input.terminal === true && playDeferredCodexCompletionCue(sessions.get(parentId))) {
+      emitSessionSnapshot();
+      return true;
+    }
+  }
   refreshCodexSubagentPresentation();
   return true;
 }
 
 function clearCodexSubagentActivities() {
+  deferredCodexCompletionCues.clear();
   const changed = codexSubagentPresentation.hasAny();
   codexSubagentPresentation.resetActivity();
   if (changed) refreshCodexSubagentPresentation();
@@ -4298,6 +4338,7 @@ function getCurrentHitBox() { return currentHitBox; }
 function getStartupRecoveryActive() { return startupRecoveryActive; }
 
 function cleanup() {
+  deferredCodexCompletionCues.clear();
   lastCodexPendingAttentionIds.clear();
   codexSubagentPresentation.clear();
   for (const id of codexCompactionHolds.keys()) releaseCodexCompaction(id);
