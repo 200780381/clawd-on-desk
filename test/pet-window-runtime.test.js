@@ -187,6 +187,7 @@ function createRuntime(overrides = {}) {
       : {}),
     reassertWinTopmost: (...args) => calls.push(["reassertWinTopmost", ...args]),
     scheduleHwndRecovery: () => calls.push(["scheduleHwndRecovery"]),
+    ...(overrides.getAlwaysOnTop ? { getAlwaysOnTop: overrides.getAlwaysOnTop } : {}),
     ...(overrides.cloakInspector ? { cloakInspector: overrides.cloakInspector } : {}),
     ...(overrides.noteManualPetShow ? { noteManualPetShow: overrides.noteManualPetShow } : {}),
     ...(overrides.isMiniAnimating ? { isMiniAnimating: overrides.isMiniAnimating } : {}),
@@ -3263,6 +3264,42 @@ describe("pet-window-runtime", () => {
       { x: 40, y: 0, width: 120, height: 120 },
     ]);
     assert.equal(harness.runtime.getViewportOffsetY(), 25);
+  });
+
+  it("creates the pet body in the normal band when the master always-on-top pref is off (#1275)", () => {
+    const instances = [];
+    const harness = createRuntime({ getAlwaysOnTop: () => false });
+
+    harness.runtime.createRenderWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      size: { width: 120, height: 120 },
+      initialWindowBounds: { x: 40, y: 0, width: 120, height: 120 },
+      initialVirtualBounds: { x: 40, y: 0, width: 120, height: 120 },
+      preloadPath: "preload.js",
+      loadFilePath: "index.html",
+      themeConfig: { ok: true },
+      setRenderWindow: harness.setRenderWin,
+      isQuitting: () => false,
+    });
+    harness.runtime.createHitWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      preloadPath: "preload-hit.js",
+      loadFilePath: "hit.html",
+      hitThemeConfig: { ok: true },
+    });
+
+    assert.equal(instances[0].options.alwaysOnTop, false, "render window constructor");
+    assert.equal(instances[1].options.alwaysOnTop, false, "hit window constructor");
+    assert.equal(
+      instances[0].calls.find((call) => call[0] === "setAlwaysOnTop"),
+      undefined,
+      "no Windows topmost-level write for the render window"
+    );
+    assert.equal(
+      instances[1].calls.find((call) => call[0] === "setAlwaysOnTop"),
+      undefined,
+      "no Windows topmost-level write for the hit window"
+    );
   });
 
   it("flushes runtime prefs once during Windows session end", () => {

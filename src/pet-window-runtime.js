@@ -120,6 +120,11 @@ function createPetWindowRuntime(options = {}) {
   const windowsHitWindowFocusable = isWin && options.windowsHitWindowFocusable === true;
   const linuxWindowType = options.linuxWindowType;
   const topmostLevel = options.topmostLevel;
+  // #1275: master always-on-top preference. Gates the creation-time topmost
+  // writes and the size-preview restore so a pref-off pet is born (and
+  // stays) in the normal band; the runtime-level reassert paths gate
+  // themselves in topmost-runtime.js.
+  const getAlwaysOnTop = options.getAlwaysOnTop || (() => true);
   const getRenderWindow = options.getRenderWindow || (() => null);
   const getHitWindow = options.getHitWindow || (() => null);
   const getSettingsWindow = options.getSettingsWindow || (() => null);
@@ -2311,7 +2316,7 @@ function createPetWindowRuntime(options = {}) {
       y: initialWindowBounds.y,
       frame: false,
       transparent: true,
-      alwaysOnTop: true,
+      alwaysOnTop: getAlwaysOnTop(),
       resizable: false,
       skipTaskbar: true,
       hasShadow: false,
@@ -2356,7 +2361,7 @@ function createPetWindowRuntime(options = {}) {
       });
     }
 
-    if (isWin) renderWin.setAlwaysOnTop(true, topmostLevel);
+    if (isWin && getAlwaysOnTop()) renderWin.setAlwaysOnTop(true, topmostLevel);
     if (isWin) {
       let sessionEndFlushed = false;
       const flushForSessionEnd = () => {
@@ -2423,7 +2428,7 @@ function createPetWindowRuntime(options = {}) {
       y: initialHitWindowBounds.y,
       frame: false,
       transparent: true,
-      alwaysOnTop: true,
+      alwaysOnTop: getAlwaysOnTop(),
       resizable: false,
       skipTaskbar: true,
       hasShadow: false,
@@ -2460,7 +2465,7 @@ function createPetWindowRuntime(options = {}) {
     applyLinuxAllWorkspaces(hitWin);
     hitWin.showInactive();
     keepOutOfTaskbar(hitWin);
-    if (isWin) hitWin.setAlwaysOnTop(true, topmostLevel);
+    if (isWin && getAlwaysOnTop()) hitWin.setAlwaysOnTop(true, topmostLevel);
     reapplyMacVisibility();
     hitWin.loadFile(optionsArg.loadFilePath);
     if (isWin && typeof optionsArg.guardAlwaysOnTop === "function") {
@@ -2658,7 +2663,9 @@ function createPetWindowRuntime(options = {}) {
     settingsSizePreviewIgnoringHit = false;
     applyHitInputState();
     const hitWin = getHitWindow();
-    if (isLiveWindow(hitWin) && typeof hitWin.setAlwaysOnTop === "function") {
+    // #1275: with the master pref off, reassertWinTopmost below demotes
+    // instead of re-topping — don't fight it with a direct level write here.
+    if (isLiveWindow(hitWin) && getAlwaysOnTop() && typeof hitWin.setAlwaysOnTop === "function") {
       hitWin.setAlwaysOnTop(true, topmostLevel);
     }
     reassertWinTopmost();

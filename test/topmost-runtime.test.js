@@ -21,6 +21,9 @@ class FakeWindow extends EventEmitter {
     this.visible = options.visible !== false;
     this.bounds = options.bounds || null;
     this.calls = [];
+    // #1275: track the always-on-top level so demote paths can be exercised
+    // through the same isAlwaysOnTop() guard the production code reads.
+    this.alwaysOnTopState = options.alwaysOnTop !== false;
   }
 
   isDestroyed() {
@@ -31,8 +34,13 @@ class FakeWindow extends EventEmitter {
     return this.visible;
   }
 
+  isAlwaysOnTop() {
+    return this.alwaysOnTopState;
+  }
+
   setAlwaysOnTop(...args) {
     this.calls.push(["setAlwaysOnTop", ...args]);
+    this.alwaysOnTopState = !!args[0];
   }
 
   setVisibleOnAllWorkspaces(...args) {
@@ -1873,5 +1881,281 @@ describe("fullscreen auto-hide sync (#935)", () => {
     h.tick();
     assert.deepStrictEqual(h.setCalls, [true, true]);
     assert.equal(h.state.autoHidden, true);
+  });
+});
+
+describe("topmost runtime master always-on-top pref (#1275)", () => {
+  it("reassertWinTopmost demotes the pet body when the master pref is off", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getAlwaysOnTop: () => false,
+    });
+
+    runtime.reassertWinTopmost();
+
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false]]);
+    assert.equal(win.alwaysOnTopState, false);
+    assert.equal(hitWin.alwaysOnTopState, false);
+  });
+
+  it("reassertWinTopmost demotion is idempotent and keeps the hit layer above the render layer", () => {
+    const order = [];
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    for (const [name, w] of [["render", win], ["hit", hitWin]]) {
+      const original = w.setAlwaysOnTop.bind(w);
+      w.setAlwaysOnTop = (...args) => {
+        order.push(name);
+        original(...args);
+      };
+    }
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getAlwaysOnTop: () => false,
+    });
+
+    runtime.reassertWinTopmost();
+    runtime.reassertWinTopmost();
+
+    // Render demotes first, hit second — the later demotion inserts at the
+    // top of the normal band, so the transparent hit layer stays above.
+    assert.deepStrictEqual(order, ["render", "hit"]);
+    // The second pass writes nothing: a level change per tick would spam
+    // always-on-top-changed events and fight the guard.
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false]]);
+  });
+
+  it("reassertWinTopmost demotes even while a fullscreen app is foreground (pref wins over #538)", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getAlwaysOnTop: () => false,
+      isForegroundFullscreen: () => true,
+    });
+
+    runtime.reassertWinTopmost();
+
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false]]);
+  });
+
+  it("watchdog demotes the pet body when the pref is off and keeps floating surfaces topmost", () => {
+    const timers = makeTimers();
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const permissionBubble = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getPendingPermissions: () => [{ bubble: permissionBubble }],
+      getAlwaysOnTop: () => false,
+      isForegroundFullscreen: () => false,
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+    });
+
+    runtime.startTopmostWatchdog();
+    timers.intervals[0].fn();
+
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false]]);
+    // Permission bubbles are deliberate interruptions — unaffected.
+    assert.deepStrictEqual(permissionBubble.calls, [
+      ["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL],
+    ]);
+
+    timers.intervals[0].fn();
+
+    // Second tick writes nothing extra (isAlwaysOnTop() already false).
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(permissionBubble.calls.length, 2);
+  });
+
+  it("guardAlwaysOnTop lets the pet body lose topmost when the pref is off", () => {
+    const timers = makeTimers();
+    const win = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => new FakeWindow(),
+      getAlwaysOnTop: () => false,
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    runtime.guardAlwaysOnTop(win);
+
+    win.emit("always-on-top-changed", null, false);
+
+    assert.deepStrictEqual(win.calls, []);
+    assert.equal(timers.timeouts.length, 0, "no HWND recovery may be scheduled for a demoted pet");
+  });
+
+  it("guardAlwaysOnTop still re-tops floating surfaces when the pref is off", () => {
+    const win = new FakeWindow();
+    const bubble = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      getWin: () => win,
+      getHitWin: () => new FakeWindow(),
+      getAlwaysOnTop: () => false,
+    });
+    runtime.guardAlwaysOnTop(bubble);
+
+    bubble.emit("always-on-top-changed", null, false);
+
+    assert.deepStrictEqual(bubble.calls, [
+      ["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL],
+    ]);
+  });
+
+  it("macOS reapplyMacVisibility drops the pet body to the normal level when the pref is off", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const permissionBubble = new FakeWindow();
+    const stationaryCalls = [];
+    const runtime = createTopmostRuntime({
+      isMac: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getPendingPermissions: () => [{ bubble: permissionBubble }],
+      applyStationaryCollectionBehavior: (window) => {
+        stationaryCalls.push(window);
+        return true;
+      },
+      getAlwaysOnTop: () => false,
+    });
+
+    runtime.reapplyMacVisibility();
+
+    // Pet body: normal level, plain cross-space visibility (no fullscreen-Space
+    // membership), and definitely no SkyLight private-space delegation.
+    assert.deepStrictEqual(win.calls, [
+      ["setAlwaysOnTop", false],
+      ["setVisibleOnAllWorkspaces", true],
+    ]);
+    assert.deepStrictEqual(hitWin.calls, [
+      ["setAlwaysOnTop", false],
+      ["setVisibleOnAllWorkspaces", true],
+    ]);
+    assert.deepStrictEqual(stationaryCalls, [permissionBubble],
+      "floating surfaces keep the full topmost treatment");
+  });
+
+  it("macOS applyPetAlwaysOnTopPreference routes through reapplyMacVisibility", () => {
+    const win = new FakeWindow();
+    const runtime = createTopmostRuntime({
+      isMac: true,
+      getWin: () => win,
+      applyStationaryCollectionBehavior: () => true,
+      getAlwaysOnTop: () => false,
+    });
+
+    runtime.applyPetAlwaysOnTopPreference();
+
+    assert.deepStrictEqual(win.calls, [
+      ["setAlwaysOnTop", false],
+      ["setVisibleOnAllWorkspaces", true],
+    ]);
+  });
+
+  it("macOS syncImeEditingPetDodge is inert when the pref is off (restore would re-delegate above)", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    // A text-input bubble overlapping the pet would normally trigger the #640
+    // dodge; with the pref off there is nothing to dodge and, worse, the
+    // dodge's restore leg would re-delegate the pet above ordinary windows.
+    const bubble = new FakeWindow({ bounds: { x: 0, y: 0, width: 400, height: 300 } });
+    bubble.__clawdMacTextInputBubble = true;
+    const dodgeReports = [];
+    const runtime = createTopmostRuntime({
+      isMac: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getPetWindowBounds: () => ({ x: 10, y: 10, width: 200, height: 200 }),
+      getHitRectScreen: (bounds) => bounds,
+      getPendingPermissions: () => [{ bubble }],
+      applyStationaryCollectionBehavior: () => true,
+      deDelegateWindowFromStationarySpace: () => true,
+      setImeEditingPetDodge: (value) => dodgeReports.push(value),
+      getAlwaysOnTop: () => false,
+    });
+
+    runtime.syncImeEditingPetDodge();
+
+    assert.deepStrictEqual(win.calls, [], "no de-delegation or fade while the pref is off");
+    assert.deepStrictEqual(hitWin.calls, []);
+    assert.deepStrictEqual(dodgeReports, []);
+  });
+
+  it("macOS syncImeEditingPetDodge unwinds an active dodge when the pref flips off", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const bubble = new FakeWindow({ bounds: { x: 0, y: 0, width: 400, height: 300 } });
+    bubble.__clawdMacTextInputBubble = true;
+    const dodgeReports = [];
+    let alwaysOnTop = true;
+    const runtime = createTopmostRuntime({
+      isMac: true,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getPetWindowBounds: () => ({ x: 10, y: 10, width: 200, height: 200 }),
+      getHitRectScreen: (bounds) => bounds,
+      getPendingPermissions: () => [{ bubble }],
+      applyStationaryCollectionBehavior: () => true,
+      deDelegateWindowFromStationarySpace: () => true,
+      setImeEditingPetDodge: (value) => dodgeReports.push(value),
+      getAlwaysOnTop: () => alwaysOnTop,
+    });
+
+    // Dodge engages while the pref is on (pet de-delegated + click-through).
+    runtime.syncImeEditingPetDodge();
+    assert.deepStrictEqual(dodgeReports, [true]);
+
+    alwaysOnTop = false;
+    runtime.syncImeEditingPetDodge();
+
+    // The unwind restores opacity, clears the click-through intent, and never
+    // calls restorePetDelegate (no stationary write after the flip). The
+    // engagement itself also faded the pet back to 1 (native de-delegation
+    // succeeded, no fade fallback), hence two opacity writes total.
+    assert.deepStrictEqual(win.calls, [["setOpacity", 1], ["setOpacity", 1]]);
+    assert.deepStrictEqual(dodgeReports, [true, false]);
+  });
+
+  it("applyPetAlwaysOnTopPreference demotes and restores directly on platforms without a maintenance loop", () => {
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    let alwaysOnTop = false;
+    const runtime = createTopmostRuntime({
+      isWin: false,
+      isMac: false,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getAlwaysOnTop: () => alwaysOnTop,
+    });
+
+    runtime.applyPetAlwaysOnTopPreference();
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false]]);
+
+    alwaysOnTop = true;
+    runtime.applyPetAlwaysOnTopPreference();
+    assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false], ["setAlwaysOnTop", true]]);
+    assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false], ["setAlwaysOnTop", true]]);
   });
 });

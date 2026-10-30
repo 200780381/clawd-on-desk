@@ -8,6 +8,7 @@
     "size",
     "keepSizeAcrossDisplays",
     "testReactionsEnabled",
+    "petAlwaysOnTop",
     "allowEdgePinning",
     "disableMiniMode",
     "freeRoam",
@@ -475,6 +476,16 @@
         labelKey: "rowFullscreenAutoHide",
         descKey: "rowFullscreenAutoHideDesc",
       })] : []),
+    ]));
+
+    // #1275: master always-on-top switch. Cross-platform — the pet body's
+    // topmost band is maintained on every OS, so the opt-out is too.
+    parent.appendChild(helpers.buildSection(t("sectionPetTopmost"), [
+      helpers.buildSwitchRow({
+        key: "petAlwaysOnTop",
+        labelKey: "rowPetAlwaysOnTop",
+        descKey: "rowPetAlwaysOnTopDesc",
+      }),
     ]));
 
     parent.appendChild(helpers.buildSection(t("sectionPetReactions"), [

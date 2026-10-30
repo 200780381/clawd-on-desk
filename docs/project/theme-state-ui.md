@@ -21,6 +21,8 @@ AppImage 的 FUSE wrapper 被提前终止时，Electron 仍可能在退出清理
 
 Windows 的 hit window 在原生 activation controller 可用时按前台全屏状态切换 `WS_EX_NOACTIVATE`：非全屏时清除该扩展样式，全屏时重新设置以避免点击和拖拽把前台切到 Clawd。Electron 内部保持 non-focusable；首次显示前安装的 `WM_MOUSEACTIVATE` hook 通过一次性 `Chrome.IgnoreMouseActivate` 属性让 Chromium 对该消息返回 `MA_NOACTIVATE`（不因这条消息激活窗口，也不丢弃鼠标输入），避免 `MA_NOACTIVATEANDEAT` 吞掉点击。该消息的返回值不保证普通桌面点击始终保持 OS 前台归属，相关限制见 Known Limits。输入窗口仍和渲染窗口分离，并永久接收 mouse events。
 
+桌宠本体的置顶由主开关 `petAlwaysOnTop`（默认开；Settings → 桌宠 →「窗口置顶」，#1275）统一治理。关闭时 render + hit 两个窗口从创建起就落在普通层级，可以被普通窗口（包括全屏视频）遮挡：macOS 上还会退出全屏 Space（重新签发不带 `visibleOnFullScreen` 的 cross-space 可见性，普通 Space 跟随行为保留）；Windows 上 `reassertWinTopmost` / topmost guard / 拖拽 nudge / HWND 恢复 / watchdog 全部改为幂等降级（先 render 后 hit，`isAlwaysOnTop()` 去重避免重复层级写），#640 的 IME 重叠避让整体停用——它的 restore 会把桌宠重新委托回 SkyLight 私有空间、重新浮到普通窗口之上。Linux 无维护循环，pref 变更时直接对两个窗口写 `setAlwaysOnTop`。该开关只治理桌宠本体：权限气泡、HUD、update bubble、额度环保留各自既有 topmost 行为；`fullscreenOverlay` / `fullscreenAutoHide`（#562/#935）只在开关为开时有意义。
+
 ## State Machine
 
 - 多会话追踪：`sessions` Map 按 `session_id` 独立记录状态，`resolveDisplayState()` 取最高优先级
@@ -96,7 +98,7 @@ Pages mount only their active panel's content and retain ownership of rendering,
 exit cleanup, drafts, persistence and scrolling. An existing `panels` Map may be
 passed when rebuilding only the sidebar, preserving the mounted page.
 
-设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限与审批（本机处理 / IM 渠道 / 局域网审批三个子页，远程渠道的身体由 `settings-tab-telegram-approval.js` 提供；每张渠道卡分三层：卡头一句状态 + 启用开关，没配好只有「开始配置」块，配好后是「连接 / 通知 / 高级」分组加卡底「发送测试」）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
+设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、置顶、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限与审批（本机处理 / IM 渠道 / 局域网审批三个子页，远程渠道的身体由 `settings-tab-telegram-approval.js` 提供；每张渠道卡分三层：卡头一句状态 + 启用开关，没配好只有「开始配置」块，配好后是「连接 / 通知 / 高级」分组加卡底「发送测试」）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
 
 Tabs use manual activation: arrows/Home/End move focus; Enter/Space/click activate.
 Horizontal tabs leave Up/Down available for scrolling; the vertical sidebar uses

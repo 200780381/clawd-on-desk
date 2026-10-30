@@ -62,6 +62,7 @@ const FROZEN_KEYS = [
   "roamConstrainAxis",
   "keepSizeAcrossDisplays",
   "fullscreenAutoHide",
+  "petAlwaysOnTop",
   "openAtLogin",
   "disableHardwareAcceleration",
   "hideBubbles",
@@ -92,6 +93,7 @@ const EXPECTED_KEYS = {
     "size",
     "keepSizeAcrossDisplays",
     "testReactionsEnabled",
+    "petAlwaysOnTop",
     "allowEdgePinning",
     "disableMiniMode",
     "freeRoam",
@@ -720,10 +722,11 @@ describe("settings tab split", () => {
 
   it("renders the five pages in the planned section and row order", () => {
     const pet = createHarness({ tab: "pet", snapshot: makeSnapshot({ lang: "zh" }) });
-    assert.deepStrictEqual(sectionTitles(pet), ["大小", "走动与位置", "反应"]);
+    assert.deepStrictEqual(sectionTitles(pet), ["大小", "走动与位置", "窗口置顶", "反应"]);
     assert.deepStrictEqual(sectionRowLabels(pet), [
       ["大小", "跨显示器保持大小"],
       ["自由漫步", "移动方式", "活动范围", "允许贴靠屏幕边缘", "关闭极简模式", "全屏时自动隐藏"],
+      ["桌宠保持在最前"],
       ["测试结果动画"],
     ]);
 

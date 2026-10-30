@@ -62,6 +62,13 @@ describe("prefs.getDefaults", () => {
     assert.strictEqual(d.version, prefs.CURRENT_VERSION);
   });
 
+  it("defaults the pet always-on-top master switch on and coerces non-booleans (#1275)", () => {
+    const defaults = prefs.getDefaults();
+    assert.strictEqual(defaults.petAlwaysOnTop, true);
+    assert.strictEqual(prefs.validate({ petAlwaysOnTop: false }).petAlwaysOnTop, false);
+    assert.strictEqual(prefs.validate({ petAlwaysOnTop: "off" }).petAlwaysOnTop, true);
+  });
+
   it("defaults mobile permission summaries off independently of session preview", () => {
     const defaults = prefs.getDefaults();
     assert.strictEqual(defaults.mobilePreviewEnabled, false);

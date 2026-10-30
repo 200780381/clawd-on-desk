@@ -383,6 +383,17 @@ const SCHEMA = {
   // so existing behavior — overlay by default, #538 stand-down as the escape
   // hatch — is untouched.
   fullscreenAutoHide: { type: "boolean", default: false },
+  // #1275: master always-on-top switch for the pet body (render + hit
+  // windows). Default ON keeps the desktop-pet contract — the pet floats
+  // above normal windows and (macOS) fullscreen apps. OFF demotes both
+  // windows to the normal band, on every platform: other windows can cover
+  // the pet, and on macOS it no longer joins fullscreen Spaces (its
+  // #562/#538/#935 fullscreen story is moot once it is not topmost). Only
+  // the pet body is governed; permission bubbles, HUD, update bubble and
+  // quota rings keep their own topmost behavior — they are actionable or
+  // deliberately adjacent, and the pet's reassert machinery must not fight
+  // the user's explicit demotion.
+  petAlwaysOnTop: { type: "boolean", default: true },
   // #1183: escape hatch for machines whose GPU compositor draws the
   // transparent pet window as an opaque black square once part of it leaves
   // the virtual desktop (edge snap / mini mode). Read once at startup, before

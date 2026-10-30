@@ -1193,6 +1193,9 @@ const petWindowRuntime = createPetWindowRuntime({
   getCurrentPixelSize: () => getCurrentPixelSize(),
   getEffectiveCurrentPixelSize: (workArea) => getEffectiveCurrentPixelSize(workArea),
   getAllowEdgePinning: () => allowEdgePinningCached,
+  // #1275: gates creation-time and size-preview topmost writes; runtime-level
+  // reassert paths gate themselves inside topmost-runtime.
+  getAlwaysOnTop: () => petAlwaysOnTopCached,
   getPrimaryWorkAreaSafe: () => getPrimaryWorkAreaSafe(),
   getNearestWorkArea,
   sendToRenderer,
@@ -1408,6 +1411,8 @@ let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
 let fullscreenOverlayCached = _settingsController.get("fullscreenOverlay");
 let fullscreenAutoHideCached = _settingsController.get("fullscreenAutoHide");
+// #1275: master always-on-top preference for the pet body.
+let petAlwaysOnTopCached = _settingsController.get("petAlwaysOnTop");
 let textScale = _settingsController.get("textScale");
 let textScaleByDisplay = _settingsController.get("textScaleByDisplay");
 // Transient slider-drag override for ONE display — the one the settings
@@ -2058,6 +2063,9 @@ const topmostRuntime = createTopmostRuntime({
   getForegroundFullscreenObservation: () => _isForegroundFullscreen.getLastObservation(),
   isFullscreenWindowAlive: (windowId) => _isForegroundFullscreen.isWindowIdAlive(windowId),
   getFullscreenOverlay: () => fullscreenOverlayCached,
+  // #1275: master always-on-top pref for the pet body — demotes the render +
+  // hit windows to the normal band when off, on every platform.
+  getAlwaysOnTop: () => petAlwaysOnTopCached,
   // #935 fullscreen auto-hide: the pref gate plus pet-window-runtime's
   // dedicated visibility layer (stacked on the user's manual hide).
   getFullscreenAutoHide: () => fullscreenAutoHideCached,
@@ -4830,6 +4838,12 @@ const SETTINGS_MIRROR_SETTERS = {
       topmostRuntime.clearFullscreenAutoHideOverride();
       petWindowRuntime.setFullscreenAutoHidden(false);
     }
+  },
+  // #1275: apply the pet-body topmost preference immediately instead of
+  // waiting for the next watchdog tick / mac visibility pass.
+  petAlwaysOnTop: (v) => {
+    petAlwaysOnTopCached = v;
+    topmostRuntime.applyPetAlwaysOnTopPreference();
   },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },

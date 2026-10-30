@@ -101,6 +101,17 @@ function createTopmostRuntime(options = {}) {
   const deDelegateWindowFromStationarySpace = options.deDelegateWindowFromStationarySpace
     || defaultDeDelegateWindowFromStationarySpace;
   const keepOutOfTaskbar = options.keepOutOfTaskbar || (() => {});
+  // #1275: master always-on-top preference for the pet body (render + hit
+  // windows). When false, every path that would put the pet back into the
+  // topmost band stands down and the two windows are demoted to the normal
+  // band instead: other windows — including fullscreen video — can cover the
+  // pet. Floating surfaces (permission bubbles, HUD, update bubble, quota
+  // ring) keep their own topmost behavior; they are not the pet. Defaults to
+  // true so the desktop-pet contract is unchanged when main.js doesn't wire
+  // the pref.
+  const getAlwaysOnTop = options.getAlwaysOnTop != null
+    ? defaultGetter(options.getAlwaysOnTop)
+    : () => true;
   // Windows-only: when a fullscreen app/game owns the foreground, the watchdog
   // and always-on-top guard stand down so we stop clawing the pet back over it
   // every tick (#538). Defaults to "never fullscreen" so non-Windows and any
@@ -188,8 +199,32 @@ function createTopmostRuntime(options = {}) {
   // there is nothing left for a second cache to disagree with.
   let imeEditingFadeCancel = null;
 
+  // #1275: demote the pet body to the normal window band. Render first, hit
+  // second — later demotions insert at the top of the normal band, so the hit
+  // layer stays above the render layer. The isAlwaysOnTop() guard keeps this
+  // idempotent: repeated watchdog ticks must not emit redundant native writes
+  // (each level change would fire a spurious always-on-top-changed event).
+  function demotePetTopmost() {
+    const win = getWin();
+    const hitWin = getHitWin();
+    if (isLiveWindow(win) && typeof win.isAlwaysOnTop === "function" && win.isAlwaysOnTop()) {
+      win.setAlwaysOnTop(false);
+    }
+    if (isLiveWindow(hitWin) && typeof hitWin.isAlwaysOnTop === "function" && hitWin.isAlwaysOnTop()) {
+      hitWin.setAlwaysOnTop(false);
+    }
+  }
+
   function reassertWinTopmost(fullscreenObservation) {
     if (!isWin) return;
+    // #1275: the user's explicit "not always on top" wins over everything,
+    // fullscreen observations included — a demoted pet must never be clawed
+    // back into the topmost band by drag nudge paths, HWND recovery or the
+    // manual-show restore, all of which funnel through here.
+    if (!getAlwaysOnTop()) {
+      demotePetTopmost();
+      return;
+    }
     // A fullscreen foreground app owns the screen — stand down so the pet/hit
     // windows don't claw their topmost band back over it. This is the same
     // #538 stand-down the watchdog and always-on-top guard already apply, but
@@ -253,6 +288,17 @@ function createTopmostRuntime(options = {}) {
       const deferUntil = Number(win.__clawdMacDeferredVisibilityUntil) || 0;
       if (deferUntil > Date.now()) return;
       if (deferUntil) delete win.__clawdMacDeferredVisibilityUntil;
+      // #1275: master always-on-top off — the pet body drops to the normal
+      // window level and stops joining fullscreen Spaces. The cross-space
+      // write is re-issued WITHOUT visibleOnFullScreen so a previously
+      // auxiliary window loses its fullscreen-Space membership; plain
+      // all-workspaces visibility stays on so the pet still follows normal
+      // Space switches. Floating surfaces keep the full treatment below.
+      if (!getAlwaysOnTop() && isPetWindow(win)) {
+        win.setAlwaysOnTop(false);
+        win.setVisibleOnAllWorkspaces(true);
+        return;
+      }
       // While a text field inside a bubble is focused it must drop out of
       // always-on-top so the OS IME candidate window can surface (permission.js
       // handleImeEditing sets __clawdMacImeEditing). This branch is the single
@@ -380,6 +426,21 @@ function createTopmostRuntime(options = {}) {
   // faded value rather than snapping the pet opaque over the input box.
   function syncImeEditingPetDodge() {
     if (!isMac) return;
+    // #1275: with the master always-on-top pref off the pet already lives in
+    // the normal band, where bubbles and the pet share insertion order —
+    // there is nothing to step back from, and the dodge's restore leg
+    // (restorePetDelegate) would re-delegate the pet into the SkyLight
+    // private space and put it back ABOVE ordinary windows, defeating the
+    // pref. Unwind a dodge that was active when the pref flipped instead.
+    if (!getAlwaysOnTop()) {
+      if (imeEditingPetDodge) {
+        imeEditingPetDodge = false;
+        imeEditingFadeFallback = false;
+        fadePetWindow(1);
+        if (!isDragLocked()) setImeEditingPetDodge(false);
+      }
+      return;
+    }
     const overlap = petOverlapsTextInputBubble();
     if (overlap !== imeEditingPetDodge) {
       imeEditingPetDodge = overlap;
@@ -492,6 +553,14 @@ function createTopmostRuntime(options = {}) {
       if (isOnTop || !isLiveWindow(winToGuard)) return;
       const renderWin = getWin();
       const hitLayerWin = getHitWin();
+      // #1275: with the master always-on-top pref off, the pet body is ALLOWED
+      // to lose topmost (other windows legitimately cover it) — no re-top, no
+      // nudge, no HWND recovery. Floating surfaces guarded by the same handler
+      // keep fighting their own topmost loss.
+      if (
+        (winToGuard === renderWin || winToGuard === hitLayerWin)
+        && !getAlwaysOnTop()
+      ) return;
       // A fullscreen app legitimately took topmost — don't fight back (no
       // re-top, no 1px nudge, no HWND recovery). The 5s watchdog restores the
       // pet within a cycle once the user leaves fullscreen (#538).
@@ -531,12 +600,20 @@ function createTopmostRuntime(options = {}) {
     });
   }
 
-  function reassertWindowAndTaskbar(win, { skipTopmost = false } = {}) {
+  // #1275: topmost intent for one maintenance pass. "assert" re-tops into
+  // the Windows topmost level, "skip" leaves the level alone (fullscreen
+  // stand-down), "demote" actively pulls the window down to the normal band
+  // (master always-on-top pref off). Taskbar avoidance runs in every mode —
+  // it is a non-focus-stealing maintenance op.
+  function reassertWindowAndTaskbar(win, { topmost = "assert" } = {}) {
     if (!isLiveWindow(win)) return;
-    // When a fullscreen app is foreground we skip the topmost re-assert (the
-    // part that interrupts the fullscreen app) but still keep the pet out of
-    // the taskbar, which is a non-focus-stealing maintenance op.
-    if (!skipTopmost) win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    if (topmost === "assert") {
+      win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    } else if (topmost === "demote") {
+      if (typeof win.isAlwaysOnTop === "function" && win.isAlwaysOnTop()) {
+        win.setAlwaysOnTop(false);
+      }
+    }
     keepOutOfTaskbar(win);
   }
 
@@ -551,15 +628,22 @@ function createTopmostRuntime(options = {}) {
       // window's activation is handled separately on the faster focusable poll
       // (startFocusablePoll) — float-on-top (topmost, here) and don't-steal-
       // focus (focusable, there) are independent decisions (#562).
+      // #1275: with the master always-on-top pref off the pet body is
+      // demoted to the normal band every tick instead — the pref wins over
+      // the fullscreen decision; a demoted pet cannot claw anything back.
       const fsForeground = isForegroundFullscreen();
-      const skipTopmost = shouldStandDownForFullscreen(fsForeground);
-      reassertWindowAndTaskbar(getWin(), { skipTopmost });
-      reassertWindowAndTaskbar(getHitWin(), { skipTopmost });
+      const standDownForFullscreen = shouldStandDownForFullscreen(fsForeground);
+      const petTopmostMode = !getAlwaysOnTop()
+        ? "demote"
+        : (standDownForFullscreen ? "skip" : "assert");
+      reassertWindowAndTaskbar(getWin(), { topmost: petTopmostMode });
+      reassertWindowAndTaskbar(getHitWin(), { topmost: petTopmostMode });
 
       // #525: periodic cloak self-heal. Skipped while standing down for a
       // fullscreen app — recovery calls showInactive()/setAlwaysOnTop, exactly
-      // the interference stand-down exists to avoid (§8.3).
-      if (!skipTopmost) recoverCloakedPet();
+      // the interference stand-down exists to avoid (§8.3). Its reassert tail
+      // honors the master pref on its own.
+      if (!standDownForFullscreen) recoverCloakedPet();
 
       for (const bubble of getPermissionPresentationWindows()) {
         if (isLiveWindow(bubble) && bubble.isVisible()) {
@@ -790,6 +874,34 @@ function createTopmostRuntime(options = {}) {
     }
   }
 
+  // #1275: apply the master always-on-top preference right now, on every
+  // platform. Fired by main.js when the pref changes (and safe to call any
+  // time): OFF demotes the pet body immediately instead of waiting for the
+  // next watchdog tick, ON restores the platform's normal topmost treatment.
+  // macOS routes through reapplyMacVisibility because the level there is
+  // maintained by the stationary-collection machinery, not setAlwaysOnTop
+  // alone; Windows routes through reassertWinTopmost which demotes under the
+  // pref; other platforms (Linux) have no maintenance loop, so the writes
+  // happen here directly.
+  function applyPetAlwaysOnTopPreference() {
+    if (isMac) {
+      reapplyMacVisibility();
+      return;
+    }
+    if (isWin) {
+      reassertWinTopmost();
+      return;
+    }
+    const wantTopmost = !!getAlwaysOnTop();
+    for (const win of [getWin(), getHitWin()]) {
+      if (!isLiveWindow(win) || typeof win.setAlwaysOnTop !== "function") continue;
+      if (typeof win.isAlwaysOnTop === "function") {
+        if (win.isAlwaysOnTop() === wantTopmost) continue;
+      }
+      win.setAlwaysOnTop(wantTopmost);
+    }
+  }
+
   function cleanup() {
     stopTopmostWatchdog();
     stopFocusablePoll();
@@ -819,6 +931,7 @@ function createTopmostRuntime(options = {}) {
     stopFocusablePoll,
     noteFullscreenAutoHideOverride,
     clearFullscreenAutoHideOverride,
+    applyPetAlwaysOnTopPreference,
     cleanup,
   };
 }
