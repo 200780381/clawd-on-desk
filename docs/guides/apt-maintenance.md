@@ -4,14 +4,34 @@ The source is an opt-in distribution channel for existing official `amd64` relea
 
 ## Activation record
 
-**Key provisioned 2026-10-31; first publication and acceptance are still pending.**
+**Activated 2026-10-31: the key was provisioned, the first production publication succeeded, and the live acceptance below passed. Still to verify at the first app release: the release-event publication, the transition to a second complete snapshot, and the "Update with APT" button on a real Linux desktop.**
 
 - Primary fingerprint: `B315327BEFF98206ECC682875AC75344D51B2887` (RSA 4096, certification only, expires 2036-10-28).
 - Signing subkey: `B9BC4B583AB5651BEDCA5EB91757F4700BC2A311` (RSA 4096, expires 2029-10-30). Renew it by 2029-04-30, because installed sources only learn about new keys by upgrading `clawd-apt-source`.
 - Public bundle: `distribution/apt/archive-key.asc`. The primary secret and revocation certificate are kept offline in an encrypted disk image. Only the signing subkey is in the `apt-production` environment.
 - Preview run: [41150329833](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41150329833).
+- First production run (`publish=true`, `initial=true`, main `8b9a54bc`): [41155483770](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41155483770). Total 53 seconds, deploy job 20 seconds.
+- Published: Clawd 1.4.0, 1.3.0, 1.2.0 and `clawd-apt-source` 1.0.0. The 112,008,612-byte 1.4.0 package is served with the same size and SHA-256 as the release asset.
+- Host: `https://apt.clawdondesk.com/`. The certificate was issued before the first deployment, HTTPS is enforced and the domain is verified. The old `rullerzhou-afk.github.io/clawd-on-desk/` address returns 301 to the new host.
+- Headers: `server: GitHub.com`, `cache-control: max-age=600`, `x-cache` HIT/MISS, HTTP/2.
+- Live acceptance: [41155929686](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41155929686). Each system followed the guide: checksum check of the source package, `apt install`, `apt update --error-on=any`, candidate check, upgrade, later-update commands, `apt remove` keeps the source, `apt purge` removes source and key, and Clawd stays installed.
 
-After first publication, add the production run link and the HTTPS/APT acceptance evidence here. Never put secret-key material in the checkout, logs or artifacts.
+| System | apt / verifier | Upgrade 1.3.0 to 1.4.0 | Profile kept | Sandbox | App answered `/state` |
+|---|---|---|---|---|---|
+| Ubuntu 22.04.5 VM | 2.4.14 / gpgv 2.2.27 | pass | yes | root 755, AppArmor enabled | yes |
+| Ubuntu 24.04.5 VM | 2.8.3 / gpgv 2.4.4 | pass | yes | root 755, AppArmor profile installed | yes |
+| Debian 12 container | 2.6.1 / gpgv 2.2.40 | pass | yes | root 4755 | not run |
+| Debian 13 container | 3.0.3 / sqv | pass | yes | root 4755 | not run |
+
+- Tagged-build gate on the `ubuntu-latest` image (Ubuntu 26.04.1): `APT ready: authenticated repository and guide; version 1.4.0`.
+
+**Still to verify at the first app release** (not yet done):
+
+- `Request APT publication` fires on the real release event and the publisher adds the new version. This also gives the first complete-snapshot transition: old by-hash URLs must still work.
+- `gh workflow run publish-apt.yml --ref vX.Y.Z -f publish=true` from the tag must not deploy.
+- On a real Linux desktop: the update notification, the "Update with APT" button, and opening the guide.
+
+Never put secret-key material in the checkout, logs or artifacts.
 
 The source's address is `https://apt.clawdondesk.com/`: a DNS-only Cloudflare CNAME to `rullerzhou-afk.github.io`, with the files on this repository's Pages site. The hostname is written into every installed source, so it is one we own: hosting can later move by repointing DNS, without touching installed sources. Keep the record DNS-only, because GitHub cannot issue the certificate behind Cloudflare's proxy, and keep `clawdondesk.com` on auto-renew, because a lapsed domain breaks every installed source. This setup does not alter clawdondesk.com hosting.
 
