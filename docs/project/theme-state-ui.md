@@ -130,7 +130,7 @@ focus. All non-placeholder cells share the same popover for pointer and keyboard
 inspection, including empty/unknown/future coverage states; native title tooltips
 are omitted. Blur, Escape and body disposal dismiss the popover.
 
-Enumerated values use the existing `buildSegmentedRadio`: Codex permission mode,
+Enumerated values use the existing `buildSegmentedRadio`: Codex "Who handles approvals" (permission mode),
 Feishu platform and ID type, Recap period, and the Permissions/approval choices. Add a
 stable `id` for focus restoration and an accessible name (`ariaLabel` or
 `labelledBy`). Arrows select immediately. `onChange` may return synchronously or
@@ -138,7 +138,7 @@ asynchronously; false/rejection rolls back unless a newer `setValue` snapshot ha
 arrived. `setPending` and `setDisabled` are independent. Pending radios retain
 focus with `aria-disabled` and suppress activation; business-disabled options use
 native disabled. Disposal invalidates asynchronous completions. Pages retain
-cross-render command gates (including Codex permission mode); the primitive does
+cross-render command gates (including Codex "Who handles approvals"); the primitive does
 not persist settings. `onValueSync(value, element)` can update the Codex pill's CSS
 position alongside checked state, including rollback and snapshot updates.
 
