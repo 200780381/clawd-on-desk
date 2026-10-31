@@ -7,7 +7,7 @@ const { redactSecrets } = require("./secret-redact");
 const { getUpdateInstallFormat } = require("./update-install-format");
 
 const RELEASES_LATEST_URL = "https://github.com/rullerzhou-afk/clawd-on-desk/releases/latest";
-const APT_GUIDE_URL = "https://rullerzhou-afk.github.io/clawd-on-desk/apt/";
+const APT_GUIDE_URL = "https://apt.clawdondesk.com/";
 const DEPENDENCY_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const UPDATE_ERROR_DETAIL_MAX_LENGTH = 8 * 1024;
 
