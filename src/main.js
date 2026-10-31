@@ -5819,6 +5819,7 @@ const _roamCtx = {
   },
   getSleepTimeoutMs: () => getActiveTheme().timings.mouseSleepTimeout,
   isSizePreviewActive: () => petWindowRuntime.isSettingsSizePreviewActive(),
+  isScreenCaptureOverlayForeground: () => _isForegroundFullscreen.getLastObservation().captureOverlay === true,
   get miniTransitioning() { return _mini.getMiniTransitioning(); },
   applyState: (state, svgOverride, opts) => _state.applyState(state, svgOverride, opts),
   setState: (state, svgOverride, opts) => _state.setState(state, svgOverride, opts),
