@@ -64,9 +64,8 @@ keeps Clawd's local server running when its default ports are unavailable.
   difference:** only the pet and the HUD wait for subagents. The Dashboard,
   Telegram and Slack completion messages, phone notifications and Discord
   presence follow the parent session's own state and treat its Stop as done.
-  The animation was tested with real Codex sessions on Windows and macOS; the
-  held-back cue and the faster log reading have only been tested on macOS so far.
-  Thanks to @200780381.
+  These changes were tested with real Codex sessions on Windows and macOS. Thanks
+  to @200780381.
 - **Temporary chats** (#1258; related #1254) — confirmed temporary Codex Desktop
   threads no longer try to resume through a link that fails. Clicking one
   activates the already-open Codex app on Windows and macOS; it does not select
@@ -254,28 +253,75 @@ testing in #663) for reports and testing.
 
 ### Validation Status
 
-Draft validation is pending. The release smoke checklist requires packaged-app
-evidence for the v1.4.0 → v1.5.0 upgrade, fresh install, native packaging,
-updater metadata and signing, plus the new matrices: the second APT publication
-and the Linux update paths for `.deb`, AppImage and unpacked installs; phone
-pairing, migration and revocation on real phones; Codex subagents, temporary
-chats and plan progress; Claude "Handling tools"; the redesigned Settings in all
-seven languages; Windows hardware acceleration, reserved ports and paths
-containing curly quotes; macOS display changes; Linux X11 cursor tracking;
-ZCode, Reasonix, WorkBuddy, OpenCode and DeepSeek Harness on their hosts; and
-community themes.
+Checked with the v1.5.0 draft assets:
 
-The APT source itself was accepted before this release. On 2026-10-31 a
-1.3.0 → 1.4.0 upgrade through the source passed on Ubuntu 22.04 and 24.04 virtual
-machines, where the app also started and answered afterwards, and in Debian 12
-and 13 containers, which did not run the app. The tagged-build gate passed on the
-Ubuntu 26.04 runner image.
+- **Release CI** — the manual Build & Release run on `e752627d` and the tag
+  build passed every job: full test suites on Linux, macOS and Windows with no
+  failures, native-package audits for all five targets, Koffi packaged smoke,
+  updater metadata, and the retired Telegram sidecar assertion. The 13 draft
+  assets match the v1.4.0 set, all three `latest*.yml` files point at 1.5.0
+  artifacts with matching sizes, and the SHA-512 of the Windows x64 installer
+  and the macOS arm64 DMG match them.
+- **macOS signing** — both DMGs contain Developer ID signed, notarized apps; on
+  the arm64 app, `codesign`, `spctl` (Notarized Developer ID) and
+  `stapler validate` passed.
+- **Windows x64 (real machine)** — silent upgrade over an installed v1.4.0
+  (`/S /allusers --updated`). The installed app reports 1.5.0 and contains one
+  `win32_x64` Koffi binary, NOTICE and the bundled theme catalog, with no
+  official theme media. Preferences were unchanged at version 21, the Claude,
+  Codex and OpenCode configuration was byte-identical after startup, and Codex
+  hooks kept firing without a new `/hooks` review. Launched on the desktop, the
+  pet, tray and Settings worked. In the packaged app, Settings showed v1.5.0 in
+  About, the hardware acceleration switch with its restart note, the two
+  temporary-chat switches, and the Permissions & approval subpages.
+- **Local server ports (Windows, packaged, isolated profile)** — with all five
+  default ports held by another program, the app moved to a system-assigned port
+  and published it. A real Claude hook reached it, Claude's permission URL
+  followed it, a restart kept it, and releasing the ports returned the app to
+  23333.
+- **Codex subagents** — on Windows, real `codex exec` runs with two subagents
+  against the packaged app. The pet moved to the subagent animations and played
+  the happy animation once, both when the parent waited and when it stopped
+  first. A subagent appeared 0.14–1.37 seconds after its log was created (four
+  samples), even though the logs' modified time stayed frozen on NTFS. On macOS
+  the same changes were tested on a source build before merging.
+- **macOS arm64 (real machine)** — the draft DMG (hash checked) installed over
+  v1.4.0 and launched from `/Applications`; the pet and Settings worked and
+  About showed v1.5.0. Preferences were unchanged, Claude hooks moved to the
+  installed app, the Codex, OpenCode and WorkBuddy configuration was unchanged,
+  and a real Claude Code session reported the "Handling tools" state.
+- **APT source** — on 2026-10-31 a 1.3.0 → 1.4.0 upgrade through the source
+  passed on Ubuntu 22.04 and 24.04 virtual machines, where the app also started
+  and answered afterwards, and in Debian 12 and 13 containers, which did not run
+  the app. It passed after the first publication and again after a rehearsed
+  second publication with the same packages. The tagged-build gate passed on the
+  Ubuntu 26.04 runner image, and a publish request from the tag did not deploy.
+  Publishing this release started the publisher by itself, and the source had
+  1.5.0 about 75 seconds later, keeping 1.4.0 and 1.3.0 and retiring 1.2.0. The
+  previous index stayed available by hash, and a 1.3.0 → 1.5.0 upgrade through the
+  source passed on the same four systems.
+- **In-app update** — on a real Windows x64 desktop, v1.4.0 found v1.5.0,
+  downloaded it and finished through Restart Now. The app reopened as 1.5.0 under
+  the same install entry, with the Claude, Codex and OpenCode configuration
+  unchanged. On macOS arm64, a copy of v1.4.0 did the same; the updated copy is
+  validly signed and its app archive matches the v1.5.0 DMG.
 
-Items not run on the available hardware must remain **Not tested**; in
-particular, no real iPhone has validated phone pairing, the held-back Codex
-completion cue and faster log reading have only been tested on macOS, and the
-"Update with APT" button, the AppImage
-Download and Restart Now buttons, and "Open in new terminal" for a path with a
-curly quote have not been tried on real Linux or Windows desktops. The APT
-release-event publication and the second snapshot are verified only when this
-release is published.
+**Not tested**:
+
+- The in-app update for an AppImage, and the Later, quit and reopen path on Windows
+  and macOS.
+- Any real phone: pairing, migration, revocation and the Home Screen app.
+- macOS x64 and Windows ARM64 on real hardware (CI only).
+- Linux on real hardware: the "Update with APT" button, AppImage Download and
+  Restart Now, and X11 cursor tracking (CI only).
+- Ports reserved by Windows itself; only ports held by another program were
+  tested on the packaged app.
+- Real clicks on a Windows path containing a curly quote; the quoting was checked
+  with the Windows PowerShell 5.1 parser.
+- Real ZCode on Windows, and real Reasonix, WorkBuddy, OpenCode `serve` and
+  DeepSeek Harness hosts on this build. Their PRs record earlier host tests.
+- The hardware acceleration fix and the macOS display fix on this build; each
+  reporter confirmed them on a test build.
+- A community theme from the live catalog, which has none yet.
+- The macOS first-launch Gatekeeper prompt for a browser download.
+- Other checks in the release smoke checklist that are not listed above.
