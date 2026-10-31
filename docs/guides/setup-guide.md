@@ -45,7 +45,7 @@ Fresh installs enable and install only Claude Code and Codex by default. For oth
 
 ### Claude Code usage: official status line, not scraping
 
-Local Claude usage collection is **off by default**. You can opt in under **Settings → AI Coding Tools → Claude Code → Collect local Claude usage**. With an empty status-line slot, enabling it adds Clawd's visible `statusLine.command` to `~/.claude/settings.json`.
+Local Claude usage collection is **off by default**. You can opt in under **Settings → AI Coding Tools → Claude Code → Read local Claude quota and context usage**. With an empty status-line slot, enabling it adds Clawd's visible `statusLine.command` to `~/.claude/settings.json`.
 
 This uses Claude Code's documented extension mechanism, not a private or reverse-engineered endpoint. Claude Code's [official status-line documentation](https://code.claude.com/docs/en/statusline) provides `context_window.current_usage`, `context_window.context_window_size`, and (when available) `rate_limits` in the JSON sent to a status-line command. It also states that the command runs locally without consuming API tokens.
 
@@ -267,7 +267,7 @@ node hooks/install.js
 node hooks/install.js --statusline
 ```
 
-The statusline installer preserves an existing third-party statusline unless you explicitly opt into chaining; see [Agent Setup](#agent-setup). The Windows app accepts WSL Claude context/quota metadata only while **Collect local Claude usage** is enabled. With that switch off, metadata POSTs are successful no-ops. Pair itself does not install the statusline and supplies transcript fallback rather than an authoritative custom-provider context window. Windows startup reconciliation cannot remove a statusline from WSL's separate home.
+The statusline installer preserves an existing third-party statusline unless you explicitly opt into chaining; see [Agent Setup](#agent-setup). The Windows app accepts WSL Claude context/quota metadata only while **Read local Claude quota and context usage** is enabled. With that switch off, metadata POSTs are successful no-ops. Pair itself does not install the statusline and supplies transcript fallback rather than an authoritative custom-provider context window. Windows startup reconciliation cannot remove a statusline from WSL's separate home.
 
 Other manual hook commands, run from the same checkout:
 
