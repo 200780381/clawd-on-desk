@@ -445,8 +445,12 @@ module.exports = function initMenu(ctx) {
           keepOutOfTaskbar(ctx.win);
           if (isMac) {
             ctx.reapplyMacVisibility();
-          } else if (isWin && ctx.petAlwaysOnTop !== false) {
-            ctx.win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+          } else if (isWin) {
+            if (ctx.petAlwaysOnTop === false) {
+              ctx.raisePetWindows();
+            } else {
+              ctx.win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+            }
           }
         }
       },

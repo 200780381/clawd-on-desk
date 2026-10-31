@@ -436,6 +436,7 @@ describe("#1275: Windows menu close respects pet topmost", () => {
       const calls = [];
       const ctx = buildBaseCtx({
         petAlwaysOnTop: pref,
+        raisePetWindows: () => calls.push(["raise"]),
         win: {
           isDestroyed: () => false,
           showInactive: () => calls.push(["show"]),
@@ -444,7 +445,7 @@ describe("#1275: Windows menu close respects pet topmost", () => {
       });
       initMenu(ctx).popupMenuAt({ popup: ({ callback }) => callback() });
       assert.deepStrictEqual(calls, pref === false
-        ? [["show"]]
+        ? [["show"], ["raise"]]
         : [["show"], ["topmost", true, "pop-up-menu"]]);
     });
   }

@@ -209,6 +209,18 @@ function createTopmostRuntime(options = {}) {
     }
   }
 
+  // #1275: with topmost off both Windows pet windows share the normal band.
+  // Activation or showInactive raises only one, separating the body from its
+  // input surface; the invisible input can then cover another app. Raise the
+  // render window first and input second to keep the pair together.
+  function raisePetWindows() {
+    if (!isWin || getAlwaysOnTop()) return;
+    const win = getWin();
+    const hitWin = getHitWin();
+    if (isLiveWindow(win)) win.moveTop();
+    if (isLiveWindow(hitWin)) hitWin.moveTop();
+  }
+
   function reassertWinTopmost(fullscreenObservation) {
     if (!isWin) return;
     // #1275: the user's explicit "not always on top" wins over everything,
@@ -891,6 +903,7 @@ function createTopmostRuntime(options = {}) {
 
   return {
     reassertWinTopmost,
+    raisePetWindows,
     reapplyMacVisibility,
     syncImeEditingPetDodge,
     getPetTargetOpacity,

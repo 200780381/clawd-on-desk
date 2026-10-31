@@ -4808,6 +4808,7 @@ const _menuCtx = {
   clampToScreenVisual,
   getNearestWorkArea,
   reapplyMacVisibility,
+  raisePetWindows: () => topmostRuntime.raisePetWindows(),
   getSettingsWindow,
   getSystemVersion: () => process.getSystemVersion(),
   discoverThemes: () => themeLoader.discoverThemes(),
@@ -5494,7 +5495,10 @@ function createWindow() {
       petWindowRuntime.recoverVisiblePetAfterRendererLoad();
     },
     setDragLocked: (value) => {
-      if (value) _mini.cancelPendingMiniPeek(true);
+      if (value) {
+        _mini.cancelPendingMiniPeek(true);
+        topmostRuntime.raisePetWindows();
+      }
       petWindowRuntime.setDragLocked(value);
     },
     setMouseOverPet: (value) => { mouseOverPet = !!value; },

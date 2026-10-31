@@ -2233,3 +2233,63 @@ describe("#1275: macOS fullscreen auto-hide", () => {
     assert.deepStrictEqual(h.visibility, []);
   });
 });
+
+describe("#1275: raise the non-topmost Windows pet windows together", () => {
+  for (const { label, isWin, isMac, alwaysOnTop, expected } of [
+    { label: "Windows with topmost off", isWin: true, isMac: false, alwaysOnTop: false, expected: ["render", "input"] },
+    { label: "Windows with topmost on", isWin: true, isMac: false, alwaysOnTop: true, expected: [] },
+    { label: "Mac with topmost off", isWin: false, isMac: true, alwaysOnTop: false, expected: [] },
+    { label: "Linux with topmost off", isWin: false, isMac: false, alwaysOnTop: false, expected: [] },
+  ]) {
+    it(`#1275: raisePetWindows on ${label}`, () => {
+      const calls = [];
+      const win = new FakeWindow();
+      const hitWin = new FakeWindow();
+      win.moveTop = () => calls.push("render");
+      hitWin.moveTop = () => calls.push("input");
+      const runtime = createTopmostRuntime({
+        isWin,
+        isMac,
+        getAlwaysOnTop: () => alwaysOnTop,
+        getWin: () => win,
+        getHitWin: () => hitWin,
+      });
+
+      runtime.raisePetWindows();
+
+      assert.deepStrictEqual(calls, expected);
+      assert.deepStrictEqual(win.calls, []);
+      assert.deepStrictEqual(hitWin.calls, []);
+    });
+  }
+
+  it("#1275: raisePetWindows skips destroyed windows and still raises the live partner", () => {
+    for (const [renderDestroyed, inputDestroyed, expected] of [
+      [true, false, ["input"]],
+      [false, true, ["render"]],
+      [true, true, []],
+    ]) {
+      const calls = [];
+      const win = new FakeWindow({ destroyed: renderDestroyed });
+      const hitWin = new FakeWindow({ destroyed: inputDestroyed });
+      win.moveTop = () => {
+        assert.strictEqual(win.isDestroyed(), false);
+        calls.push("render");
+      };
+      hitWin.moveTop = () => {
+        assert.strictEqual(hitWin.isDestroyed(), false);
+        calls.push("input");
+      };
+      const runtime = createTopmostRuntime({
+        isWin: true,
+        isMac: false,
+        getAlwaysOnTop: () => false,
+        getWin: () => win,
+        getHitWin: () => hitWin,
+      });
+
+      assert.doesNotThrow(() => runtime.raisePetWindows());
+      assert.deepStrictEqual(calls, expected);
+    }
+  });
+});
