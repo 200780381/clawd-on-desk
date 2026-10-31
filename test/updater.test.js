@@ -183,7 +183,7 @@ describe("Linux package update routing", () => {
     f.updater.setupAutoUpdater();
     await f.updater.checkForUpdates(true);
     assert.equal(f.factoryCalls(), 0);
-    assert.deepEqual(f.opened, ["https://rullerzhou-afk.github.io/clawd-on-desk/apt/"]);
+    assert.deepEqual(f.opened, ["https://apt.clawdondesk.com/"]);
     const available = f.bubbles.find((b) => b.mode === "available");
     assert.equal(available.actions[0].label, "Update with APT");
     assert.match(available.message, /quit Clawd/);
