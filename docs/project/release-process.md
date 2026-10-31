@@ -98,7 +98,7 @@ replace a packaged-app or real-host check.
 - **macOS x64/arm64:** validate signing, quarantine, `codesign`, `spctl`, and notarization/stapler evidence when the signed assets are available; otherwise record **Not tested**.
 - **Windows/macOS/Linux:** fresh-install and launch the packaged app with a visible pet and no error dialog.
 - **Windows/macOS/Linux:** upgrade a real v1.4.0 installation to v1.5.0 and confirm the app launches and preserves the documented v1.4.0 settings; the prefs schema remains version 21, so this release performs no prefs migration.
-- **Windows; macOS on available architectures:** exercise a real v1.4.0 → v1.5.0 updater pair, including Restart Now and Later/quit/reopen, and record versions and asset hashes.
+- **Windows; macOS on available architectures (after publishing, because drafts are not offered by the updater):** exercise a real v1.4.0 → v1.5.0 updater pair, including Restart Now and Later/quit/reopen, and record versions and asset hashes. On Windows, use the real desktop: in an SSH session the installer stalled before uninstalling the old version, while the same update finished in about 30 seconds on the desktop.
 - **All supported permission hosts:** verify manual native Allow/Deny fallback after Clawd DND, disabled bubbles, disconnect, shutdown, or no-decision paths; no timeout or remote failure may invent a decision.
 
 **v1.5.0 new behavior matrix — 37 required items**

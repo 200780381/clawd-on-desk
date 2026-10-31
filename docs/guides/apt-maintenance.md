@@ -4,7 +4,7 @@ The source is an opt-in distribution channel for existing official `amd64` relea
 
 ## Activation record
 
-**Activated 2026-10-31: the key was provisioned, the first production publication succeeded, and the live acceptance below passed. Still to verify at the first app release: the release-event publication, the transition to a second complete snapshot, and the "Update with APT" button on a real Linux desktop.**
+**Activated 2026-10-31: the key was provisioned, the first production publication succeeded, and the live acceptance below passed. v1.5.0, the first app release through the source, was published the same day and its release-event publication passed. Still to verify: the "Update with APT" button on a real Linux desktop.**
 
 - Primary fingerprint: `B315327BEFF98206ECC682875AC75344D51B2887` (RSA 4096, certification only, expires 2036-10-28).
 - Signing subkey: `B9BC4B583AB5651BEDCA5EB91757F4700BC2A311` (RSA 4096, expires 2029-10-30). Renew it by 2029-04-30, because installed sources only learn about new keys by upgrading `clawd-apt-source`.
@@ -25,10 +25,15 @@ The source is an opt-in distribution channel for existing official `amd64` relea
 
 - Tagged-build gate on the `ubuntu-latest` image (Ubuntu 26.04.1): `APT ready: authenticated repository and guide; version 1.4.0`.
 
-**Still to verify at the first app release** (not yet done):
+First app release (v1.5.0):
 
-- `Request APT publication` fires on the real release event and the publisher adds the new version. This also gives the first complete-snapshot transition: old by-hash URLs must still work.
-- `gh workflow run publish-apt.yml --ref vX.Y.Z -f publish=true` from the tag must not deploy.
+- Second publication, rehearsed before tagging (`publish=true`, `initial=false`, main `e752627d`, same packages): [41170253019](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41170253019), 63 seconds. The acceptance above passed again: [41170380140](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41170380140).
+- Publish request from the tag (`gh workflow run publish-apt.yml --ref v1.5.0 -f publish=true`): [41173233652](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41173233652). Both jobs were skipped and the site did not change.
+- Release event: `Request APT publication` [41173720229](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41173720229) started the publisher [41173727453](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41173727453), and 1.5.0 was live about 75 seconds after the release. The source keeps 1.5.0, 1.4.0 and 1.3.0 and retired 1.2.0. The previous `Packages.gz` stayed available by hash after the index changed.
+- A 1.3.0 to 1.5.0 upgrade through the source passed on the same four systems: [41173899467](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41173899467).
+
+**Still to verify** (not yet done):
+
 - On a real Linux desktop: the update notification, the "Update with APT" button, and opening the guide.
 
 Never put secret-key material in the checkout, logs or artifacts.
