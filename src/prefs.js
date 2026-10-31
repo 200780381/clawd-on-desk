@@ -373,7 +373,7 @@ const SCHEMA = {
   // the pet entirely the user hides it (Hide Pet). No settings UI as of #562
   // (the toggle was a non-choice for borderless games — see
   // settings-tab-general.js); this pref persists as an escape hatch and can be
-  // re-exposed.
+  // re-exposed. #1282: recognized screen capture overlays always stand down.
   fullscreenOverlay: { type: "boolean", default: true },
   // #935: opt-in auto-hide — when a real fullscreen app owns the foreground
   // (Windows or macOS native Space probe, #1275), hide the pet + floating surfaces

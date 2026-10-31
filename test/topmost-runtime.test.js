@@ -103,6 +103,148 @@ function makeTimers() {
   };
 }
 
+describe("issue #1282: stand down for foreground screen capture", () => {
+  function makeCaptureRuntime(overrides = {}) {
+    const state = { fullscreen: "4242", captureOverlay: true, overlay: true, alwaysOnTop: true, autoHide: false, ...overrides };
+    const timers = makeTimers();
+    const windows = Object.fromEntries(
+      ["pet", "hit", "permission", "update", "hud", "quota"].map((name) => [name, new FakeWindow()])
+    );
+    const focusable = [];
+    const hidden = [];
+    const positions = [];
+    let recoveryCalls = 0;
+    let autoHidden = false;
+    const runtime = createTopmostRuntime({
+      isWin: true,
+      isMac: false,
+      getWin: () => windows.pet,
+      getHitWin: () => windows.hit,
+      getPendingPermissions: () => [{ bubble: windows.permission }],
+      getUpdateBubbleWindow: () => windows.update,
+      getSessionHudWindow: () => windows.hud,
+      getQuotaRingWindow: () => windows.quota,
+      isForegroundFullscreen: () => state.fullscreen,
+      getForegroundFullscreenObservation: () => ({ captureOverlay: state.captureOverlay }),
+      getFullscreenOverlay: () => state.overlay,
+      getAlwaysOnTop: () => state.alwaysOnTop,
+      getFullscreenAutoHide: () => state.autoHide,
+      isFullscreenAutoHidden: () => autoHidden,
+      setFullscreenAutoHidden: (value) => { hidden.push(value); autoHidden = value; },
+      setHitWinFocusable: (value) => focusable.push(value),
+      recoverCloakedPet: () => { recoveryCalls++; },
+      keepOutOfTaskbar: (win) => win.calls.push(["setSkipTaskbar", true]),
+      getPetWindowBounds: () => ({ x: 10, y: 20, width: 100, height: 100 }),
+      applyPetWindowPosition: (...args) => positions.push(args),
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    runtime.startTopmostWatchdog();
+    return {
+      state, runtime, windows, timers, focusable, hidden, positions,
+      watchdogTick: () => timers.intervals.find(({ ms }) => ms === createTopmostRuntime.TOPMOST_WATCHDOG_MS).fn(),
+      get recoveryCalls() { return recoveryCalls; },
+    };
+  }
+
+  it("issue #1282: skips pet and floating topmost writes while preserving taskbar maintenance and permissions", () => {
+    const fixture = makeCaptureRuntime();
+    fixture.runtime.startFocusablePoll();
+    fixture.watchdogTick();
+
+    for (const name of ["pet", "hit", "update", "hud", "quota"]) {
+      assert.deepStrictEqual(fixture.windows[name].calls, [["setSkipTaskbar", true]], name);
+    }
+    assert.deepStrictEqual(fixture.windows.permission.calls, [
+      ["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL], ["setSkipTaskbar", true],
+    ]);
+    assert.strictEqual(fixture.recoveryCalls, 0);
+    assert.deepStrictEqual(fixture.focusable, [false]);
+  });
+
+  for (const manualShow of [false, true]) {
+    it(`issue #1282: reassert and both pet guards stand down with manual show ${manualShow}`, () => {
+      const fixture = makeCaptureRuntime({ autoHide: manualShow, overlay: !manualShow });
+      const { runtime, windows, timers, positions } = fixture;
+      if (manualShow) {
+        runtime.startFocusablePoll();
+        runtime.noteFullscreenAutoHideOverride();
+      }
+      runtime.reassertWinTopmost();
+      runtime.guardAlwaysOnTop(windows.pet);
+      runtime.guardAlwaysOnTop(windows.hit);
+      windows.pet.emit("always-on-top-changed", null, false);
+      windows.hit.emit("always-on-top-changed", null, false);
+      assert.deepStrictEqual(windows.pet.calls, []);
+      assert.deepStrictEqual(windows.hit.calls, []);
+      assert.deepStrictEqual(positions, []);
+      assert.deepStrictEqual(timers.timeouts, []);
+    });
+  }
+
+  it("issue #1282: explicit non-fullscreen reassert ignores a stale capture marker", () => {
+    const { runtime, windows } = makeCaptureRuntime();
+    runtime.reassertWinTopmost(false);
+    for (const win of [windows.pet, windows.hit]) {
+      assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL]]);
+    }
+  });
+
+  it("issue #1282: master topmost off demotes the pet while floating surfaces still skip", () => {
+    const { windows, watchdogTick } = makeCaptureRuntime({ alwaysOnTop: false });
+    watchdogTick();
+    for (const win of [windows.pet, windows.hit]) {
+      assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false], ["setSkipTaskbar", true]]);
+    }
+    for (const name of ["update", "hud", "quota"]) {
+      assert.deepStrictEqual(windows[name].calls, [["setSkipTaskbar", true]], name);
+    }
+  });
+
+  it("issue #1282: floating surfaces skip capture even with fullscreen overlay disabled", () => {
+    const { windows, watchdogTick } = makeCaptureRuntime({ overlay: false });
+    watchdogTick();
+    for (const name of ["pet", "hit", "update", "hud", "quota"]) {
+      assert.deepStrictEqual(windows[name].calls, [["setSkipTaskbar", true]], name);
+    }
+  });
+
+  it("issue #1282: ordinary fullscreen keeps overlay mode topmost behavior", () => {
+    const { windows, watchdogTick } = makeCaptureRuntime({ captureOverlay: false });
+    watchdogTick();
+    for (const [name, win] of Object.entries(windows)) {
+      assert.deepStrictEqual(win.calls, [
+        ["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL], ["setSkipTaskbar", true],
+      ], name);
+    }
+  });
+
+  it("issue #1282: the next watchdog pass restores topmost when the capture marker disappears", () => {
+    const fixture = makeCaptureRuntime();
+    fixture.watchdogTick();
+    for (const win of Object.values(fixture.windows)) win.calls.length = 0;
+    fixture.state.captureOverlay = false;
+    fixture.watchdogTick();
+    for (const [name, win] of Object.entries(fixture.windows)) {
+      assert.deepStrictEqual(win.calls, [
+        ["setAlwaysOnTop", true, createTopmostRuntime.WIN_TOPMOST_LEVEL], ["setSkipTaskbar", true],
+      ], name);
+    }
+    assert.strictEqual(fixture.recoveryCalls, 1);
+  });
+
+  for (const captureOverlay of [true, false]) {
+    it(`issue #1282: fullscreen auto-hide remains active with capture marker ${captureOverlay}`, () => {
+      const fixture = makeCaptureRuntime({ autoHide: true, captureOverlay });
+      fixture.runtime.startFocusablePoll();
+      assert.deepStrictEqual(fixture.hidden, [true]);
+      assert.deepStrictEqual(fixture.focusable, [false]);
+    });
+  }
+});
+
 describe("topmost runtime Windows recovery", () => {
   it("reasserts the pet and hit windows at the Windows topmost level", () => {
     const win = new FakeWindow();

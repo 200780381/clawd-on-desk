@@ -611,9 +611,9 @@ function createTopmostRuntime(options = {}) {
   function startTopmostWatchdog() {
     if (!isWin || topmostWatchdog) return;
     topmostWatchdog = setIntervalFn(() => {
-      // Only the pet + hit windows stand down under a fullscreen foreground.
-      // Permission bubbles / HUD below are deliberate interruptions the user
-      // must act on, so they keep re-asserting even over a fullscreen app.
+      // The pet + hit windows normally stand down under fullscreen. Capture
+      // overlays also hold the update bubble, HUD and quota ring in place;
+      // permission bubbles remain deliberate interruptions the user must act on.
       // #562: stand down topmost over a fullscreen foreground app UNLESS the
       // user opted into overlay mode (then keep floating on top). The hit
       // window's activation is handled separately on the faster focusable poll
@@ -627,6 +627,7 @@ function createTopmostRuntime(options = {}) {
       const petTopmostMode = !getAlwaysOnTop()
         ? "demote"
         : (standDownForFullscreen ? "skip" : "assert");
+      const floatingTopmostMode = isScreenCaptureOverlayForeground() ? "skip" : "assert";
       reassertWindowAndTaskbar(getWin(), { topmost: petTopmostMode });
       reassertWindowAndTaskbar(getHitWin(), { topmost: petTopmostMode });
 
@@ -644,17 +645,17 @@ function createTopmostRuntime(options = {}) {
 
       const updateBubbleWin = getUpdateBubbleWindow();
       if (isLiveWindow(updateBubbleWin) && updateBubbleWin.isVisible()) {
-        reassertWindowAndTaskbar(updateBubbleWin);
+        reassertWindowAndTaskbar(updateBubbleWin, { topmost: floatingTopmostMode });
       }
 
       const sessionHudWin = getSessionHudWindow();
       if (isLiveWindow(sessionHudWin) && sessionHudWin.isVisible()) {
-        reassertWindowAndTaskbar(sessionHudWin);
+        reassertWindowAndTaskbar(sessionHudWin, { topmost: floatingTopmostMode });
       }
 
       const quotaRingWin = getQuotaRingWindow();
       if (isLiveWindow(quotaRingWin) && quotaRingWin.isVisible()) {
-        reassertWindowAndTaskbar(quotaRingWin);
+        reassertWindowAndTaskbar(quotaRingWin, { topmost: floatingTopmostMode });
       }
 
       const contextMenuOwner = getContextMenuOwner();
@@ -746,13 +747,23 @@ function createTopmostRuntime(options = {}) {
       || (hasWindowIdentity && fsOverrideBoundTo === fullscreenId);
   }
 
+  function isScreenCaptureOverlayForeground() {
+    const observation = getForegroundFullscreenObservation();
+    return !!observation && observation.captureOverlay === true;
+  }
+
   // A manual Show while auto-hide is enabled is an explicit request to keep
   // the pet visible over this fullscreen episode. Even when the older overlay
   // preference is off, that visible pet must stay in the topmost band; otherwise
   // the state says "shown" while an exclusive fullscreen window covers it.
   function shouldStandDownForFullscreen(fullscreenObservation) {
-    return !!fullscreenObservation
-      && !getFullscreenOverlay()
+    if (!fullscreenObservation) return false;
+    // #1282: capture overlays are already topmost and open above the pet; only
+    // our periodic reassertion raises it over them. Stop raising rather than
+    // demoting, which scrambles z-order (see prefs.js). #562's overlay behavior
+    // for fullscreen games without their own topmost window stays unchanged.
+    if (isScreenCaptureOverlayForeground()) return true;
+    return !getFullscreenOverlay()
       && !isFullscreenAutoHideOverrideActive(fullscreenObservation);
   }
 
