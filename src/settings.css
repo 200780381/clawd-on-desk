@@ -1900,14 +1900,24 @@ html, body {
   .settings-status.warn .settings-status-dot { background: #f6c343; }
 }
 
-/* Card-body groups: label in a fixed left gutter, rows only name + control.
+/* Card-body groups: label in a left gutter, rows only name + control.
    The dashed separators keep rows apart now that the descriptions are folded
    behind the (i) toggle. */
 .agent-detail-group,
 .settings-detail-group {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
   border-bottom: 1px solid var(--row-border);
+}
+/* The groups of one agent card share the label column through subgrid: it is
+   58px (CJK labels) and grows to the longest label of the card (en, es, pt-BR),
+   so every group's rows start on the same line. */
+.agent-detail-groups {
+  display: grid;
+  grid-template-columns: minmax(58px, max-content) minmax(0, 1fr);
+}
+.agent-detail-group {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
 }
 .settings-detail-group {
   /* Localized channel group names need more room than the short agent labels. */
@@ -1920,6 +1930,9 @@ html, body {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+.agent-detail-group-label {
+  padding-right: 8px;
 }
 .settings-detail-group-label {
   padding-right: 14px;
@@ -1939,6 +1952,7 @@ html, body {
   font-size: 12.5px;
 }
 @media (max-width: 720px) {
+  .agent-detail-groups,
   .agent-detail-group,
   .settings-detail-group {
     grid-template-columns: minmax(0, 1fr);

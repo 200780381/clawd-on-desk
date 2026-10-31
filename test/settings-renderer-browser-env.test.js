@@ -21386,6 +21386,19 @@ describe("settings renderer browser environment", () => {
     for (const group of harness.content.querySelectorAll(".agent-detail-group")) {
       assert.ok(group.querySelector(".agent-detail-group-rows").children.length > 0);
     }
+
+    // The groups of one card sit in a single wrapper (the shared label column);
+    // the disconnect footer stays outside it, full width.
+    for (const card of [claude, codex, kimi, custom]) {
+      const wrappers = card.querySelectorAll(".agent-detail-groups");
+      assert.strictEqual(wrappers.length, 1);
+      assert.deepStrictEqual(
+        wrappers[0].children.map((child) => child.className),
+        wrappers[0].children.map(() => "agent-detail-group"),
+      );
+      assert.strictEqual(wrappers[0].querySelectorAll(".agent-disconnect").length, 0);
+      assert.strictEqual(card.querySelectorAll(".agent-disconnect").length, 1);
+    }
   });
 
   it("folds descriptions behind an (i) toggle only inside card-body rows", () => {
@@ -21781,7 +21794,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(!agentsSource.includes("buildAgentInstallHintBanner"));
     assert.ok(!css.includes(".agent-badge"));
 
-    const defaultGroupIndex = css.indexOf("grid-template-columns: 58px minmax(0, 1fr)");
+    const defaultGroupIndex = css.indexOf("grid-template-columns: minmax(58px, max-content) minmax(0, 1fr)");
     const mobileGroupIndex = css.indexOf("@media (max-width: 720px)", defaultGroupIndex);
     assert.ok(defaultGroupIndex >= 0 && mobileGroupIndex > defaultGroupIndex,
       "the narrow-window single-column rule must come after the default two-column rule");
