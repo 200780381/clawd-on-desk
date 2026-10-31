@@ -2023,13 +2023,14 @@ describe("topmost runtime master always-on-top pref (#1275)", () => {
     ]);
   });
 
-  it("macOS reapplyMacVisibility drops the pet body to the normal level when the pref is off", () => {
+  it("#1275: macOS reapplyMacVisibility drops the pet body to the normal level when the pref is off", () => {
     const win = new FakeWindow();
     const hitWin = new FakeWindow();
     const permissionBubble = new FakeWindow();
     const stationaryCalls = [];
     const runtime = createTopmostRuntime({
       isMac: true,
+      isWin: false,
       getWin: () => win,
       getHitWin: () => hitWin,
       getPendingPermissions: () => [{ bubble: permissionBubble }],
@@ -2042,35 +2043,37 @@ describe("topmost runtime master always-on-top pref (#1275)", () => {
 
     runtime.reapplyMacVisibility();
 
-    // Pet body: normal level, plain cross-space visibility (no fullscreen-Space
-    // membership), and definitely no SkyLight private-space delegation.
+    // #1275: stay out of the private Space and preserve the Dock setting.
     assert.deepStrictEqual(win.calls, [
       ["setAlwaysOnTop", false],
-      ["setVisibleOnAllWorkspaces", true],
+      ["setVisibleOnAllWorkspaces", true, { skipTransformProcessType: true }],
     ]);
     assert.deepStrictEqual(hitWin.calls, [
       ["setAlwaysOnTop", false],
-      ["setVisibleOnAllWorkspaces", true],
+      ["setVisibleOnAllWorkspaces", true, { skipTransformProcessType: true }],
     ]);
     assert.deepStrictEqual(stationaryCalls, [permissionBubble],
       "floating surfaces keep the full topmost treatment");
   });
 
-  it("macOS applyPetAlwaysOnTopPreference routes through reapplyMacVisibility", () => {
-    const win = new FakeWindow();
-    const runtime = createTopmostRuntime({
-      isMac: true,
-      getWin: () => win,
-      applyStationaryCollectionBehavior: () => true,
-      getAlwaysOnTop: () => false,
-    });
+  it("#1275: macOS applyPetAlwaysOnTopPreference leaves both windows unchanged", () => {
+    for (const alwaysOnTop of [false, true]) {
+      const win = new FakeWindow();
+      const hitWin = new FakeWindow();
+      const runtime = createTopmostRuntime({
+        isMac: true,
+        isWin: false,
+        getWin: () => win,
+        getHitWin: () => hitWin,
+        applyStationaryCollectionBehavior: () => assert.fail("no private-Space writes"),
+        getAlwaysOnTop: () => alwaysOnTop,
+      });
 
-    runtime.applyPetAlwaysOnTopPreference();
+      runtime.applyPetAlwaysOnTopPreference();
 
-    assert.deepStrictEqual(win.calls, [
-      ["setAlwaysOnTop", false],
-      ["setVisibleOnAllWorkspaces", true],
-    ]);
+      assert.deepStrictEqual(win.calls, []);
+      assert.deepStrictEqual(hitWin.calls, []);
+    }
   });
 
   it("macOS syncImeEditingPetDodge is inert when the pref is off (restore would re-delegate above)", () => {
@@ -2102,41 +2105,6 @@ describe("topmost runtime master always-on-top pref (#1275)", () => {
     assert.deepStrictEqual(dodgeReports, []);
   });
 
-  it("macOS syncImeEditingPetDodge unwinds an active dodge when the pref flips off", () => {
-    const win = new FakeWindow();
-    const hitWin = new FakeWindow();
-    const bubble = new FakeWindow({ bounds: { x: 0, y: 0, width: 400, height: 300 } });
-    bubble.__clawdMacTextInputBubble = true;
-    const dodgeReports = [];
-    let alwaysOnTop = true;
-    const runtime = createTopmostRuntime({
-      isMac: true,
-      getWin: () => win,
-      getHitWin: () => hitWin,
-      getPetWindowBounds: () => ({ x: 10, y: 10, width: 200, height: 200 }),
-      getHitRectScreen: (bounds) => bounds,
-      getPendingPermissions: () => [{ bubble }],
-      applyStationaryCollectionBehavior: () => true,
-      deDelegateWindowFromStationarySpace: () => true,
-      setImeEditingPetDodge: (value) => dodgeReports.push(value),
-      getAlwaysOnTop: () => alwaysOnTop,
-    });
-
-    // Dodge engages while the pref is on (pet de-delegated + click-through).
-    runtime.syncImeEditingPetDodge();
-    assert.deepStrictEqual(dodgeReports, [true]);
-
-    alwaysOnTop = false;
-    runtime.syncImeEditingPetDodge();
-
-    // The unwind restores opacity, clears the click-through intent, and never
-    // calls restorePetDelegate (no stationary write after the flip). The
-    // engagement itself also faded the pet back to 1 (native de-delegation
-    // succeeded, no fade fallback), hence two opacity writes total.
-    assert.deepStrictEqual(win.calls, [["setOpacity", 1], ["setOpacity", 1]]);
-    assert.deepStrictEqual(dodgeReports, [true, false]);
-  });
-
   it("applyPetAlwaysOnTopPreference demotes and restores directly on platforms without a maintenance loop", () => {
     const win = new FakeWindow();
     const hitWin = new FakeWindow();
@@ -2157,5 +2125,111 @@ describe("topmost runtime master always-on-top pref (#1275)", () => {
     runtime.applyPetAlwaysOnTopPreference();
     assert.deepStrictEqual(win.calls, [["setAlwaysOnTop", false], ["setAlwaysOnTop", true]]);
     assert.deepStrictEqual(hitWin.calls, [["setAlwaysOnTop", false], ["setAlwaysOnTop", true]]);
+  });
+});
+
+describe("#1275: macOS fullscreen auto-hide", () => {
+  function createHarness({ isWin = false, isMac = true, pref = false } = {}) {
+    const timers = makeTimers();
+    const win = new FakeWindow();
+    const hitWin = new FakeWindow();
+    const state = { pref, fullscreen: false, hidden: false, probes: 0 };
+    const visibility = [];
+    const focusable = [];
+    const runtime = createTopmostRuntime({
+      isWin,
+      isMac,
+      getWin: () => win,
+      getHitWin: () => hitWin,
+      getFullscreenAutoHide: () => state.pref,
+      isForegroundFullscreen: () => { state.probes++; return state.fullscreen; },
+      isFullscreenAutoHidden: () => state.hidden,
+      setFullscreenAutoHidden: (value) => { state.hidden = value; visibility.push(value); },
+      setHitWinFocusable: (value) => focusable.push(value),
+      setInterval: timers.setInterval,
+      clearInterval: timers.clearInterval,
+    });
+    return { state, win, hitWin, runtime, timers, visibility, focusable,
+      tick: () => timers.intervals[0].fn() };
+  }
+
+  it("#1275: default Mac settings poll without probing or writing windows", () => {
+    const h = createHarness();
+    h.state.fullscreen = "mac-space:528";
+    h.runtime.startFocusablePoll();
+    assert.strictEqual(h.timers.intervals.length, 1);
+    assert.strictEqual(h.timers.intervals[0].ms, 1000);
+    h.tick();
+    assert.strictEqual(h.state.probes, 0);
+    assert.deepStrictEqual(h.visibility, []);
+    assert.deepStrictEqual(h.focusable, []);
+    assert.deepStrictEqual(h.win.calls, []);
+    assert.deepStrictEqual(h.hitWin.calls, []);
+    h.runtime.cleanup();
+    assert.strictEqual(h.timers.intervals[0].cleared, true);
+  });
+
+  it("#1275: Mac auto-hide enters fullscreen, restores on exit and clears when disabled", () => {
+    const h = createHarness({ pref: true });
+    h.runtime.startFocusablePoll();
+    h.state.fullscreen = "mac-space:528";
+    h.tick();
+    assert.deepStrictEqual(h.visibility, [true]);
+    h.state.fullscreen = false;
+    h.tick();
+    assert.deepStrictEqual(h.visibility, [true, false]);
+    h.state.fullscreen = "mac-space:533";
+    h.tick();
+    h.state.pref = false;
+    h.tick();
+    assert.deepStrictEqual(h.visibility, [true, false, true, false]);
+    const probes = h.state.probes;
+    h.tick();
+    assert.strictEqual(h.state.probes, probes);
+    assert.deepStrictEqual(h.focusable, []);
+  });
+
+  it("#1275: manual show survives the same Mac fullscreen Space and hides in the next one", () => {
+    const h = createHarness({ pref: true });
+    h.state.fullscreen = "mac-space:528";
+    h.runtime.startFocusablePoll();
+    assert.deepStrictEqual(h.visibility, [true]);
+    h.runtime.noteFullscreenAutoHideOverride();
+    h.state.hidden = false;
+    h.tick();
+    assert.strictEqual(h.state.hidden, false);
+    h.state.fullscreen = false;
+    h.tick();
+    h.state.fullscreen = "mac-space:528";
+    h.tick();
+    assert.strictEqual(h.state.hidden, false);
+    h.state.fullscreen = false;
+    h.tick();
+    h.state.fullscreen = "mac-space:533";
+    h.tick();
+    assert.strictEqual(h.state.hidden, true);
+    assert.deepStrictEqual(h.visibility, [true, true]);
+  });
+
+  it("#1275: Linux never starts fullscreen polling", () => {
+    const h = createHarness({ isWin: false, isMac: false, pref: true });
+    h.runtime.startFocusablePoll();
+    assert.strictEqual(h.timers.intervals.length, 0);
+    assert.strictEqual(h.state.probes, 0);
+    assert.deepStrictEqual(h.visibility, []);
+  });
+
+  it("#1275: the Windows poll still probes and updates focusability with auto-hide off", () => {
+    // #1275: isWin is also used by fixtures on a Mac host, where isMac defaults true.
+    const h = createHarness({ isWin: true, isMac: true });
+    h.state.fullscreen = "123";
+    h.runtime.startFocusablePoll();
+    assert.strictEqual(h.state.probes, 1);
+    assert.deepStrictEqual(h.focusable, [false]);
+    h.state.fullscreen = false;
+    h.tick();
+    assert.strictEqual(h.state.probes, 2);
+    assert.deepStrictEqual(h.focusable, [false, true]);
+    assert.deepStrictEqual(h.visibility, []);
   });
 });

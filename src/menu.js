@@ -445,7 +445,7 @@ module.exports = function initMenu(ctx) {
           keepOutOfTaskbar(ctx.win);
           if (isMac) {
             ctx.reapplyMacVisibility();
-          } else if (isWin) {
+          } else if (isWin && ctx.petAlwaysOnTop !== false) {
             ctx.win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
           }
         }

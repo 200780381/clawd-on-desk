@@ -350,6 +350,7 @@ function registerSettingsIpc(options = {}) {
   const copyUpdateError = options.copyUpdateError || (() => ({ status: "error", message: "clipboard unavailable" }));
   const getHardwareAccelerationDisabledAtStartup =
     options.getHardwareAccelerationDisabledAtStartup || (() => false);
+  const getPetAlwaysOnTopAtStartup = options.getPetAlwaysOnTopAtStartup || (() => true);
   const showTutorial = options.showTutorial || (() => ({
     status: "error",
     message: "Tutorial is unavailable",
@@ -1145,10 +1146,11 @@ function registerSettingsIpc(options = {}) {
     return copyUpdateError(boundedText);
   });
 
-  // #1183: the GPU switch only applies at launch; Settings compares this with
-  // the saved pref to offer a restart.
+  // #1183/#1275: Settings compares launch values with saved preferences to
+  // offer a restart for GPU mode and macOS pet topmost changes.
   handle("settings:get-startup-render-state", () => ({
     hardwareAccelerationDisabled: getHardwareAccelerationDisabledAtStartup() === true,
+    petAlwaysOnTop: getPetAlwaysOnTopAtStartup(),
   }));
 
   handle("settings:show-tutorial", async () => {

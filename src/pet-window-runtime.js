@@ -1376,6 +1376,13 @@ function createPetWindowRuntime(options = {}) {
   }
 
   function showPetWindows() {
+    // #1275: these windows stayed shown; showInactive would raise the pet
+    // above the ordinary window that was covering it.
+    if (isMac && !getAlwaysOnTop()) {
+      const win = getRenderWindow();
+      if (isLiveWindow(win)) win.setOpacity(1);
+      return;
+    }
     const win = getRenderWindow();
     if (isLiveWindow(win)) {
       uncloakIfAbnormal(win);
@@ -1391,6 +1398,14 @@ function createPetWindowRuntime(options = {}) {
   }
 
   function hidePetWindows() {
+    // #1275: hiding a non-topmost Mac window leaves it on just one Space
+    // after fullscreen exits (observed on-device). Keep both windows shown;
+    // opacity hides the body and applyHitInputState makes the input pass through.
+    if (isMac && !getAlwaysOnTop()) {
+      const win = getRenderWindow();
+      if (isLiveWindow(win)) win.setOpacity(0);
+      return;
+    }
     const win = getRenderWindow();
     if (isLiveWindow(win)) win.hide();
     const hitWin = getHitWindow();

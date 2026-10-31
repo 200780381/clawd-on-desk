@@ -35,6 +35,7 @@ function makeWindow(bounds = { x: 10, y: 20, width: 100, height: 100 }) {
     setAlwaysOnTop: (...args) => calls.push(["setAlwaysOnTop", ...args]),
     setVisibleOnAllWorkspaces: (...args) => calls.push(["setVisibleOnAllWorkspaces", ...args]),
     setFocusable: (value) => calls.push(["setFocusable", value]),
+    setOpacity: (value) => calls.push(["setOpacity", value]),
     showInactive: () => calls.push(["showInactive"]),
     hide: () => calls.push(["hide"]),
     loadFile: (file) => calls.push(["loadFile", file]),
@@ -4568,5 +4569,120 @@ describe("pet-window theme config transport", () => {
     assert.ok(!source.includes('"--theme-config=" +'));
     assert.ok(!source.includes('"--hit-theme-config=" +'));
     assert.ok(source.includes("32,767"));
+  });
+});
+
+describe("#1275: non-topmost Mac pet visibility preserves Space membership", () => {
+  for (const setter of ["setPetHidden", "setFullscreenAutoHidden"]) {
+    it(`#1275: Mac with topmost off uses only opacity for ${setter} and restores input`, () => {
+      const h = createRuntime({
+        isWin: false,
+        isMac: true,
+        isLinux: false,
+        getAlwaysOnTop: () => false,
+      });
+
+      h.runtime[setter](true);
+      assert.equal(h.runtime.isPetEffectivelyHidden(), true);
+      assert.deepEqual(h.renderWin.calls, [["setOpacity", 0]]);
+      assert.deepEqual(h.hitWin.calls, [["setIgnoreMouseEvents", true]]);
+
+      h.renderWin.calls.length = 0;
+      h.hitWin.calls.length = 0;
+      h.runtime[setter](false);
+      assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+      assert.deepEqual(h.renderWin.calls, [["setOpacity", 1]]);
+      assert.deepEqual(h.hitWin.calls, [["setIgnoreMouseEvents", false]]);
+    });
+
+    for (const platform of ["darwin", "win32"]) {
+      it(`#1275: ${platform} with topmost ${platform === "darwin" ? "on" : "off"} keeps hide/show for ${setter}`, () => {
+        const h = createRuntime({
+          isWin: platform === "win32",
+          isMac: platform === "darwin",
+          isLinux: false,
+          getAlwaysOnTop: () => platform === "darwin",
+        });
+
+        h.runtime[setter](true);
+        assert.deepEqual(h.renderWin.calls, [["hide"]]);
+        assert.deepEqual(h.hitWin.calls, [["hide"], ["setIgnoreMouseEvents", true]]);
+
+        h.renderWin.calls.length = 0;
+        h.hitWin.calls.length = 0;
+        h.runtime[setter](false);
+        assert.deepEqual(h.renderWin.calls, [["showInactive"]]);
+        assert.deepEqual(h.hitWin.calls, [["showInactive"], ["setIgnoreMouseEvents", false]]);
+      });
+    }
+
+    it(`#1275: bring-to-primary clears ${setter} before restoring the non-topmost Mac pet`, () => {
+      const h = createRuntime({
+        isWin: false,
+        isMac: true,
+        isLinux: false,
+        getAlwaysOnTop: () => false,
+      });
+      h.runtime[setter](true);
+      h.renderWin.calls.length = 0;
+      const hiddenAtOpacityWrites = [];
+      const setOpacity = h.renderWin.setOpacity;
+      h.renderWin.setOpacity = (value) => {
+        hiddenAtOpacityWrites.push(h.runtime.isPetEffectivelyHidden());
+        setOpacity(value);
+      };
+
+      h.runtime.bringPetToPrimaryDisplay();
+
+      assert.equal(h.runtime.isPetEffectivelyHidden(), false);
+      assert.deepEqual(hiddenAtOpacityWrites, [false]);
+      assert.deepEqual(
+        h.renderWin.calls.filter(([name]) => ["hide", "showInactive", "setOpacity"].includes(name)),
+        [["setOpacity", 1]],
+      );
+      assert.ok(!h.hitWin.calls.some(([name]) => name === "hide" || name === "showInactive"));
+    });
+  }
+
+  it("#1275: stacked manual and fullscreen hides restore opacity and input only after both clear", () => {
+    const h = createRuntime({
+      isWin: false,
+      isMac: true,
+      isLinux: false,
+      getAlwaysOnTop: () => false,
+    });
+    h.runtime.setFullscreenAutoHidden(true);
+    h.runtime.setPetHidden(true);
+    h.runtime.setFullscreenAutoHidden(false);
+    assert.equal(h.runtime.isPetEffectivelyHidden(), true);
+    assert.deepEqual(h.renderWin.calls, [["setOpacity", 0]]);
+    assert.deepEqual(h.hitWin.calls, [["setIgnoreMouseEvents", true]]);
+
+    h.runtime.setPetHidden(false);
+    assert.deepEqual(h.renderWin.calls, [["setOpacity", 0], ["setOpacity", 1]]);
+    assert.deepEqual(h.hitWin.calls, [["setIgnoreMouseEvents", true], ["setIgnoreMouseEvents", false]]);
+  });
+
+  it("#1275: recovery leaves a hidden non-topmost Mac pet transparent", () => {
+    for (const setter of ["setPetHidden", "setFullscreenAutoHidden"]) {
+      const inspector = makeCloakInspector({ flag: 1 });
+      const h = createRuntime({
+        isWin: false,
+        isMac: true,
+        isLinux: false,
+        getAlwaysOnTop: () => false,
+        cloakInspector: inspector,
+      });
+      h.runtime[setter](true);
+      h.renderWin.calls.length = 0;
+      h.hitWin.calls.length = 0;
+
+      assert.equal(h.runtime.recoverIfCloaked(), "hidden");
+      assert.equal(h.runtime.recoverVisiblePetAfterRendererLoad(), "unsupported");
+      assert.deepEqual(inspector.calls, []);
+      assert.deepEqual(h.renderWin.calls, []);
+      assert.deepEqual(h.hitWin.calls, []);
+      assert.equal(h.runtime.isPetEffectivelyHidden(), true);
+    }
   });
 });

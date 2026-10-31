@@ -104,26 +104,23 @@ function createTopmostRuntime(options = {}) {
   // #1275: master always-on-top preference for the pet body (render + hit
   // windows). When false, every path that would put the pet back into the
   // topmost band stands down and the two windows are demoted to the normal
-  // band instead: other windows — including fullscreen video — can cover the
-  // pet. Floating surfaces (permission bubbles, HUD, update bubble, quota
-  // ring) keep their own topmost behavior; they are not the pet. Defaults to
-  // true so the desktop-pet contract is unchanged when main.js doesn't wire
-  // the pref.
+  // band instead: other windows can cover the pet. On macOS main.js supplies
+  // the launch value because private-Space membership cannot be undone.
+  // Floating surfaces keep their own topmost behavior. Defaults to true so
+  // the desktop-pet contract is unchanged when main.js doesn't wire the pref.
   const getAlwaysOnTop = options.getAlwaysOnTop != null
     ? defaultGetter(options.getAlwaysOnTop)
     : () => true;
-  // Windows-only: when a fullscreen app/game owns the foreground, the watchdog
-  // and always-on-top guard stand down so we stop clawing the pet back over it
-  // every tick (#538). Defaults to "never fullscreen" so non-Windows and any
-  // FFI-load failure keep the original always-reassert behavior.
+  // #538: Windows watchdog/guard stand down under a foreground fullscreen
+  // app so each tick does not claw the pet back over it. #1275 shares this
+  // probe with Mac auto-hide; the default false keeps native failures inert.
   const isForegroundFullscreen = options.isForegroundFullscreen || (() => false);
   // Windows-only (#562): when the user opts into fullscreen-overlay mode the pet
   // floats ON TOP of a foreground fullscreen app instead of standing down. The
   // topmost watchdog/guard keep re-asserting (pet stays visible + draggable over
   // e.g. a borderless game); only the focus-stealing activation still stands
   // down so a click can't yank the game's foreground. Defaults off → the
-  // original #538 stand-down. Off Windows isForegroundFullscreen is always false
-  // so this is moot.
+  // original #538 stand-down. Only Windows topmost paths read this gate.
   const getFullscreenOverlay = options.getFullscreenOverlay || (() => false);
   // Companion metadata for the boolean-compatible probe above. A reliable
   // non-fullscreen observation still carries the foreground HWND identity,
@@ -134,14 +131,11 @@ function createTopmostRuntime(options = {}) {
   // true = still live, false = definitely dead, null = unavailable/error.
   // Only a definite false may clear the episode; failures preserve behavior.
   const isFullscreenWindowAlive = options.isFullscreenWindowAlive || (() => null);
-  // Windows-only (#935): opt-in auto-hide — when a fullscreen app owns the
-  // foreground, hide the pet entirely instead of floating over (overlay) or
-  // standing down below (#538). Rides the 1s focusable poll, which already
-  // tracks the fullscreen state at the cadence hiding needs. The writer is
-  // pet-window-runtime's setFullscreenAutoHidden (a separate visibility layer
-  // stacked on the user's manual hide); defaults keep everything inert when
-  // main.js doesn't wire the pref, and off Windows isForegroundFullscreen is
-  // constant false.
+  // #935/#1275: Windows and macOS auto-hide rides the 1s focusable poll.
+  // main.js also enables it for a non-topmost Mac pet, which can otherwise
+  // remain above native fullscreen apps. The writer is pet-window-runtime's
+  // setFullscreenAutoHidden, stacked on the user's manual hide. Defaults keep
+  // this inert when main.js doesn't wire the pref.
   const getFullscreenAutoHide = options.getFullscreenAutoHide || (() => false);
   const setFullscreenAutoHidden = options.setFullscreenAutoHidden
     || (() => ({ applied: false, deferred: false, changed: false }));
@@ -288,15 +282,12 @@ function createTopmostRuntime(options = {}) {
       const deferUntil = Number(win.__clawdMacDeferredVisibilityUntil) || 0;
       if (deferUntil > Date.now()) return;
       if (deferUntil) delete win.__clawdMacDeferredVisibilityUntil;
-      // #1275: master always-on-top off — the pet body drops to the normal
-      // window level and stops joining fullscreen Spaces. The cross-space
-      // write is re-issued WITHOUT visibleOnFullScreen so a previously
-      // auxiliary window loses its fullscreen-Space membership; plain
-      // all-workspaces visibility stays on so the pet still follows normal
-      // Space switches. Floating surfaces keep the full treatment below.
+      // #1275: the launch value keeps a non-topmost pet out of the private
+      // Space. Skip Electron's process transform so this write cannot reveal
+      // the Dock icon; fullscreen visibility is handled by auto-hide.
       if (!getAlwaysOnTop() && isPetWindow(win)) {
         win.setAlwaysOnTop(false);
-        win.setVisibleOnAllWorkspaces(true);
+        win.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true });
         return;
       }
       // While a text field inside a bubble is focused it must drop out of
@@ -426,21 +417,9 @@ function createTopmostRuntime(options = {}) {
   // faded value rather than snapping the pet opaque over the input box.
   function syncImeEditingPetDodge() {
     if (!isMac) return;
-    // #1275: with the master always-on-top pref off the pet already lives in
-    // the normal band, where bubbles and the pet share insertion order —
-    // there is nothing to step back from, and the dodge's restore leg
-    // (restorePetDelegate) would re-delegate the pet into the SkyLight
-    // private space and put it back ABOVE ordinary windows, defeating the
-    // pref. Unwind a dodge that was active when the pref flipped instead.
-    if (!getAlwaysOnTop()) {
-      if (imeEditingPetDodge) {
-        imeEditingPetDodge = false;
-        imeEditingFadeFallback = false;
-        fadePetWindow(1);
-        if (!isDragLocked()) setImeEditingPetDodge(false);
-      }
-      return;
-    }
+    // #1275: the Mac launch value is fixed; a non-topmost pet never needs
+    // a dodge whose restore would delegate it back above ordinary windows.
+    if (!getAlwaysOnTop()) return;
     const overlap = petOverlapsTextInputBubble();
     if (overlap !== imeEditingPetDodge) {
       imeEditingPetDodge = overlap;
@@ -788,7 +767,7 @@ function createTopmostRuntime(options = {}) {
   }
 
   function syncFullscreenAutoHide(fullscreenObservation) {
-    if (!isWin) return;
+    if (!isWin && !isMac) return;
     const fullscreenId = fullscreenObservation || null;
     const hasWindowIdentity = typeof fullscreenId === "string" && fullscreenId.length > 0;
     const autoHideEnabled = !!getFullscreenAutoHide();
@@ -848,6 +827,9 @@ function createTopmostRuntime(options = {}) {
   }
 
   function syncFocusablePollTick() {
+    // #1275: default Mac settings need no native probe or window writes.
+    // Keep polling a hidden pet so disabling auto-hide can still restore it.
+    if (isMac && !isWin && !getFullscreenAutoHide() && !isFullscreenAutoHidden()) return;
     // One native observation per tick keeps focusability and visibility on the
     // same foreground snapshot during rapid Alt-Tab/tray transitions.
     const fullscreenObservation = isForegroundFullscreen();
@@ -856,7 +838,7 @@ function createTopmostRuntime(options = {}) {
   }
 
   function startFocusablePoll() {
-    if (!isWin || focusablePoll) return;
+    if ((!isWin && !isMac) || focusablePoll) return;
     // Sync once up front: if Clawd starts (or this re-arms) while a fullscreen
     // game is already foreground, drop the hit window's activation immediately
     // rather than leaving it activatable for up to one poll interval (the hit
@@ -874,20 +856,10 @@ function createTopmostRuntime(options = {}) {
     }
   }
 
-  // #1275: apply the master always-on-top preference right now, on every
-  // platform. Fired by main.js when the pref changes (and safe to call any
-  // time): OFF demotes the pet body immediately instead of waiting for the
-  // next watchdog tick, ON restores the platform's normal topmost treatment.
-  // macOS routes through reapplyMacVisibility because the level there is
-  // maintained by the stationary-collection machinery, not setAlwaysOnTop
-  // alone; Windows routes through reassertWinTopmost which demotes under the
-  // pref; other platforms (Linux) have no maintenance loop, so the writes
-  // happen here directly.
+  // #1275: Windows and Linux apply immediately. On macOS a pet that entered
+  // the private Space cannot return to all ordinary Spaces without a restart.
   function applyPetAlwaysOnTopPreference() {
-    if (isMac) {
-      reapplyMacVisibility();
-      return;
-    }
+    if (isMac) return;
     if (isWin) {
       reassertWinTopmost();
       return;

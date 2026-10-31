@@ -376,23 +376,17 @@ const SCHEMA = {
   // re-exposed.
   fullscreenOverlay: { type: "boolean", default: true },
   // #935: opt-in auto-hide — when a real fullscreen app owns the foreground
-  // (win-fullscreen-detect probe), hide the pet + its floating surfaces
+  // (Windows or macOS native Space probe, #1275), hide the pet + floating surfaces
   // entirely and restore them when fullscreen ends. Takes precedence over
   // fullscreenOverlay while active (a hidden pet has nothing to overlay).
-  // Windows-only in effect: the probe is constant false elsewhere. Default OFF
-  // so existing behavior — overlay by default, #538 stand-down as the escape
-  // hatch — is untouched.
+  // Windows and macOS only. Default OFF preserves the existing overlay;
+  // a non-topmost Mac pet also auto-hides, but leaves approvals visible.
   fullscreenAutoHide: { type: "boolean", default: false },
-  // #1275: master always-on-top switch for the pet body (render + hit
-  // windows). Default ON keeps the desktop-pet contract — the pet floats
-  // above normal windows and (macOS) fullscreen apps. OFF demotes both
-  // windows to the normal band, on every platform: other windows can cover
-  // the pet, and on macOS it no longer joins fullscreen Spaces (its
-  // #562/#538/#935 fullscreen story is moot once it is not topmost). Only
-  // the pet body is governed; permission bubbles, HUD, update bubble and
-  // quota rings keep their own topmost behavior — they are actionable or
-  // deliberately adjacent, and the pet's reassert machinery must not fight
-  // the user's explicit demotion.
+  // #1275: controls the pet body (render + hit windows). Default ON keeps
+  // it above normal windows and macOS fullscreen apps. OFF lets windows cover
+  // it; Mac also hides it and adjacent surfaces in native fullscreen while
+  // keeping permission bubbles visible. Mac applies the launch value because
+  // private-Space membership cannot be undone across all Spaces at runtime.
   petAlwaysOnTop: { type: "boolean", default: true },
   // #1183: escape hatch for machines whose GPU compositor draws the
   // transparent pet window as an opaque black square once part of it leaves
