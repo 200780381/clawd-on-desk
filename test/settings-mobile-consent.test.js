@@ -201,6 +201,12 @@ test("all language packs define pairing and partial-reset messages", () => {
   }
 });
 
+test("the revoke-old-token confirmation names the reset button of its own language", () => {
+  for (const [locale, strings] of Object.entries(i18nContext.ClawdSettingsI18n.STRINGS)) {
+    assert.ok(strings.mobileRevokeLegacyConfirm.includes(strings.mobileReset), locale);
+  }
+});
+
 const DEVICE = {
   id: "d_0123456789abcdef",
   name: "iPhone · Safari",
@@ -386,6 +392,20 @@ test("legacy row appears only while active and requires confirmation", async () 
   assert.equal(h.legacyRevokes(), 1);
   assert.equal(h.body.querySelector(".mobile-device-revoke"), null);
   assert.ok(textOf(h.body).includes(h.strings.mobileDevicesEmpty));
+});
+
+test("legacy row explains that the old link stays valid until revoked, in every language", async () => {
+  for (const lang of Object.keys(i18nContext.ClawdSettingsI18n.STRINGS)) {
+    const h = mobileDevicesHarness({ lang, legacyActive: true });
+    await flushMobileUi();
+    const [paired, legacy] = h.body.querySelectorAll(".mobile-device-row");
+    assert.ok(h.strings.mobileLegacyDevicesDesc, `${lang}.mobileLegacyDevicesDesc`);
+    assert.deepEqual(
+      legacy.querySelectorAll(".row-desc").map((node) => node.textContent),
+      [h.strings.mobileLegacyDevicesDesc],
+    );
+    assert.ok(!textOf(paired).includes(h.strings.mobileLegacyDevicesDesc));
+  }
 });
 
 for (const failure of ["device", "legacy", "partial"]) {
