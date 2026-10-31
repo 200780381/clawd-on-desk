@@ -62,6 +62,7 @@ const FROZEN_KEYS = [
   "roamConstrainAxis",
   "keepSizeAcrossDisplays",
   "fullscreenAutoHide",
+  "petAlwaysOnTop",
   "openAtLogin",
   "disableHardwareAcceleration",
   "hideBubbles",
@@ -92,6 +93,7 @@ const EXPECTED_KEYS = {
     "size",
     "keepSizeAcrossDisplays",
     "testReactionsEnabled",
+    "petAlwaysOnTop",
     "allowEdgePinning",
     "disableMiniMode",
     "freeRoam",
@@ -436,6 +438,7 @@ function makeSnapshot(overrides = {}) {
     roamConstrainAxis: false,
     testReactionsEnabled: false,
     fullscreenAutoHide: false,
+    petAlwaysOnTop: true,
     soundMuted: false,
     soundVolume: 0.5,
     flashTaskbarOnComplete: true,
@@ -720,10 +723,11 @@ describe("settings tab split", () => {
 
   it("renders the five pages in the planned section and row order", () => {
     const pet = createHarness({ tab: "pet", snapshot: makeSnapshot({ lang: "zh" }) });
-    assert.deepStrictEqual(sectionTitles(pet), ["大小", "走动与位置", "反应"]);
+    assert.deepStrictEqual(sectionTitles(pet), ["大小", "走动与位置", "窗口置顶", "反应"]);
     assert.deepStrictEqual(sectionRowLabels(pet), [
       ["大小", "跨显示器保持大小"],
       ["自由漫步", "移动方式", "活动范围", "允许贴靠屏幕边缘", "关闭极简模式", "全屏时自动隐藏"],
+      ["桌宠保持在最前"],
       ["测试结果动画"],
     ]);
 
@@ -1609,5 +1613,102 @@ describe("settings tab split", () => {
       }
       assert.strictEqual(localHarness.core.state.transientUiState.generalSwitches.has("soundMuted"), false);
     }
+  });
+});
+
+describe("#1275: pet visibility settings", () => {
+  for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) {
+    it(`#1275: fullscreen auto-hide row on ${platform}`, () => {
+      const h = createHarness({ tab: "pet", platform });
+      assert.strictEqual(!!h.getSwitch("fullscreenAutoHide"), platform !== "Linux x86_64");
+    });
+  }
+
+  for (const launch of [true, false]) {
+    it(`#1275: Mac topmost launch=${launch} offers restart only while saved value differs`, async () => {
+      const h = createHarness({
+        tab: "pet",
+        platform: "MacIntel",
+        snapshot: makeSnapshot({ petAlwaysOnTop: launch }),
+        settingsAPI: { getStartupRenderState: () => Promise.resolve({ petAlwaysOnTop: launch }) },
+      });
+      await h.settle();
+      const row = () => h.core.state.mountedControls.generalSwitches.get("petAlwaysOnTop").row;
+      const restartButton = () => row().querySelectorAll("button")
+        .find((button) => button.textContent === "Restart Clawd") || null;
+      assert.strictEqual(restartButton(), null);
+      assert.strictEqual(row().querySelector(".row-desc").textContent,
+        h.core.helpers.t("rowPetAlwaysOnTopDescMac"));
+      assert.strictEqual(row().querySelector(".row-desc-extra"), null);
+
+      h.apply("petAlwaysOnTop", !launch);
+      await h.settle();
+      assert.ok(restartButton());
+      assert.strictEqual(row().querySelector(".row-desc-extra").textContent,
+        h.core.helpers.t("rowDisableHardwareAccelerationRestartPending"));
+      restartButton().click();
+      await h.settle();
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(h.commandCalls)), [
+        { action: "restartClawd", payload: { confirmed: true } },
+      ]);
+
+      h.apply("petAlwaysOnTop", launch);
+      await h.settle();
+      assert.strictEqual(restartButton(), null);
+      assert.strictEqual(row().querySelector(".row-desc-extra"), null);
+    });
+  }
+
+  it("#1275: both restart-pending transitions refuse patchInPlace before changing controls", async () => {
+    const h = createHarness({
+      tab: "pet",
+      platform: "MacIntel",
+      snapshot: makeSnapshot({ petAlwaysOnTop: true }),
+      settingsAPI: { getStartupRenderState: () => Promise.resolve({ petAlwaysOnTop: true }) },
+    });
+    await h.settle();
+    for (const value of [false, true]) {
+      const control = h.getSwitch("petAlwaysOnTop");
+      const before = control.classList.contains("on");
+      h.core.state.snapshot = { ...h.core.state.snapshot, petAlwaysOnTop: value };
+      assert.strictEqual(h.core.tabs.pet.patchInPlace({ petAlwaysOnTop: value }), false);
+      assert.strictEqual(control.classList.contains("on"), before);
+      h.render();
+      assert.strictEqual(h.getSwitch("petAlwaysOnTop").classList.contains("on"), value);
+    }
+  });
+
+  it("#1275: missing startup topmost stays unknown and never offers a restart", async () => {
+    const h = createHarness({
+      tab: "pet",
+      platform: "MacIntel",
+      snapshot: makeSnapshot({ petAlwaysOnTop: true }),
+      settingsAPI: { getStartupRenderState: () => Promise.resolve({ hardwareAccelerationDisabled: false }) },
+    });
+    await h.settle();
+    const row = () => h.core.state.mountedControls.generalSwitches.get("petAlwaysOnTop").row;
+    assert.strictEqual(row().querySelector(".row-desc-extra"), null);
+    assert.ok(!row().querySelectorAll("button").some((button) => button.textContent === "Restart Clawd"));
+    h.apply("petAlwaysOnTop", false);
+    await h.settle();
+    assert.strictEqual(row().querySelector(".row-desc-extra"), null);
+    assert.ok(!row().querySelectorAll("button").some((button) => button.textContent === "Restart Clawd"));
+  });
+
+  it("#1275: Windows uses the immediate-effect description with no restart prompt", async () => {
+    const h = createHarness({
+      tab: "pet",
+      platform: "Win32",
+      snapshot: makeSnapshot({ petAlwaysOnTop: false }),
+      settingsAPI: { getStartupRenderState: () => Promise.resolve({ petAlwaysOnTop: true }) },
+    });
+    await h.settle();
+    const row = () => h.core.state.mountedControls.generalSwitches.get("petAlwaysOnTop").row;
+    assert.strictEqual(row().querySelector(".row-desc").textContent,
+      h.core.helpers.t("rowPetAlwaysOnTopDesc"));
+    assert.strictEqual(row().querySelector(".row-desc-extra"), null);
+    h.apply("petAlwaysOnTop", true);
+    await h.settle();
+    assert.strictEqual(row().querySelector(".row-desc-extra"), null);
   });
 });

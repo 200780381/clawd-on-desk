@@ -21,6 +21,8 @@ AppImage 的 FUSE wrapper 被提前终止时，Electron 仍可能在退出清理
 
 Windows 的 hit window 在原生 activation controller 可用时按前台全屏状态切换 `WS_EX_NOACTIVATE`：非全屏时清除该扩展样式，全屏时重新设置以避免点击和拖拽把前台切到 Clawd。Electron 内部保持 non-focusable；首次显示前安装的 `WM_MOUSEACTIVATE` hook 通过一次性 `Chrome.IgnoreMouseActivate` 属性让 Chromium 对该消息返回 `MA_NOACTIVATE`（不因这条消息激活窗口，也不丢弃鼠标输入），避免 `MA_NOACTIVATEANDEAT` 吞掉点击。该消息的返回值不保证普通桌面点击始终保持 OS 前台归属，相关限制见 Known Limits。输入窗口仍和渲染窗口分离，并永久接收 mouse events。
 
+桌宠本体的置顶由主开关 `petAlwaysOnTop`（默认开；Settings → 桌宠 →「窗口置顶」，#1275）统一治理。Windows / Linux 切换立即生效；macOS 取启动值，运行中修改后设置行显示「尚未生效」与重启按钮，切回启动值则消失。Mac 窗口进入 SkyLight 私有 Space 后无法在运行中退回全部普通 Space，因此关闭状态必须从启动时就不委托到私有 Space：render + hit 保持普通层级和全部 Space 可见性，cross-space 写入使用 `skipTransformProcessType` 避免调出 Dock 图标；#640 IME 重叠避让停用，防止 restore 重新委托。Mac 关闭状态遇到前台原生全屏时，1 秒轮询隐藏桌宠、HUD、额度环和更新气泡，审批气泡照常显示。关闭状态的桌宠隐藏使用渲染窗口透明度 0、输入窗口鼠标穿透，恢复时只还原透明度；实测调用 `hide()` 会让退出全屏后的窗口只留在一个 Space，无法继续跟随全部桌面。Windows 的 `reassertWinTopmost` / topmost guard / 拖拽 nudge / HWND 恢复 / watchdog 在关闭状态幂等降级（先 render 后 hit，`isAlwaysOnTop()` 去重），菜单关闭也不重新置顶。Windows 关闭状态下按下桌宠和菜单关闭时，按渲染、输入顺序将两个窗口一起提到普通层最前，避免输入窗口单独盖在别的窗口上。Linux 无维护循环，pref 变更时直接对两个窗口写 `setAlwaysOnTop`。浮层保留各自的 topmost 行为；显式全屏自动隐藏独立控制浮层可见性。
+
 ## State Machine
 
 - 多会话追踪：`sessions` Map 按 `session_id` 独立记录状态，`resolveDisplayState()` 取最高优先级
@@ -34,7 +36,8 @@ Windows 的 hit window 在原生 activation controller 可用时按前台全屏�
 - 逻辑状态与真正显示的视觉也彼此分离：所有 state、reaction、随机 idle、低功耗替换和回退都先生成带 `visualGeneration` 的显示请求；renderer 结算后，main 才提交 `{ displayState, file, hitBox, source, visualGeneration }`。原生 hit window、配饰投影与 Presence 只读这份 committed visual，输入窗口仍即时读取逻辑状态做反应门控
 - DND 模式：跳过 dozing，直接 yawning → collapsing → sleeping；同时屏蔽 hook 事件
 - 隐藏桌宠（petHidden，入口：托盘 / 右键菜单 / 快捷键）：语义是「看不见宠物」而非免打扰——隐藏时收起宠物、Session HUD、update bubble 和当时 pending 的权限气泡（恢复显示时回来），但隐藏期间新到的权限请求仍照常弹气泡，这是有意设计、不要当 bug 修；要连权限气泡都静默是 DND 的职责（它有回终端确认的 fallback）。Allow/Deny 全局快捷键跟随「可见气泡」：隐藏期间只要有可见气泡就保持注册，但只作用于可见的请求，收起的旧气泡不会被盲操作（#601）。petHidden 不持久化，重启恢复显示
-- Windows 全屏自动隐藏会同时收起桌宠与浮层，并压住全屏期间新到的本地权限请求；退出全屏只恢复仍 pending 且未被其他隐藏条件排除的请求。它不同于手动 petHidden 的新请求例外。隐藏本身不产生决定，远程审批通道与用户配置的 auto-close 仍按原合同运行。
+- Windows / macOS 显式开启的全屏自动隐藏（#935/#1275）会同时收起桌宠与浮层，并压住全屏期间新到的本地权限请求；退出全屏只恢复仍 pending 且未被其他隐藏条件排除的请求。它不同于手动 petHidden 的新请求例外。隐藏本身不产生决定，远程审批通道与用户配置的 auto-close 仍按原合同运行。
+- macOS 全屏检测只认活动原生 Space（type 4，分屏也算），不识别播放器自行铺满窗口；多屏按活动 Space 判断。默认置顶且自动隐藏关闭时不加载或调用探针。手动「显示桌宠」覆盖当前全屏隐藏，下一次全屏 Space 恢复隐藏。
 - working 子动画：Clawd 主题为 1 个会话 → typing，2 个 → headphones groove，3+ → building；Calico / Cloudling 仍为 typing / juggling / building；官方可下载主题 Hash Sage（可选安装）为执笔制符 / 御剑哈希符文 / 纸灵忙碌协作，Whale-chan（鲸鱼娘，可选安装）为今天也在努力呀 / 魔法添饭 / 雨天踩水
 - juggling 子动画：1 个 subagent → juggling，2+ → conducting（Hash Sage：1 → 御剑哈希符文，2+ → 纸灵忙碌协作；Whale-chan：1+ → 魔法添饭）
 
@@ -96,7 +99,7 @@ Pages mount only their active panel's content and retain ownership of rendering,
 exit cleanup, drafts, persistence and scrolling. An existing `panels` Map may be
 passed when rebuilding only the sidebar, preserving the mounted page.
 
-设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限与审批（本机处理 / IM 渠道 / 局域网审批三个子页，远程渠道的身体由 `settings-tab-telegram-approval.js` 提供；每张渠道卡分三层：卡头一句状态 + 启用开关，没配好只有「开始配置」块，配好后是「连接 / 通知 / 高级」分组加卡底「发送测试」）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
+设置页按「它是什么东西」分 tab：通用（语言、文字大小、启动与系统）、桌宠（大小、走动、贴边、置顶、反应）、通知（声音、托盘闪烁、气泡）、会话（会话 HUD、额度环与提醒、超时清理、会话面板）、权限与审批（本机处理 / IM 渠道 / 局域网审批三个子页，远程渠道的身体由 `settings-tab-telegram-approval.js` 提供；每张渠道卡分三层：卡头一句状态 + 启用开关，没配好只有「开始配置」块，配好后是「连接 / 通知 / 高级」分组加卡底「发送测试」）。每个 tab 的 `patchInPlace` 只认自己渲染的键，别的 tab 的键一律返回 false 交给核心整页重画。新增开关放到它所属对象的 tab 里（例如新的气泡选项进「通知」，新的 HUD 子开关进「会话」），不要塞回「通用」。侧栏分组用 `SIDEBAR_TABS` 项的 `groupStart: true` 标记，渲染时加 `sidebar-item-group-start` 类画分隔线。
 
 Tabs use manual activation: arrows/Home/End move focus; Enter/Space/click activate.
 Horizontal tabs leave Up/Down available for scrolling; the vertical sidebar uses

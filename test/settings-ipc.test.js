@@ -229,6 +229,7 @@ function createHarness(overrides = {}) {
     getLang: overrides.getLang || (() => "en"),
     getSizeContext: overrides.getSizeContext,
     getHardwareAccelerationDisabledAtStartup: overrides.getHardwareAccelerationDisabledAtStartup,
+    getPetAlwaysOnTopAtStartup: overrides.getPetAlwaysOnTopAtStartup,
     roamFenceSettings,
     roamFencePicker,
     settingsSizePreviewSession,
@@ -762,14 +763,14 @@ test("settings IPC reports the GPU mode this process launched with (#1183)", asy
   const off = createHarness();
   assert.deepStrictEqual(
     await off.ipcMain.invoke("settings:get-startup-render-state"),
-    { hardwareAccelerationDisabled: false },
+    { hardwareAccelerationDisabled: false, petAlwaysOnTop: true },
   );
   off.runtime.dispose();
 
   const on = createHarness({ getHardwareAccelerationDisabledAtStartup: () => true });
   assert.deepStrictEqual(
     await on.ipcMain.invoke("settings:get-startup-render-state"),
-    { hardwareAccelerationDisabled: true },
+    { hardwareAccelerationDisabled: true, petAlwaysOnTop: true },
   );
   on.runtime.dispose();
 });
@@ -1888,4 +1889,16 @@ test("official theme uninstall reports unpacked space and labels archive-only fa
   assert.doesNotMatch(dialogs[2].detail, /\?\s*MB|frees about/i);
 
   harness.runtime.dispose();
+});
+
+
+test("#1275: startup render state reports both pet topmost launch values", async () => {
+  for (const launch of [false, true]) {
+    const h = createHarness({ getPetAlwaysOnTopAtStartup: () => launch });
+    assert.deepStrictEqual(await h.ipcMain.invoke("settings:get-startup-render-state"), {
+      hardwareAccelerationDisabled: false,
+      petAlwaysOnTop: launch,
+    });
+    h.runtime.dispose();
+  }
 });

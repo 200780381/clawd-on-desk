@@ -234,6 +234,7 @@ describe("updateRegistry pure-data validators", () => {
       "testReactionsEnabled",
       "allowEdgePinning", "disableMiniMode", "codexHookHealthNotifyEnabled",
       "quotaMergeSources", "freeRoam", "roamConstrainAxis",
+      "petAlwaysOnTop",
     ]) {
       assert.strictEqual(updateRegistry[key](true, deps).status, "ok", `${key}(true)`);
       assert.strictEqual(updateRegistry[key](false, deps).status, "ok", `${key}(false)`);

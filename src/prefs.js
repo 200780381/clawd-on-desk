@@ -376,13 +376,18 @@ const SCHEMA = {
   // re-exposed.
   fullscreenOverlay: { type: "boolean", default: true },
   // #935: opt-in auto-hide — when a real fullscreen app owns the foreground
-  // (win-fullscreen-detect probe), hide the pet + its floating surfaces
+  // (Windows or macOS native Space probe, #1275), hide the pet + floating surfaces
   // entirely and restore them when fullscreen ends. Takes precedence over
   // fullscreenOverlay while active (a hidden pet has nothing to overlay).
-  // Windows-only in effect: the probe is constant false elsewhere. Default OFF
-  // so existing behavior — overlay by default, #538 stand-down as the escape
-  // hatch — is untouched.
+  // Windows and macOS only. Default OFF preserves the existing overlay;
+  // a non-topmost Mac pet also auto-hides, but leaves approvals visible.
   fullscreenAutoHide: { type: "boolean", default: false },
+  // #1275: controls the pet body (render + hit windows). Default ON keeps
+  // it above normal windows and macOS fullscreen apps. OFF lets windows cover
+  // it; Mac also hides it and adjacent surfaces in native fullscreen while
+  // keeping permission bubbles visible. Mac applies the launch value because
+  // private-Space membership cannot be undone across all Spaces at runtime.
+  petAlwaysOnTop: { type: "boolean", default: true },
   // #1183: escape hatch for machines whose GPU compositor draws the
   // transparent pet window as an opaque black square once part of it leaves
   // the virtual desktop (edge snap / mini mode). Read once at startup, before

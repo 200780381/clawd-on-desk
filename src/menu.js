@@ -446,7 +446,11 @@ module.exports = function initMenu(ctx) {
           if (isMac) {
             ctx.reapplyMacVisibility();
           } else if (isWin) {
-            ctx.win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+            if (ctx.petAlwaysOnTop === false) {
+              ctx.raisePetWindows();
+            } else {
+              ctx.win.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+            }
           }
         }
       },

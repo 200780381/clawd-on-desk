@@ -239,14 +239,20 @@ if (isWin) {
   }
 }
 
-// ── Windows: foreground-fullscreen probe (suppress topmost over games) ──
-// Best-effort; degrades to "never fullscreen" if koffi/user32 is unavailable,
-// so a broken probe can never hide the pet.
+// ── Foreground fullscreen: Windows windows / macOS active native Space ──
+// #1275: both probes degrade to "never fullscreen" if native loading fails,
+// so a broken probe cannot hide the pet.
 const { createForegroundFullscreenProbe } = require("./win-fullscreen-detect");
-const _isForegroundFullscreen = createForegroundFullscreenProbe({
-  isWin,
-  onError: (err) => console.warn("Clawd: win-fullscreen-detect not available:", err && err.message),
-});
+const { createMacFullscreenProbe } = require("./mac-fullscreen-detect");
+const _isForegroundFullscreen = isMac
+  ? createMacFullscreenProbe({
+    isMac,
+    onError: (err) => console.warn("Clawd: mac-fullscreen-detect not available:", err && err.message),
+  })
+  : createForegroundFullscreenProbe({
+    isWin,
+    onError: (err) => console.warn("Clawd: win-fullscreen-detect not available:", err && err.message),
+  });
 const _hitWindowActivationRuntime = createHitWindowActivationRuntime({
   isWin,
   getHitWindow: () => hitWin,
@@ -1193,6 +1199,9 @@ const petWindowRuntime = createPetWindowRuntime({
   getCurrentPixelSize: () => getCurrentPixelSize(),
   getEffectiveCurrentPixelSize: (workArea) => getEffectiveCurrentPixelSize(workArea),
   getAllowEdgePinning: () => allowEdgePinningCached,
+  // #1275: gates creation-time and size-preview topmost writes; runtime-level
+  // reassert paths gate themselves inside topmost-runtime.
+  getAlwaysOnTop: () => getPetAlwaysOnTopEffective(),
   getPrimaryWorkAreaSafe: () => getPrimaryWorkAreaSafe(),
   getNearestWorkArea,
   sendToRenderer,
@@ -1206,7 +1215,9 @@ const petWindowRuntime = createPetWindowRuntime({
   showFloatingSurfacesForPet: () => floatingWindowRuntime.showFloatingSurfacesForPet(),
   hideFloatingSurfacesForPet: () => floatingWindowRuntime.hideFloatingSurfacesForPet(),
   setFloatingSurfacesFullscreenSuppressed: (suppressed) => (
-    floatingWindowRuntime.setFullscreenSuppressedForPet(suppressed)
+    floatingWindowRuntime.setFullscreenSuppressedForPet(suppressed, {
+      includePermissionSurfaces: fullscreenAutoHideCached,
+    })
   ),
   // Lazy-bound like isMiniAnimating below — topmostRuntime is constructed
   // after petWindowRuntime, but this closure only fires on a user gesture,
@@ -1408,6 +1419,12 @@ let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
 let fullscreenOverlayCached = _settingsController.get("fullscreenOverlay");
 let fullscreenAutoHideCached = _settingsController.get("fullscreenAutoHide");
+// #1275: master always-on-top preference for the pet body.
+let petAlwaysOnTopCached = _settingsController.get("petAlwaysOnTop");
+const petAlwaysOnTopAtStartup = petAlwaysOnTopCached;
+function getPetAlwaysOnTopEffective() {
+  return isMac ? petAlwaysOnTopAtStartup : petAlwaysOnTopCached;
+}
 let textScale = _settingsController.get("textScale");
 let textScaleByDisplay = _settingsController.get("textScaleByDisplay");
 // Transient slider-drag override for ONE display — the one the settings
@@ -1990,7 +2007,13 @@ const themeFadeSequencer = createThemeFadeSequencer({
   // #640: while the pet dodges an editing bubble its baseline opacity is the
   // faded value, not 1 — restoring to 1 mid-edit would plant an opaque pet on
   // top of the box being typed into. (Lazy: topmostRuntime is defined below.)
-  getRestoreOpacity: () => topmostRuntime.getPetTargetOpacity(),
+  // #1275: a hidden non-topmost Mac pet stays shown at opacity 0 to retain
+  // its Space membership; finishing a theme fade must preserve that hiding.
+  getRestoreOpacity: () => (
+    isMac && !getPetAlwaysOnTopEffective() && petWindowRuntime.isPetEffectivelyHidden()
+      ? 0
+      : topmostRuntime.getPetTargetOpacity()
+  ),
   fadeOutMs: THEME_SWITCH_FADE_OUT_MS,
   fadeInMs: THEME_SWITCH_FADE_IN_MS,
   fallbackMs: THEME_SWITCH_FADE_FALLBACK_MS,
@@ -2058,9 +2081,12 @@ const topmostRuntime = createTopmostRuntime({
   getForegroundFullscreenObservation: () => _isForegroundFullscreen.getLastObservation(),
   isFullscreenWindowAlive: (windowId) => _isForegroundFullscreen.isWindowIdAlive(windowId),
   getFullscreenOverlay: () => fullscreenOverlayCached,
+  // #1275: Mac uses the launch value to preserve all-Space membership;
+  // Windows and Linux demote the render + hit windows immediately.
+  getAlwaysOnTop: () => getPetAlwaysOnTopEffective(),
   // #935 fullscreen auto-hide: the pref gate plus pet-window-runtime's
   // dedicated visibility layer (stacked on the user's manual hide).
-  getFullscreenAutoHide: () => fullscreenAutoHideCached,
+  getFullscreenAutoHide: () => fullscreenAutoHideCached || (isMac && !getPetAlwaysOnTopEffective()),
   setFullscreenAutoHidden: (...args) => petWindowRuntime.setFullscreenAutoHidden(...args),
   isFullscreenAutoHidden: () => petWindowRuntime.isFullscreenAutoHidden(),
   setHitWinFocusable,
@@ -4604,6 +4630,7 @@ function showResumeInput(t) {
 
 const _menuCtx = {
   get win() { return win; },
+  get petAlwaysOnTop() { return getPetAlwaysOnTopEffective(); },
   get sessions() { return sessions; },
   cancelRoam: () => _roam.cancelRoam(),
   resetKeepSizeFrozen: () => resetKeepSizeFrozen(),
@@ -4781,6 +4808,7 @@ const _menuCtx = {
   clampToScreenVisual,
   getNearestWorkArea,
   reapplyMacVisibility,
+  raisePetWindows: () => topmostRuntime.raisePetWindows(),
   getSettingsWindow,
   getSystemVersion: () => process.getSystemVersion(),
   discoverThemes: () => themeLoader.discoverThemes(),
@@ -4833,6 +4861,12 @@ const SETTINGS_MIRROR_SETTERS = {
       topmostRuntime.clearFullscreenAutoHideOverride();
       petWindowRuntime.setFullscreenAutoHidden(false);
     }
+  },
+  // #1275: Mac needs a restart: once delegated into the private Space, the
+  // pet cannot return to all ordinary Spaces. Other platforms apply now.
+  petAlwaysOnTop: (v) => {
+    petAlwaysOnTopCached = v;
+    if (!isMac) topmostRuntime.applyPetAlwaysOnTopPreference();
   },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
@@ -5214,6 +5248,7 @@ const settingsIpcRuntime = registerSettingsIpc({
   }),
   getSizeContext: getSizeSliderContext,
   getHardwareAccelerationDisabledAtStartup: () => _hardwareAccelerationDisabledAtStartup,
+  getPetAlwaysOnTopAtStartup: () => petAlwaysOnTopAtStartup,
   sendToRenderer,
   getDoNotDisturb: () => doNotDisturb,
   getSoundMuted: () => soundMuted,
@@ -5460,7 +5495,10 @@ function createWindow() {
       petWindowRuntime.recoverVisiblePetAfterRendererLoad();
     },
     setDragLocked: (value) => {
-      if (value) _mini.cancelPendingMiniPeek(true);
+      if (value) {
+        _mini.cancelPendingMiniPeek(true);
+        topmostRuntime.raisePetWindows();
+      }
       petWindowRuntime.setDragLocked(value);
     },
     setMouseOverPet: (value) => { mouseOverPet = !!value; },
