@@ -25,6 +25,9 @@ const RATE_MAX = 60;
 const MAX_CLIENTS = 10;
 const SHUTDOWN_FORCE_CLOSE_MS = 250;
 const ROTATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// The PWA only ever sends `token_rotate_ack`; ws would otherwise accept 100 MiB
+// frames from any LAN client.
+const WS_MAX_PAYLOAD_BYTES = 4096;
 
 const PWA_DIR = path.resolve(__dirname, "../../pwa");
 const CANONICAL_ICON_DIR = path.resolve(__dirname, "../../assets/icons");
@@ -582,13 +585,14 @@ function initMobilePreviewServer(ctx) {
   // the process before start() could advance from 23334 to the next candidate.
   function attachWebSocketServer(server) {
     let socketServer;
+    const options = { server, path: "/ws", maxPayload: WS_MAX_PAYLOAD_BYTES };
     if (ctx && typeof ctx.createWebSocketServer === "function") {
-      socketServer = ctx.createWebSocketServer({ server, path: "/ws" });
+      socketServer = ctx.createWebSocketServer(options);
     } else {
       const WebSocketServer = ctx && ctx.WebSocketServer
         ? ctx.WebSocketServer
         : WebSocket.Server;
-      socketServer = new WebSocketServer({ server, path: "/ws" });
+      socketServer = new WebSocketServer(options);
     }
     wss = socketServer;
     // A post-listen server error is still surfaced by ws. Keep it observable
@@ -604,6 +608,8 @@ function initMobilePreviewServer(ctx) {
     });
 
     socketServer.on("connection", (ws, req) => {
+      // ws can still emit "error" (bad or oversized frame) on a socket we reject; with no listener that is uncaught.
+      ws.on("error", () => {});
       if (closed) {
         ws.close(1001, "Server shutting down");
         return;

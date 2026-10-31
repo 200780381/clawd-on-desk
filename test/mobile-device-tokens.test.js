@@ -6,6 +6,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
+const { Duplex } = require("node:stream");
+const WebSocket = require("ws");
 const { initMobilePreviewServer } = require("../src/network/mobile-preview-server");
 const { atomicWrite, hash } = require("../src/network/mobile-device-store");
 
@@ -31,6 +33,7 @@ async function fixture(t, options = {}) {
   let failDevices = false;
   let failToken = false;
   let socketServer;
+  let socketServerOptions;
   let serve;
   const logs = [];
   const server = initMobilePreviewServer({
@@ -48,7 +51,8 @@ async function fixture(t, options = {}) {
       http.close = (cb) => { http.listening = false; if (cb) cb(); };
       return http;
     },
-    createWebSocketServer() {
+    createWebSocketServer(wsOptions) {
+      socketServerOptions = wsOptions;
       socketServer = new EventEmitter();
       socketServer.close = (cb) => cb && cb();
       return socketServer;
@@ -56,13 +60,12 @@ async function fixture(t, options = {}) {
   });
   await server.start();
   t.after(async () => { await server.cleanup(); if (!options.dir) fs.rmSync(dir, { recursive: true, force: true }); });
-  function connect(params, ip = "127.0.0.1") {
-    const socket = new Socket();
+  function connect(params, ip = "127.0.0.1", socket = new Socket()) {
     socketServer.emit("connection", socket, { url: "/ws?" + new URLSearchParams(params), headers: { "user-agent": "iPhone Safari/17" }, socket: { remoteAddress: ip } });
     return socket;
   }
   return {
-    server, dir, tokenPath, devicesPath, logs, connect,
+    server, dir, tokenPath, devicesPath, logs, connect, socketServerOptions,
     read: () => JSON.parse(fs.readFileSync(devicesPath, "utf8")),
     time: (value) => { time = value; },
     failDevices: (value) => { failDevices = value; },
@@ -354,6 +357,86 @@ test("ten ponging data connections retain capacity; pairing is separate and one 
   sockets[0].close(1000);
   checkSnapshot(f.connect({ token: LEGACY }));
 });
+
+test("the WebSocket server caps client messages at 4096 bytes", async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.socketServerOptions.maxPayload, 4096);
+  assert.equal(f.socketServerOptions.path, "/ws");
+});
+
+// A rejected connection never gets the per-client listeners, yet ws can still
+// emit "error" on it when a late frame is invalid or over maxPayload.
+for (const [name, reject] of [
+  ["an invalid token", (f) => f.connect({ token: "invalid" })],
+  ["a rejected pairing", (f) => f.connect({ pair: f.server.getConnectionInfo().pairCode })],
+  ["a full server", (f) => {
+    for (let n = 0; n < 10; n++) f.connect({ token: LEGACY });
+    return f.connect({ token: LEGACY });
+  }],
+  ["a closed server", async (f) => {
+    await f.server.cleanup();
+    return f.connect({ token: LEGACY });
+  }],
+]) {
+  test(`a connection rejected for ${name} survives a late socket error`, async (t) => {
+    const f = await fixture(t);
+    const socket = await reject(f);
+    assert.notEqual(socket.code, undefined);
+    assert.doesNotThrow(() => socket.emit("error", new RangeError("Max payload size exceeded")));
+  });
+}
+
+// A masked client frame, as a browser writes it.
+function clientFrame(opcode, payload) {
+  const mask = Buffer.from([1, 2, 3, 4]);
+  const size = payload.length < 126 ? [0x80 | payload.length] : [0x80 | 126, payload.length >> 8, payload.length & 0xff];
+  const masked = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+  return Buffer.concat([Buffer.from([0x80 | opcode, ...size, ...mask]), masked]);
+}
+
+// Replaces the test runner's uncaughtException handlers until the test ends, so
+// an escaped error is an assertion here instead of a runner-level failure.
+function collectUncaught(t) {
+  const uncaught = [];
+  const runnerHandlers = process.listeners("uncaughtException");
+  process.removeAllListeners("uncaughtException");
+  process.on("uncaughtException", (error) => uncaught.push(error));
+  t.after(() => {
+    process.removeAllListeners("uncaughtException");
+    for (const handler of runnerHandlers) process.on("uncaughtException", handler);
+  });
+  return uncaught;
+}
+
+for (const [name, frame] of [
+  ["a reserved opcode", clientFrame(3, Buffer.from("x"))],
+  ["a frame over maxPayload", clientFrame(2, Buffer.alloc(5000))],
+]) {
+  test(`a real ws connection rejected for its token survives ${name} while it closes`, async (t) => {
+    const f = await fixture(t);
+    const uncaught = collectUncaught(t);
+    // Server-side ws over an in-memory duplex: no port and no HTTP upgrade.
+    const wire = new Duplex({ read() {}, write(_chunk, _encoding, done) { done(); } });
+    const ws = new WebSocket(null, undefined, {});
+    ws.setSocket(wire, Buffer.alloc(0), {
+      allowSynchronousEvents: true,
+      maxBufferedChunks: 1024 * 1024,
+      maxFragments: 128 * 1024,
+      maxPayload: f.socketServerOptions.maxPayload,
+      skipUTF8Validation: false,
+    });
+    t.after(() => wire.destroy());
+
+    f.connect({ token: "invalid" }, "127.0.0.1", ws);
+    assert.equal(ws.readyState, WebSocket.CLOSING);
+    wire.push(frame);
+    for (let tick = 0; tick < 3; tick++) await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(uncaught.map(String), []);
+    // ws handled the bad frame (it ended its side of the connection).
+    assert.equal(wire.writableEnded, true);
+  });
+}
 
 test("messages over 60 per window close 4003; ACK does not promote or revoke", async (t) => {
   const f = await fixture(t); const x = f.legacy();

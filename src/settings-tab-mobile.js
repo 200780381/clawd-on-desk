@@ -242,6 +242,11 @@
         migrated.textContent = t("mobileDeviceMigrated");
         text.appendChild(migrated);
       }
+    } else {
+      const legacy = document.createElement("div");
+      legacy.className = "row-desc";
+      legacy.textContent = t("mobileLegacyDevicesDesc");
+      text.appendChild(legacy);
     }
     const control = document.createElement("div");
     control.className = "row-control";

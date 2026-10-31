@@ -4618,6 +4618,9 @@ const _menuCtx = {
   // Recovery actions must defeat a stranded drag lock (syncHitWin defers while
   // it is held); see pet-window-runtime releaseStrandedDragLock.
   releaseStrandedDragLock: () => petWindowRuntime.releaseStrandedDragLock(),
+  // #1260: the context menu close callback releases a lock the menu's modal
+  // loop stranded (renderer normally ends the drag before the menu opens).
+  get dragLocked() { return petWindowRuntime.isDragLocked(); },
   get currentSize() { return currentSize; },
   set currentSize(v) { _settingsController.applyUpdate("size", v); },
   get doNotDisturb() { return doNotDisturb; },
