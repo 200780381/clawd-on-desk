@@ -238,6 +238,14 @@ class AptRepository(unittest.TestCase):
         self.assertTrue(any("/by-hash/" in url for url in requested))
         self.assertEqual([url for url in requested if "/./" in url], [])
 
+    def test_committed_public_key_matches_the_activation_record(self):
+        records = command("gpg", "--batch", "--show-keys", "--with-colons", str(ROOT / "distribution/apt/archive-key.asc")).stdout.decode()
+        fingerprints = [line.split(":")[9] for line in records.splitlines() if line.startswith("fpr:")]
+        self.assertTrue(fingerprints)
+        record = (ROOT / "docs/guides/apt-maintenance.md").read_text()
+        for fingerprint in fingerprints:
+            self.assertIn(fingerprint, record)
+
     def test_rejects_same_version_changed_bytes_rollback_and_identity_change(self):
         inputs = self.work / "input"
         shutil.copytree(self.inputs, inputs)

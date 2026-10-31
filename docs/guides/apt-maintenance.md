@@ -4,7 +4,14 @@ The source is an opt-in distribution channel for existing official `amd64` relea
 
 ## Activation record
 
-**Not activated by this change. No production public key/fingerprint has been provisioned.** Before activation, commit the reviewed armored public-key bundle as `distribution/apt/archive-key.asc` and replace this paragraph with the full primary fingerprint, key expiry, activation date, successful preview/production run links, and HTTPS/APT acceptance evidence. Never put secret-key material in the checkout, logs or artifacts.
+**Key provisioned 2026-10-31; first publication and acceptance are still pending.**
+
+- Primary fingerprint: `B315327BEFF98206ECC682875AC75344D51B2887` (RSA 4096, certification only, expires 2036-10-28).
+- Signing subkey: `B9BC4B583AB5651BEDCA5EB91757F4700BC2A311` (RSA 4096, expires 2029-10-30). Renew it by 2029-04-30, because installed sources only learn about new keys by upgrading `clawd-apt-source`.
+- Public bundle: `distribution/apt/archive-key.asc`. The primary secret and revocation certificate are kept offline in an encrypted disk image. Only the signing subkey is in the `apt-production` environment.
+- Preview run: [41150329833](https://github.com/rullerzhou-afk/clawd-on-desk/actions/runs/41150329833).
+
+After first publication, add the production run link and the HTTPS/APT acceptance evidence here. Never put secret-key material in the checkout, logs or artifacts.
 
 The source's address is `https://apt.clawdondesk.com/`: a DNS-only Cloudflare CNAME to `rullerzhou-afk.github.io`, with the files on this repository's Pages site. The hostname is written into every installed source, so it is one we own: hosting can later move by repointing DNS, without touching installed sources. Keep the record DNS-only, because GitHub cannot issue the certificate behind Cloudflare's proxy, and keep `clawdondesk.com` on auto-renew, because a lapsed domain breaks every installed source. This setup does not alter clawdondesk.com hosting.
 
